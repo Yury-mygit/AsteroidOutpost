@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Factory building body -->
+    <path
+        android:pathData="M3,20 L3,10 L8,10 L8,20 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Factory roof / tall section -->
+    <path
+        android:pathData="M8,20 L8,6 L16,6 L16,20 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Smokestacks -->
+    <path
+        android:pathData="M10,6 L10,3 M13,6 L13,3"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round" />
+
+    <!-- Window on tall section -->
+    <path
+        android:pathData="M10,9 L14,9 L14,12 L10,12 Z"
+        android:fillColor="#0A0A18" />
+
+    <!-- Base line -->
+    <path
+        android:pathData="M2,20 L22,20"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round" />
+
+    <!-- Plus sign (produce) -->
+    <path
+        android:pathData="M18,14 L22,14 M20,12 L20,16"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round" />
+
+</vector>

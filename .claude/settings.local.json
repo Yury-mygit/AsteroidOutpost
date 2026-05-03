@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew :app:tasks)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}

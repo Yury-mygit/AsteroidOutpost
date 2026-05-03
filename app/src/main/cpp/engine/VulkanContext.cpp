@@ -1,0 +1,1430 @@
+#include "VulkanContext.h"
+
+#include <android/log.h>
+#include <android/native_window.h>
+#include <vulkan/vulkan_android.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <random>
+#include <string>
+
+#include "RenderResources.h"
+#include "ShipMesh.h"
+#include "math/Mat4.h"
+
+#define LOG_TAG "stationcore"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+namespace station {
+    namespace {
+        // UBO now holds view + proj separately so the shader can do world-space lighting
+        struct UniformBufferObject {
+            float view[16];
+            float proj[16];
+        };
+
+        // Push constant: model matrix + tint color (80 bytes)
+        struct PushConstantData {
+            float model[16];
+            float tint[4];
+        };
+
+        struct ProjectedPoint {
+            bool visible = false;
+            float x = 0.0f;
+            float y = 0.0f;
+            float depth = 0.0f;
+        };
+
+        std::string vkRes(VkResult r) {
+            switch (r) {
+                case VK_SUCCESS:                     return "VK_SUCCESS";
+                case VK_ERROR_OUT_OF_HOST_MEMORY:    return "VK_ERROR_OUT_OF_HOST_MEMORY";
+                case VK_ERROR_OUT_OF_DEVICE_MEMORY:  return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+                case VK_SUBOPTIMAL_KHR:              return "VK_SUBOPTIMAL_KHR";
+                case VK_ERROR_OUT_OF_DATE_KHR:       return "VK_ERROR_OUT_OF_DATE_KHR";
+                default: return "VK_RESULT(" + std::to_string((int)r) + ")";
+            }
+        }
+
+        // Generate a simple star-field mesh: N points scattered on a large sphere
+        MeshData generateStars(uint32_t count, float radius) {
+            MeshData stars;
+            std::mt19937 rng(42);
+            std::uniform_real_distribution<float> theta(0.0f, 2.0f * 3.14159265f);
+            std::uniform_real_distribution<float> cosPhiDist(-1.0f, 1.0f);
+            std::uniform_real_distribution<float> brightness(0.5f, 1.0f);
+
+            stars.vertices.reserve(count);
+            stars.indices.reserve(count);
+
+            for (uint32_t i = 0; i < count; ++i) {
+                float t    = theta(rng);
+                float cosp = cosPhiDist(rng);
+                float sinp = std::sqrt(1.0f - cosp * cosp);
+                float b    = brightness(rng);
+
+                Vertex v{};
+                v.position[0] = radius * sinp * std::cos(t);
+                v.position[1] = radius * sinp * std::sin(t);
+                v.position[2] = radius * cosp;
+                // Stars: white-ish with slight blue tint
+                v.color[0] = b * 0.9f;
+                v.color[1] = b * 0.95f;
+                v.color[2] = b * 1.0f;
+                // Normal points inward (toward camera) — not used for stars
+                v.normal[0] = -v.position[0] / radius;
+                v.normal[1] = -v.position[1] / radius;
+                v.normal[2] = -v.position[2] / radius;
+
+                stars.vertices.push_back(v);
+                stars.indices.push_back((uint16_t)i);
+            }
+            return stars;
+        }
+
+        ProjectedPoint projectPoint(const math::Mat4& vp, const math::Vec3& p,
+                                    float width, float height) {
+            const float clipX = vp.m[0] * p.x + vp.m[4] * p.y + vp.m[8]  * p.z + vp.m[12];
+            const float clipY = vp.m[1] * p.x + vp.m[5] * p.y + vp.m[9]  * p.z + vp.m[13];
+            const float clipZ = vp.m[2] * p.x + vp.m[6] * p.y + vp.m[10] * p.z + vp.m[14];
+            const float clipW = vp.m[3] * p.x + vp.m[7] * p.y + vp.m[11] * p.z + vp.m[15];
+            if (clipW <= 0.0001f) return {};
+
+            const float ndcX = clipX / clipW;
+            const float ndcY = clipY / clipW;
+            const float ndcZ = clipZ / clipW;
+            if (ndcX < -1.25f || ndcX > 1.25f || ndcY < -1.25f || ndcY > 1.25f ||
+                ndcZ < -0.25f || ndcZ > 1.25f) {
+                return {};
+            }
+
+            ProjectedPoint out{};
+            out.visible = true;
+            out.x = (ndcX * 0.5f + 0.5f) * width;
+            out.y = (ndcY * 0.5f + 0.5f) * height;
+            out.depth = ndcZ;
+            return out;
+        }
+
+        math::Vec3 transformPoint(const float modelMatrix[16], const float point[3]) {
+            return {
+                    modelMatrix[0] * point[0] + modelMatrix[4] * point[1] +
+                    modelMatrix[8] * point[2] + modelMatrix[12],
+                    modelMatrix[1] * point[0] + modelMatrix[5] * point[1] +
+                    modelMatrix[9] * point[2] + modelMatrix[13],
+                    modelMatrix[2] * point[0] + modelMatrix[6] * point[1] +
+                    modelMatrix[10] * point[2] + modelMatrix[14]
+            };
+        }
+
+        float maxColumnScale(const float modelMatrix[16]) {
+            const float sx = std::sqrt(modelMatrix[0] * modelMatrix[0] +
+                                       modelMatrix[1] * modelMatrix[1] +
+                                       modelMatrix[2] * modelMatrix[2]);
+            const float sy = std::sqrt(modelMatrix[4] * modelMatrix[4] +
+                                       modelMatrix[5] * modelMatrix[5] +
+                                       modelMatrix[6] * modelMatrix[6]);
+            const float sz = std::sqrt(modelMatrix[8] * modelMatrix[8] +
+                                       modelMatrix[9] * modelMatrix[9] +
+                                       modelMatrix[10] * modelMatrix[10]);
+            return std::max({sx, sy, sz});
+        }
+
+        // Projects local Vec3 points through modelMatrix + VP, returns padded screen bounds.
+        // outBounds: [left, top, right, bottom, avgClipW]
+        bool projectLocalPointsToBounds(
+                const math::Mat4& vp,
+                const std::vector<math::Vec3>& localPts,
+                const float modelMatrix[16],
+                float padding, float viewW, float viewH,
+                float outBounds[5]) {
+            float minX =  std::numeric_limits<float>::max();
+            float maxX = -std::numeric_limits<float>::max();
+            float minY =  std::numeric_limits<float>::max();
+            float maxY = -std::numeric_limits<float>::max();
+            float wSum = 0.0f;
+            int   count = 0;
+
+            for (const math::Vec3& local : localPts) {
+                const float p[3] = {local.x, local.y, local.z};
+                const math::Vec3 world = transformPoint(modelMatrix, p);
+                const float clipX = vp.m[0]*world.x + vp.m[4]*world.y + vp.m[8]*world.z  + vp.m[12];
+                const float clipY = vp.m[1]*world.x + vp.m[5]*world.y + vp.m[9]*world.z  + vp.m[13];
+                const float clipW = vp.m[3]*world.x + vp.m[7]*world.y + vp.m[11]*world.z + vp.m[15];
+                if (clipW <= 0.0001f) continue;
+                const float ndcX = clipX / clipW;
+                const float ndcY = clipY / clipW;
+                if (ndcX < -1.25f || ndcX > 1.25f || ndcY < -1.25f || ndcY > 1.25f) continue;
+                const float sx = (ndcX * 0.5f + 0.5f) * viewW;
+                const float sy = (ndcY * 0.5f + 0.5f) * viewH;
+                minX = std::min(minX, sx); maxX = std::max(maxX, sx);
+                minY = std::min(minY, sy); maxY = std::max(maxY, sy);
+                wSum += clipW;
+                ++count;
+            }
+            if (count == 0) return false;
+
+            const float padX = (maxX - minX) * padding * 0.5f;
+            const float padY = (maxY - minY) * padding * 0.5f;
+            outBounds[0] = minX - padX;
+            outBounds[1] = minY - padY;
+            outBounds[2] = maxX + padX;
+            outBounds[3] = maxY + padY;
+            outBounds[4] = wSum / static_cast<float>(count); // avg clipW ≈ linear depth
+            return true;
+        }
+    } // namespace
+
+    // -----------------------------------------------------------------------
+    // Static helpers
+    // -----------------------------------------------------------------------
+    uint32_t VulkanContext::findMemoryType(VkPhysicalDevice pd, uint32_t filter,
+                                           VkMemoryPropertyFlags props) {
+        VkPhysicalDeviceMemoryProperties mp{};
+        vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+        for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+            if ((filter & (1u << i)) && (mp.memoryTypes[i].propertyFlags & props) == props)
+                return i;
+        return UINT32_MAX;
+    }
+
+    bool VulkanContext::createBuffer(VkPhysicalDevice pd, VkDevice dev,
+                                     VkDeviceSize size, VkBufferUsageFlags usage,
+                                     VkMemoryPropertyFlags props,
+                                     VkBuffer& outBuf, VkDeviceMemory& outMem) {
+        VkBufferCreateInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = size; bi.usage = usage; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VkResult r = vkCreateBuffer(dev, &bi, nullptr, &outBuf);
+        if (r != VK_SUCCESS) { LOGE("vkCreateBuffer: %s", vkRes(r).c_str()); return false; }
+
+        VkMemoryRequirements mr{};
+        vkGetBufferMemoryRequirements(dev, outBuf, &mr);
+
+        VkMemoryAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize  = mr.size;
+        ai.memoryTypeIndex = findMemoryType(pd, mr.memoryTypeBits, props);
+        if (ai.memoryTypeIndex == UINT32_MAX) { LOGE("findMemoryType failed"); return false; }
+
+        r = vkAllocateMemory(dev, &ai, nullptr, &outMem);
+        if (r != VK_SUCCESS) { LOGE("vkAllocateMemory: %s", vkRes(r).c_str()); return false; }
+
+        r = vkBindBufferMemory(dev, outBuf, outMem, 0);
+        if (r != VK_SUCCESS) { LOGE("vkBindBufferMemory: %s", vkRes(r).c_str()); return false; }
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // initDevice
+    // -----------------------------------------------------------------------
+    bool VulkanContext::initDevice() {
+        if (m_deviceReady) return true;
+
+        VkApplicationInfo appInfo{};
+        appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        appInfo.pApplicationName = "g3";
+        appInfo.pEngineName      = "stationcore";
+        appInfo.apiVersion       = VK_API_VERSION_1_1;
+
+        std::vector<const char*> exts = {
+                VK_KHR_SURFACE_EXTENSION_NAME,
+                VK_KHR_ANDROID_SURFACE_EXTENSION_NAME
+        };
+
+        VkInstanceCreateInfo ici{};
+        ici.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        ici.pApplicationInfo        = &appInfo;
+        ici.enabledExtensionCount   = (uint32_t)exts.size();
+        ici.ppEnabledExtensionNames = exts.data();
+
+        VkResult r = vkCreateInstance(&ici, nullptr, &m_instance);
+        if (r != VK_SUCCESS) { LOGE("vkCreateInstance: %s", vkRes(r).c_str()); return false; }
+
+        uint32_t n = 0;
+        vkEnumeratePhysicalDevices(m_instance, &n, nullptr);
+        if (!n) { LOGE("No Vulkan devices"); return false; }
+        std::vector<VkPhysicalDevice> devs(n);
+        vkEnumeratePhysicalDevices(m_instance, &n, devs.data());
+        m_physicalDevice = devs[0];
+
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+        LOGI("GPU: %s", props.deviceName);
+
+        m_deviceReady = true;
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // createSurface
+    // -----------------------------------------------------------------------
+    bool VulkanContext::createSurface(void* nativeHandle, int width, int height) {
+        if (nativeHandle != nullptr) {
+            if (m_device != VK_NULL_HANDLE) vkDeviceWaitIdle(m_device);
+            destroySwapchain();
+            if (m_surface != VK_NULL_HANDLE) {
+                vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+                m_surface = VK_NULL_HANDLE;
+            }
+
+            VkAndroidSurfaceCreateInfoKHR sci{};
+            sci.sType  = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+            sci.window = static_cast<ANativeWindow*>(nativeHandle);
+            VkResult sr = vkCreateAndroidSurfaceKHR(m_instance, &sci, nullptr, &m_surface);
+            if (sr != VK_SUCCESS) { LOGE("vkCreateAndroidSurfaceKHR: %d", sr); return false; }
+        }
+
+        if (m_device == VK_NULL_HANDLE) {
+            if (!pickQueueFamily()) return false;
+            if (!createDevice())    return false;
+            if (!createPipelineInfra()) return false;
+
+            // Create star-field mesh once
+            MeshData stars = generateStars(600, 45.0f);
+            m_starMesh.create(m_physicalDevice, m_device, stars);
+
+            // Corner-bracket frame mesh (LINE_LIST): 4 L-shaped corners, no full sides.
+            {
+                MeshData lineMesh;
+                Vertex lv{};
+                lv.color[0] = 0.0f; lv.color[1] = 1.0f; lv.color[2] = 0.0f; // pure green
+                lv.normal[0] = 0.0f; lv.normal[1] = 0.0f; lv.normal[2] = 1.0f;
+                // 12 vertices: 4 corners + 2 leg-ends each. leg = 30% of half-extent.
+                constexpr float H = 0.5f;   // half-extent
+                constexpr float L = 0.15f;  // leg length
+                const float pts[12][2] = {
+                    {-H,-H}, {-H+L,-H}, {-H,-H+L},  // top-left corner + 2 ends
+                    { H,-H}, { H-L,-H}, { H,-H+L},  // top-right
+                    { H, H}, { H-L, H}, { H, H-L},  // bottom-right
+                    {-H, H}, {-H+L, H}, {-H, H-L},  // bottom-left
+                };
+                for (auto& p : pts) {
+                    lv.position[0] = p[0]; lv.position[1] = p[1]; lv.position[2] = 0.0f;
+                    lineMesh.vertices.push_back(lv);
+                }
+                // 8 lines, each corner contributes 2
+                lineMesh.indices = {
+                    0,1,  0,2,   // top-left
+                    3,4,  3,5,   // top-right
+                    6,7,  6,8,   // bottom-right
+                    9,10, 9,11   // bottom-left
+                };
+                m_frameLineMesh.create(m_physicalDevice, m_device, lineMesh);
+
+                // Same geometry, enemy-red vertices.
+                for (auto& v : lineMesh.vertices) {
+                    v.color[0] = 1.0f; v.color[1] = 0.38f; v.color[2] = 0.34f;
+                }
+                m_frameLineMeshEnemy.create(m_physicalDevice, m_device, lineMesh);
+            }
+        }
+
+        if (!selectSurfaceProps(width, height)) return false;
+        if (!createSwapchain())                  return false;
+        if (!createSwapViews())                  return false;
+        if (!createDepthAndFramebuffers())        return false;
+        if (!createCommandInfra())               return false;
+        if (!createSyncObjects())                return false;
+
+        m_surfaceReady = true;
+        LOGI("Surface ready %dx%d", width, height);
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // destroySurface / destroy
+    // -----------------------------------------------------------------------
+    void VulkanContext::destroySurface() {
+        if (m_device != VK_NULL_HANDLE) vkDeviceWaitIdle(m_device);
+        destroySwapchain();
+        if (m_surface != VK_NULL_HANDLE) {
+            vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+            m_surface = VK_NULL_HANDLE;
+        }
+        m_surfaceReady = false;
+    }
+
+    void VulkanContext::destroy() {
+        if (m_device != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(m_device);
+            destroySwapchain();
+            m_starMesh.destroy(m_device);
+            m_frameLineMesh.destroy(m_device);
+            m_frameLineMeshEnemy.destroy(m_device);
+            for (uint32_t i = 0; i < kMaxMeshes; ++i)
+                if (m_meshUsed[i]) {
+                    m_meshPool[i].destroy(m_device);
+                    m_meshFramePoints[i].clear();
+                }
+            destroyPipelineInfra();
+            vkDestroyDevice(m_device, nullptr);
+            m_device = VK_NULL_HANDLE;
+            m_graphicsQueue = VK_NULL_HANDLE;
+        }
+        if (m_surface != VK_NULL_HANDLE) { vkDestroySurfaceKHR(m_instance, m_surface, nullptr); m_surface = VK_NULL_HANDLE; }
+        if (m_instance != VK_NULL_HANDLE) { vkDestroyInstance(m_instance, nullptr); m_instance = VK_NULL_HANDLE; }
+        m_physicalDevice = VK_NULL_HANDLE;
+        m_queueFamily    = UINT32_MAX;
+        m_deviceReady    = false;
+        m_surfaceReady   = false;
+        LOGI("VulkanContext destroyed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Device / queue helpers
+    // -----------------------------------------------------------------------
+    bool VulkanContext::pickQueueFamily() {
+        uint32_t qn = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &qn, nullptr);
+        std::vector<VkQueueFamilyProperties> qfp(qn);
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &qn, qfp.data());
+        for (uint32_t qi = 0; qi < qn; ++qi) {
+            VkBool32 present = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, qi, m_surface, &present);
+            if ((qfp[qi].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
+                m_queueFamily = qi;
+                LOGI("Queue family: %u", qi);
+                return true;
+            }
+        }
+        LOGE("No suitable queue family"); return false;
+    }
+
+    bool VulkanContext::createDevice() {
+        float prio = 1.0f;
+        VkDeviceQueueCreateInfo qci{};
+        qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qci.queueFamilyIndex = m_queueFamily; qci.queueCount = 1; qci.pQueuePriorities = &prio;
+        const char* ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        VkPhysicalDeviceFeatures supportedFeats{};
+        vkGetPhysicalDeviceFeatures(m_physicalDevice, &supportedFeats);
+        VkPhysicalDeviceFeatures feat{};
+        if (supportedFeats.wideLines) {
+            feat.wideLines = VK_TRUE;
+            m_wideLines = true;
+            LOGI("wideLines enabled");
+        }
+        VkDeviceCreateInfo dci{};
+        dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
+        dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = ext;
+        dci.pEnabledFeatures = &feat;
+        VkResult r = vkCreateDevice(m_physicalDevice, &dci, nullptr, &m_device);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDevice: %s", vkRes(r).c_str()); return false; }
+        vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_graphicsQueue);
+        LOGI("Logical device created");
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Surface / swapchain helpers
+    // -----------------------------------------------------------------------
+    bool VulkanContext::selectSurfaceProps(int width, int height) {
+        VkSurfaceCapabilitiesKHR caps{};
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physicalDevice, m_surface, &caps);
+
+        uint32_t fn = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &fn, nullptr);
+        std::vector<VkSurfaceFormatKHR> fmts(fn);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &fn, fmts.data());
+        m_sel.format = fmts[0];
+        for (auto& f : fmts)
+            if ((f.format == VK_FORMAT_R8G8B8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_UNORM)
+                && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { m_sel.format = f; break; }
+
+        uint32_t pn = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &pn, nullptr);
+        std::vector<VkPresentModeKHR> modes(pn);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &pn, modes.data());
+        m_sel.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        for (auto m : modes) if (m == VK_PRESENT_MODE_MAILBOX_KHR) { m_sel.presentMode = m; break; }
+
+        m_sel.extent = caps.currentExtent;
+        if (m_sel.extent.width == UINT32_MAX) {
+            m_sel.extent.width  = std::clamp((uint32_t)width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
+            m_sel.extent.height = std::clamp((uint32_t)height, caps.minImageExtent.height, caps.maxImageExtent.height);
+        }
+        m_sel.imageCount = caps.minImageCount + 1;
+        if (caps.maxImageCount > 0 && m_sel.imageCount > caps.maxImageCount)
+            m_sel.imageCount = caps.maxImageCount;
+
+        m_depthFormat = RenderResourcesBuilder::pickDepthFormat(m_physicalDevice);
+        m_camera.setAspect((float)m_sel.extent.width / (float)m_sel.extent.height);
+        return true;
+    }
+
+    bool VulkanContext::createSwapchain() {
+        VkSwapchainCreateInfoKHR ci{};
+        ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        ci.surface = m_surface; ci.minImageCount = m_sel.imageCount;
+        ci.imageFormat = m_sel.format.format; ci.imageColorSpace = m_sel.format.colorSpace;
+        ci.imageExtent = m_sel.extent; ci.imageArrayLayers = 1;
+        ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        ci.presentMode = m_sel.presentMode; ci.clipped = VK_TRUE;
+        VkResult r = vkCreateSwapchainKHR(m_device, &ci, nullptr, &m_swapchain);
+        if (r != VK_SUCCESS) { LOGE("vkCreateSwapchainKHR: %s", vkRes(r).c_str()); return false; }
+        uint32_t n = 0;
+        vkGetSwapchainImagesKHR(m_device, m_swapchain, &n, nullptr);
+        m_swapImages.resize(n);
+        vkGetSwapchainImagesKHR(m_device, m_swapchain, &n, m_swapImages.data());
+        return true;
+    }
+
+    bool VulkanContext::createSwapViews() {
+        m_swapViews.resize(m_swapImages.size());
+        for (size_t i = 0; i < m_swapImages.size(); ++i) {
+            VkImageViewCreateInfo ci{};
+            ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            ci.image = m_swapImages[i]; ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            ci.format = m_sel.format.format;
+            ci.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+            ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            VkResult r = vkCreateImageView(m_device, &ci, nullptr, &m_swapViews[i]);
+            if (r != VK_SUCCESS) { LOGE("vkCreateImageView[%zu]: %s", i, vkRes(r).c_str()); return false; }
+        }
+        return true;
+    }
+
+    bool VulkanContext::createDepthAndFramebuffers() {
+        if (!RenderResourcesBuilder::createRenderPass(
+                m_device, m_sel.format.format, m_depthFormat, m_renderResources.renderPass)) return false;
+        if (!RenderResourcesBuilder::createDepthResources(
+                m_physicalDevice, m_device, m_sel.extent, m_depthFormat,
+                m_renderResources.depthImage, m_renderResources.depthMemory,
+                m_renderResources.depthImageView)) return false;
+        if (!RenderResourcesBuilder::createFramebuffers(
+                m_device, m_renderResources.renderPass, m_sel.extent,
+                m_swapViews, m_renderResources.depthImageView,
+                m_renderResources.framebuffers)) return false;
+        return true;
+    }
+
+    bool VulkanContext::createCommandInfra() {
+        if (!RenderResourcesBuilder::createCommandPool(
+                m_device, m_queueFamily, m_renderResources.commandPool)) return false;
+        if (!RenderResourcesBuilder::createCommandBuffers(
+                m_device, m_renderResources.commandPool,
+                (uint32_t)m_renderResources.framebuffers.size(),
+                m_renderResources.commandBuffers)) return false;
+        return true;
+    }
+
+    bool VulkanContext::createSyncObjects() {
+        return RenderResourcesBuilder::createSyncObjects(
+                m_device,
+                m_renderResources.imageAvailableSemaphore,
+                m_renderResources.renderFinishedSemaphore,
+                m_renderResources.inFlightFence);
+    }
+
+    // -----------------------------------------------------------------------
+    // createPipelineInfra — UBO + descriptor + pipeline layout with push constant
+    // -----------------------------------------------------------------------
+    bool VulkanContext::createPipelineInfra() {
+        // UBO: view + proj (2 * 16 floats)
+        if (!createBuffer(m_physicalDevice, m_device,
+                          sizeof(UniformBufferObject),
+                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          m_uniformBuffer, m_uniformMemory)) return false;
+
+        // Zero-init
+        void* mapped = nullptr;
+        vkMapMemory(m_device, m_uniformMemory, 0, sizeof(UniformBufferObject), 0, &mapped);
+        memset(mapped, 0, sizeof(UniformBufferObject));
+        vkUnmapMemory(m_device, m_uniformMemory);
+
+        // Descriptor set layout (binding 0 = UBO)
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding = 0; binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        binding.descriptorCount = 1; binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo dslCI{};
+        dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslCI.bindingCount = 1; dslCI.pBindings = &binding;
+        VkResult r = vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_descriptorSetLayout);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorSetLayout: %s", vkRes(r).c_str()); return false; }
+
+        // Descriptor pool + set
+        VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
+        VkDescriptorPoolCreateInfo poolCI{};
+        poolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolCI.poolSizeCount = 1; poolCI.pPoolSizes = &poolSize; poolCI.maxSets = 1;
+        r = vkCreateDescriptorPool(m_device, &poolCI, nullptr, &m_descriptorPool);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorPool: %s", vkRes(r).c_str()); return false; }
+
+        VkDescriptorSetAllocateInfo dsAI{};
+        dsAI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsAI.descriptorPool = m_descriptorPool; dsAI.descriptorSetCount = 1;
+        dsAI.pSetLayouts = &m_descriptorSetLayout;
+        r = vkAllocateDescriptorSets(m_device, &dsAI, &m_descriptorSet);
+        if (r != VK_SUCCESS) { LOGE("vkAllocateDescriptorSets: %s", vkRes(r).c_str()); return false; }
+
+        VkDescriptorBufferInfo bufInfo{ m_uniformBuffer, 0, sizeof(UniformBufferObject) };
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_descriptorSet; write.dstBinding = 0;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.descriptorCount = 1; write.pBufferInfo = &bufInfo;
+        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+        LOGI("Pipeline infra created");
+        return true;
+    }
+
+    void VulkanContext::destroyPipelineInfra() {
+        if (m_pipeline            != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipeline, nullptr);                       m_pipeline = VK_NULL_HANDLE; }
+        if (m_starPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_starPipeline, nullptr);                   m_starPipeline = VK_NULL_HANDLE; }
+        if (m_systemPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_systemPipeline, nullptr);                 m_systemPipeline = VK_NULL_HANDLE; }
+        if (m_plasmaPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_plasmaPipeline, nullptr);                 m_plasmaPipeline = VK_NULL_HANDLE; }
+        if (m_framePipeline       != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_framePipeline, nullptr);                  m_framePipeline = VK_NULL_HANDLE; }
+        if (m_pipelineLayout      != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);           m_pipelineLayout = VK_NULL_HANDLE; }
+        if (m_vertModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_vertModule, nullptr);                  m_vertModule = VK_NULL_HANDLE; }
+        if (m_fragModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_fragModule, nullptr);                  m_fragModule = VK_NULL_HANDLE; }
+        if (m_descriptorPool      != VK_NULL_HANDLE) { vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);           m_descriptorPool = VK_NULL_HANDLE; }
+        if (m_descriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr); m_descriptorSetLayout = VK_NULL_HANDLE; }
+        if (m_uniformBuffer       != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, m_uniformBuffer, nullptr);                    m_uniformBuffer = VK_NULL_HANDLE; }
+        if (m_uniformMemory       != VK_NULL_HANDLE) { vkFreeMemory(m_device, m_uniformMemory, nullptr);                       m_uniformMemory = VK_NULL_HANDLE; }
+        m_descriptorSet = VK_NULL_HANDLE;
+    }
+
+    // -----------------------------------------------------------------------
+    // createPipeline
+    // -----------------------------------------------------------------------
+    bool VulkanContext::createPipeline(const std::vector<uint32_t>& vertSpv,
+                                       const std::vector<uint32_t>& fragSpv) {
+        auto makeModule = [&](const std::vector<uint32_t>& code, VkShaderModule& mod) -> bool {
+            VkShaderModuleCreateInfo ci{};
+            ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            ci.codeSize = code.size() * 4; ci.pCode = code.data();
+            VkResult r = vkCreateShaderModule(m_device, &ci, nullptr, &mod);
+            if (r != VK_SUCCESS) { LOGE("vkCreateShaderModule: %s", vkRes(r).c_str()); return false; }
+            return true;
+        };
+
+        if (vertSpv.empty() || fragSpv.empty()) { LOGE("createPipeline: shaders not set"); return false; }
+        if (!makeModule(vertSpv, m_vertModule)) return false;
+        if (!makeModule(fragSpv, m_fragModule)) return false;
+
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = m_vertModule; stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = m_fragModule; stages[1].pName = "main";
+
+        auto bind  = Vertex::getBindingDescription();
+        auto attrs = Vertex::getAttributeDescriptions();
+
+        VkPipelineVertexInputStateCreateInfo viCI{};
+        viCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        viCI.vertexBindingDescriptionCount = 1; viCI.pVertexBindingDescriptions = &bind;
+        viCI.vertexAttributeDescriptionCount = (uint32_t)attrs.size(); viCI.pVertexAttributeDescriptions = attrs.data();
+
+        VkPipelineInputAssemblyStateCreateInfo iaCI{};
+        iaCI.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        iaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkViewport vp{ 0, 0, (float)m_sel.extent.width, (float)m_sel.extent.height, 0, 1 };
+        VkRect2D sc{ {0,0}, m_sel.extent };
+        VkPipelineViewportStateCreateInfo vpCI{};
+        vpCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        vpCI.viewportCount = 1; vpCI.pViewports = &vp; vpCI.scissorCount = 1; vpCI.pScissors = &sc;
+
+        VkPipelineRasterizationStateCreateInfo rastCI{};
+        rastCI.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rastCI.polygonMode = VK_POLYGON_MODE_FILL; rastCI.lineWidth = 1.0f;
+        rastCI.cullMode = VK_CULL_MODE_NONE; rastCI.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+        VkPipelineMultisampleStateCreateInfo msCI{};
+        msCI.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        msCI.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineDepthStencilStateCreateInfo dsCI{};
+        dsCI.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        dsCI.depthTestEnable = VK_TRUE; dsCI.depthWriteEnable = VK_TRUE;
+        dsCI.depthCompareOp = VK_COMPARE_OP_LESS;
+
+        VkPipelineColorBlendAttachmentState cbAtt{};
+        cbAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cbCI{};
+        cbCI.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        cbCI.attachmentCount = 1; cbCI.pAttachments = &cbAtt;
+
+        // Push constant range: mat4 model + vec4 tint, visible to both stages
+        VkPushConstantRange pcRange{};
+        pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pcRange.offset     = 0;
+        pcRange.size       = sizeof(PushConstantData);
+
+        VkPipelineLayoutCreateInfo plCI{};
+        plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plCI.setLayoutCount = 1; plCI.pSetLayouts = &m_descriptorSetLayout;
+        plCI.pushConstantRangeCount = 1; plCI.pPushConstantRanges = &pcRange;
+
+        VkResult r = vkCreatePipelineLayout(m_device, &plCI, nullptr, &m_pipelineLayout);
+        if (r != VK_SUCCESS) { LOGE("vkCreatePipelineLayout: %s", vkRes(r).c_str()); return false; }
+
+        VkGraphicsPipelineCreateInfo gpCI{};
+        gpCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        gpCI.stageCount = 2; gpCI.pStages = stages;
+        gpCI.pVertexInputState = &viCI; gpCI.pInputAssemblyState = &iaCI;
+        gpCI.pViewportState = &vpCI; gpCI.pRasterizationState = &rastCI;
+        gpCI.pMultisampleState = &msCI; gpCI.pDepthStencilState = &dsCI;
+        gpCI.pColorBlendState = &cbCI;
+        gpCI.layout = m_pipelineLayout;
+        gpCI.renderPass = m_renderResources.renderPass; gpCI.subpass = 0;
+
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_pipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines: %s", vkRes(r).c_str()); return false; }
+
+        // System overlay pipeline: triangle mesh, drawn after scene, no depth test/write.
+        dsCI.depthTestEnable  = VK_FALSE;
+        dsCI.depthWriteEnable = VK_FALSE;
+        dsCI.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
+
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_systemPipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(system): %s", vkRes(r).c_str()); return false; }
+
+        // Plasma pipeline: additive blend (src=ONE, dst=ONE), depth-test read-only
+        dsCI.depthTestEnable  = VK_TRUE;
+        dsCI.depthWriteEnable = VK_FALSE;
+        dsCI.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+        cbAtt.blendEnable         = VK_TRUE;
+        cbAtt.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.colorBlendOp        = VK_BLEND_OP_ADD;
+        cbAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_plasmaPipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(plasma): %s", vkRes(r).c_str()); return false; }
+        cbAtt.blendEnable = VK_FALSE;  // reset for subsequent pipelines
+
+        // Frame pipeline: LINE_LIST, dynamic line width, no depth test
+        iaCI.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        rastCI.lineWidth = 1.0f;
+        VkDynamicState dynState = VK_DYNAMIC_STATE_LINE_WIDTH;
+        VkPipelineDynamicStateCreateInfo dynCI{};
+        dynCI.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynCI.dynamicStateCount = 1;
+        dynCI.pDynamicStates = &dynState;
+        gpCI.pDynamicState = &dynCI;
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_framePipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(frame): %s", vkRes(r).c_str()); return false; }
+        gpCI.pDynamicState = nullptr;
+
+        // Star pipeline: same but POINT_LIST topology and depth write off
+        // (so stars don't occlude ships but ships occlude each other)
+        iaCI.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        dsCI.depthWriteEnable = VK_FALSE;
+        dsCI.depthCompareOp   = VK_COMPARE_OP_ALWAYS; // always draw stars behind everything
+
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_starPipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(stars): %s", vkRes(r).c_str()); return false; }
+
+        LOGI("Pipelines created (mesh + system + stars)");
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // destroySwapchain
+    // -----------------------------------------------------------------------
+    void VulkanContext::destroySwapchain() {
+        RenderResourcesBuilder::destroy(m_device, m_renderResources);
+        for (auto iv : m_swapViews) if (iv != VK_NULL_HANDLE) vkDestroyImageView(m_device, iv, nullptr);
+        m_swapViews.clear(); m_swapImages.clear();
+        if (m_swapchain != VK_NULL_HANDLE) { vkDestroySwapchainKHR(m_device, m_swapchain, nullptr); m_swapchain = VK_NULL_HANDLE; }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mesh pool
+    // -----------------------------------------------------------------------
+    uint32_t VulkanContext::uploadMesh(const MeshData& data) {
+        for (uint32_t i = 0; i < kMaxMeshes; ++i) {
+            if (!m_meshUsed[i]) {
+                if (!m_meshPool[i].create(m_physicalDevice, m_device, data)) return 0;
+                float minV[3] = {
+                        std::numeric_limits<float>::max(),
+                        std::numeric_limits<float>::max(),
+                        std::numeric_limits<float>::max()
+                };
+                float maxV[3] = {
+                        -std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max()
+                };
+                for (const auto& v : data.vertices) {
+                    for (int axis = 0; axis < 3; ++axis) {
+                        minV[axis] = std::min(minV[axis], v.position[axis]);
+                        maxV[axis] = std::max(maxV[axis], v.position[axis]);
+                    }
+                }
+                m_meshFramePoints[i].clear();
+                m_meshFramePoints[i].reserve(data.vertices.size());
+                for (const auto& v : data.vertices) {
+                    m_meshFramePoints[i].push_back({v.position[0], v.position[1], v.position[2]});
+                }
+                float radiusSq = 0.0f;
+                for (int axis = 0; axis < 3; ++axis) {
+                    m_meshBounds[i].center[axis] = (minV[axis] + maxV[axis]) * 0.5f;
+                    m_meshBounds[i].halfExtents[axis] = (maxV[axis] - minV[axis]) * 0.5f;
+                    radiusSq += m_meshBounds[i].halfExtents[axis] * m_meshBounds[i].halfExtents[axis];
+                }
+                m_meshBounds[i].radius = std::sqrt(radiusSq);
+                m_meshUsed[i] = true;
+                return i + 1;
+            }
+        }
+        LOGE("Mesh pool full"); return 0;
+    }
+
+    void VulkanContext::freeMesh(uint32_t token) {
+        if (!token || token > kMaxMeshes) return;
+        uint32_t i = token - 1;
+        if (m_meshUsed[i]) {
+            m_meshPool[i].destroy(m_device);
+            m_meshUsed[i] = false;
+            m_meshFramePoints[i].clear();
+        }
+    }
+
+    void VulkanContext::beginScene() {
+        m_drawList.clear();
+        m_systemDrawList.clear();
+        m_plasmaDrawList.clear();
+        m_pickRecords.clear();
+        m_sceneOpen = true;
+    }
+
+    void VulkanContext::drawMesh(uint32_t token, const float modelMatrix[16]) {
+        if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
+        DrawCommand cmd{};
+        cmd.token = token;
+        cmd.billboard = false;
+        cmd.objectFrame = false;
+        std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        m_drawList.push_back(cmd);
+    }
+
+    void VulkanContext::drawPickableMesh(uint32_t token, int32_t objectId,
+                                         const float modelMatrix[16], float pickRadius) {
+        drawMesh(token, modelMatrix);
+        if (!m_sceneOpen || objectId < 0 || pickRadius <= 0.0f) return;
+        if (token == 0 || token > kMaxMeshes) return;
+
+        const MeshBounds& bounds = m_meshBounds[token - 1];
+        const float lx = bounds.center[0];
+        const float ly = bounds.center[1];
+        const float lz = bounds.center[2];
+
+        PickRecord record{};
+        record.objectId = objectId;
+        record.token = token;
+        record.center[0] = modelMatrix[0] * lx + modelMatrix[4] * ly + modelMatrix[8]  * lz + modelMatrix[12];
+        record.center[1] = modelMatrix[1] * lx + modelMatrix[5] * ly + modelMatrix[9]  * lz + modelMatrix[13];
+        record.center[2] = modelMatrix[2] * lx + modelMatrix[6] * ly + modelMatrix[10] * lz + modelMatrix[14];
+        record.radius = std::max(pickRadius, bounds.radius);
+        m_pickRecords.push_back(record);
+    }
+
+    void VulkanContext::drawPlasmaBillboard(uint32_t token, float x, float y, float z, float scale) {
+        if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
+        DrawCommand cmd{};
+        cmd.token     = token;
+        cmd.billboard = true;
+        cmd.center[0] = x; cmd.center[1] = y; cmd.center[2] = z;
+        cmd.scale     = scale;
+        m_plasmaDrawList.push_back(cmd);
+    }
+
+    void VulkanContext::drawBillboardMesh(uint32_t token, float x, float y, float z, float scale) {
+        if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
+        DrawCommand cmd{};
+        cmd.token = token;
+        cmd.billboard = true;
+        cmd.objectFrame = false;
+        cmd.center[0] = x;
+        cmd.center[1] = y;
+        cmd.center[2] = z;
+        cmd.scale = scale;
+        m_systemDrawList.push_back(cmd);
+    }
+
+    void VulkanContext::drawObjectFrameMesh(uint32_t frameToken, uint32_t targetToken, const float modelMatrix[16], float padding, const float tint[4]) {
+        if (!m_sceneOpen || frameToken == 0 || frameToken > kMaxMeshes) return;
+        if (targetToken == 0 || targetToken > kMaxMeshes) return;
+        DrawCommand cmd{};
+        cmd.token = frameToken;
+        cmd.targetToken = targetToken;
+        cmd.billboard = false;
+        cmd.objectFrame = true;
+        const MeshBounds& bounds = m_meshBounds[targetToken - 1];
+        cmd.center[0] = bounds.center[0];
+        cmd.center[1] = bounds.center[1];
+        cmd.center[2] = bounds.center[2];
+        cmd.halfExtents[0] = bounds.halfExtents[0];
+        cmd.halfExtents[1] = bounds.halfExtents[1];
+        cmd.halfExtents[2] = bounds.halfExtents[2];
+        cmd.padding = padding;
+        std::memcpy(cmd.tint, tint, sizeof(float) * 4);
+        std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        m_systemDrawList.push_back(cmd);
+    }
+
+    void VulkanContext::drawGameplayFrameMesh(uint32_t frameToken, const float modelMatrix[16],
+                                              const float* localPoints, int32_t pointCount,
+                                              float padding, float lineWidth, const float tint[4]) {
+        if (!m_sceneOpen || frameToken == 0 || frameToken > kMaxMeshes) return;
+        if (!localPoints || pointCount <= 0) return;
+
+        DrawCommand cmd{};
+        cmd.token = frameToken;
+        cmd.targetToken = 0;
+        cmd.billboard = false;
+        cmd.objectFrame = true;
+        cmd.padding = padding;
+        cmd.scale = lineWidth; // repurposed: line width for frame draws
+        std::memcpy(cmd.tint, tint, sizeof(float) * 4);
+        std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+
+        cmd.framePoints.reserve(static_cast<size_t>(pointCount));
+        float minV[3] = {
+                std::numeric_limits<float>::max(),
+                std::numeric_limits<float>::max(),
+                std::numeric_limits<float>::max()
+        };
+        float maxV[3] = {
+                -std::numeric_limits<float>::max(),
+                -std::numeric_limits<float>::max(),
+                -std::numeric_limits<float>::max()
+        };
+        for (int32_t i = 0; i < pointCount; ++i) {
+            const math::Vec3 point{
+                    localPoints[i * 3],
+                    localPoints[i * 3 + 1],
+                    localPoints[i * 3 + 2]
+            };
+            cmd.framePoints.push_back(point);
+            minV[0] = std::min(minV[0], point.x);
+            minV[1] = std::min(minV[1], point.y);
+            minV[2] = std::min(minV[2], point.z);
+            maxV[0] = std::max(maxV[0], point.x);
+            maxV[1] = std::max(maxV[1], point.y);
+            maxV[2] = std::max(maxV[2], point.z);
+        }
+
+        for (int axis = 0; axis < 3; ++axis) {
+            cmd.center[axis] = (minV[axis] + maxV[axis]) * 0.5f;
+            cmd.halfExtents[axis] = (maxV[axis] - minV[axis]) * 0.5f;
+        }
+        m_systemDrawList.push_back(cmd);
+    }
+
+    int32_t VulkanContext::pickObject(float screenX, float screenY, int32_t currentObjectId) const {
+        if (m_pickRecords.empty() || m_sel.extent.width == 0 || m_sel.extent.height == 0) {
+            return -1;
+        }
+
+        struct Hit {
+            int32_t objectId;
+            float depth;
+        };
+        std::vector<Hit> hits;
+
+        const float width = static_cast<float>(m_sel.extent.width);
+        const float height = static_cast<float>(m_sel.extent.height);
+        const math::Mat4 vp = m_camera.viewProjection(computeSceneFarClip());
+
+        for (const auto& record : m_pickRecords) {
+            const math::Vec3 center{record.center[0], record.center[1], record.center[2]};
+            const ProjectedPoint pc = projectPoint(vp, center, width, height);
+            if (!pc.visible) continue;
+
+            const ProjectedPoint pr = projectPoint(
+                    vp,
+                    {center.x + record.radius, center.y, center.z},
+                    width, height);
+            float screenRadius = 40.0f;
+            if (pr.visible) {
+                const float dx = pr.x - pc.x;
+                const float dy = pr.y - pc.y;
+                screenRadius = std::sqrt(dx * dx + dy * dy);
+            }
+            screenRadius = std::clamp(screenRadius, 28.0f, 140.0f);
+
+            const float dx = screenX - pc.x;
+            const float dy = screenY - pc.y;
+            if ((dx * dx + dy * dy) <= (screenRadius * screenRadius)) {
+                hits.push_back({record.objectId, pc.depth});
+            }
+        }
+
+        if (hits.empty()) return -1;
+
+        std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+            return a.depth < b.depth;
+        });
+
+        for (size_t i = 0; i < hits.size(); ++i) {
+            if (hits[i].objectId == currentObjectId) {
+                return (i + 1 < hits.size()) ? hits[i + 1].objectId : -1;
+            }
+        }
+        return hits.front().objectId;
+    }
+
+    bool VulkanContext::projectGameplayBounds(const float modelMatrix[16],
+                                              const float* localPoints,
+                                              int32_t pointCount,
+                                              float padding,
+                                              float outBounds[7]) const {
+        if (!modelMatrix || !localPoints || !outBounds || pointCount <= 0 ||
+            m_sel.extent.width == 0 || m_sel.extent.height == 0) {
+            return false;
+        }
+
+        const float width = static_cast<float>(m_sel.extent.width);
+        const float height = static_cast<float>(m_sel.extent.height);
+        const math::Mat4 vp = m_camera.viewProjection(computeSceneFarClip());
+
+        float minX =  std::numeric_limits<float>::max();
+        float maxX = -std::numeric_limits<float>::max();
+        float minY =  std::numeric_limits<float>::max();
+        float maxY = -std::numeric_limits<float>::max();
+        float depthSum = 0.0f;
+        int projectedCount = 0;
+
+        for (int32_t i = 0; i < pointCount; ++i) {
+            const float* local = localPoints + i * 3;
+            const math::Vec3 world = transformPoint(modelMatrix, local);
+            const float clipX = vp.m[0] * world.x + vp.m[4] * world.y + vp.m[8]  * world.z + vp.m[12];
+            const float clipY = vp.m[1] * world.x + vp.m[5] * world.y + vp.m[9]  * world.z + vp.m[13];
+            const float clipZ = vp.m[2] * world.x + vp.m[6] * world.y + vp.m[10] * world.z + vp.m[14];
+            const float clipW = vp.m[3] * world.x + vp.m[7] * world.y + vp.m[11] * world.z + vp.m[15];
+            if (clipW <= 0.0001f) continue;
+
+            const float ndcX = clipX / clipW;
+            const float ndcY = clipY / clipW;
+            const float ndcZ = clipZ / clipW;
+            if (ndcX < -1.0f || ndcX > 1.0f || ndcY < -1.0f || ndcY > 1.0f ||
+                ndcZ < -0.05f || ndcZ > 1.05f) {
+                continue;
+            }
+
+            const float screenX = (ndcX * 0.5f + 0.5f) * width;
+            const float screenY = (ndcY * 0.5f + 0.5f) * height;
+
+            minX = std::min(minX, screenX);
+            maxX = std::max(maxX, screenX);
+            minY = std::min(minY, screenY);
+            maxY = std::max(maxY, screenY);
+            depthSum += ndcZ;
+            ++projectedCount;
+        }
+
+        if (projectedCount == 0) return false;
+
+        const float padX = (maxX - minX) * std::max(padding, 0.0f) * 0.5f;
+        const float padY = (maxY - minY) * std::max(padding, 0.0f) * 0.5f;
+        minX -= padX;
+        maxX += padX;
+        minY -= padY;
+        maxY += padY;
+
+        const bool intersectsScreen = maxX >= 0.0f && minX <= width && maxY >= 0.0f && minY <= height;
+        if (!intersectsScreen) return false;
+
+        const bool fullyInside = minX >= 0.0f && maxX <= width && minY >= 0.0f && maxY <= height;
+        outBounds[0] = 1.0f;
+        outBounds[1] = fullyInside ? 0.0f : 1.0f;
+        outBounds[2] = minX;
+        outBounds[3] = minY;
+        outBounds[4] = maxX;
+        outBounds[5] = maxY;
+        outBounds[6] = depthSum / static_cast<float>(projectedCount);
+        return true;
+    }
+
+    bool VulkanContext::projectMeshBounds(uint32_t token,
+                                          const float modelMatrix[16],
+                                          float padding,
+                                          float outBounds[7]) const {
+        if (!modelMatrix || !outBounds || token == 0 || token > kMaxMeshes ||
+            !m_meshUsed[token - 1] || m_sel.extent.width == 0 || m_sel.extent.height == 0) {
+            return false;
+        }
+
+        const std::vector<math::Vec3>& points = m_meshFramePoints[token - 1];
+        if (points.empty()) return false;
+
+        const float width = static_cast<float>(m_sel.extent.width);
+        const float height = static_cast<float>(m_sel.extent.height);
+        const math::Mat4 vp = m_camera.viewProjection(computeSceneFarClip());
+
+        float minX =  std::numeric_limits<float>::max();
+        float maxX = -std::numeric_limits<float>::max();
+        float minY =  std::numeric_limits<float>::max();
+        float maxY = -std::numeric_limits<float>::max();
+        float depthSum = 0.0f;
+        int projectedCount = 0;
+
+        for (const math::Vec3& local : points) {
+            const float p[3] = {local.x, local.y, local.z};
+            const math::Vec3 world = transformPoint(modelMatrix, p);
+            const float clipX = vp.m[0] * world.x + vp.m[4] * world.y + vp.m[8]  * world.z + vp.m[12];
+            const float clipY = vp.m[1] * world.x + vp.m[5] * world.y + vp.m[9]  * world.z + vp.m[13];
+            const float clipZ = vp.m[2] * world.x + vp.m[6] * world.y + vp.m[10] * world.z + vp.m[14];
+            const float clipW = vp.m[3] * world.x + vp.m[7] * world.y + vp.m[11] * world.z + vp.m[15];
+            if (clipW <= 0.0001f) continue;
+
+            const float ndcX = clipX / clipW;
+            const float ndcY = clipY / clipW;
+            const float ndcZ = clipZ / clipW;
+            if (ndcX < -1.0f || ndcX > 1.0f || ndcY < -1.0f || ndcY > 1.0f ||
+                ndcZ < -0.05f || ndcZ > 1.05f) {
+                continue;
+            }
+
+            const float screenX = (ndcX * 0.5f + 0.5f) * width;
+            const float screenY = (ndcY * 0.5f + 0.5f) * height;
+
+            minX = std::min(minX, screenX);
+            maxX = std::max(maxX, screenX);
+            minY = std::min(minY, screenY);
+            maxY = std::max(maxY, screenY);
+            depthSum += ndcZ;
+            ++projectedCount;
+        }
+
+        if (projectedCount == 0) return false;
+
+        const float padX = (maxX - minX) * std::max(padding, 0.0f) * 0.5f;
+        const float padY = (maxY - minY) * std::max(padding, 0.0f) * 0.5f;
+        minX -= padX;
+        maxX += padX;
+        minY -= padY;
+        maxY += padY;
+
+        const bool intersectsScreen = maxX >= 0.0f && minX <= width && maxY >= 0.0f && minY <= height;
+        if (!intersectsScreen) return false;
+
+        const bool fullyInside = minX >= 0.0f && maxX <= width && minY >= 0.0f && maxY <= height;
+        outBounds[0] = 1.0f;
+        outBounds[1] = fullyInside ? 0.0f : 1.0f;
+        outBounds[2] = minX;
+        outBounds[3] = minY;
+        outBounds[4] = maxX;
+        outBounds[5] = maxY;
+        outBounds[6] = depthSum / static_cast<float>(projectedCount);
+        return true;
+    }
+
+    void VulkanContext::endScene() {
+        m_sceneOpen = false;
+        // Draw list is consumed in renderFrame()
+    }
+    void VulkanContext::setFocused(bool f)             { m_focused = f; }
+    void VulkanContext::orbitCamera(float dy, float dp){ m_camera.orbit(dy, dp); }
+    void VulkanContext::rollCamera(float a)                { m_camera.roll(a); }
+    void VulkanContext::panCamera(float dx, float dy)        { m_camera.pan(dx, dy); }
+    void VulkanContext::zoomCamera(float factor)       { m_camera.zoom(factor); }
+    void VulkanContext::zoomCameraAt(float factor, float screenX, float screenY) {
+        m_camera.zoomAt(
+                factor,
+                screenX,
+                screenY,
+                static_cast<float>(m_sel.extent.width),
+                static_cast<float>(m_sel.extent.height),
+                0.0f);
+    }
+
+    // -----------------------------------------------------------------------
+    // updateUniformBuffer — now uploads view + proj separately
+    // -----------------------------------------------------------------------
+    float VulkanContext::computeSceneFarClip() const {
+        using namespace math;
+        const Vec3 eye = m_camera.eyePosition();
+        const Vec3 forward = m_camera.forwardDirection();
+
+        float farClip = m_camera.farClip();
+        auto includeSphere = [&](const Vec3& center, float radius) {
+            const float depth = dot(center - eye, forward);
+            if (depth > 0.0f) {
+                farClip = std::max(farClip, depth + std::max(radius, 0.0f) + 25.0f);
+            }
+        };
+
+        for (const auto& draw : m_drawList) {
+            if (draw.token == 0 || draw.token > kMaxMeshes) continue;
+            const MeshBounds& bounds = m_meshBounds[draw.token - 1];
+            if (draw.billboard) {
+                includeSphere({draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
+                continue;
+            }
+
+            const Vec3 center = transformPoint(draw.modelMatrix, bounds.center);
+            includeSphere(center, bounds.radius * maxColumnScale(draw.modelMatrix));
+        }
+
+        for (const auto& draw : m_systemDrawList) {
+            if (draw.billboard) {
+                includeSphere({draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
+            }
+        }
+
+        return std::clamp(farClip, 100.0f, 1000.0f);
+    }
+
+    void VulkanContext::updateUniformBuffer() {
+        using namespace math;
+        const Mat4 view = m_camera.viewMatrix();
+        const Mat4 proj = m_camera.projMatrix(computeSceneFarClip());
+
+        UniformBufferObject ubo{};
+        for (int i = 0; i < 16; ++i) { ubo.view[i] = view.m[i]; ubo.proj[i] = proj.m[i]; }
+
+        void* mapped = nullptr;
+        if (vkMapMemory(m_device, m_uniformMemory, 0, sizeof(ubo), 0, &mapped) == VK_SUCCESS) {
+            memcpy(mapped, &ubo, sizeof(ubo));
+            vkUnmapMemory(m_device, m_uniformMemory);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // renderFrame
+    // -----------------------------------------------------------------------
+    void VulkanContext::renderFrame() {
+        if (!m_surfaceReady || !m_focused) return;
+        if (!m_pipeline) return;
+
+        vkWaitForFences(m_device, 1, &m_renderResources.inFlightFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(m_device, 1, &m_renderResources.inFlightFence);
+
+        uint32_t imageIndex = 0;
+        VkResult r = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
+                                           m_renderResources.imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOGE("vkAcquireNextImageKHR: %s", vkRes(r).c_str()); return; }
+
+        updateUniformBuffer();
+
+        VkCommandBuffer cmd = m_renderResources.commandBuffers[imageIndex];
+        vkResetCommandBuffer(cmd, 0);
+
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vkBeginCommandBuffer(cmd, &bi);
+
+        VkClearValue cv[2]{};
+        cv[0].color        = {{0.01f, 0.01f, 0.04f, 1.0f}}; // very dark blue-black
+        cv[1].depthStencil = {1.0f, 0};
+
+        VkRenderPassBeginInfo rpi{};
+        rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpi.renderPass = m_renderResources.renderPass;
+        rpi.framebuffer = m_renderResources.framebuffers[imageIndex];
+        rpi.renderArea.extent = m_sel.extent;
+        rpi.clearValueCount = 2; rpi.pClearValues = cv;
+        vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
+
+        // --- Draw star-field first (depth write OFF, drawn behind everything) ---
+        if (m_starMesh.isReady() && m_starPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_starPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+            // Identity model for stars (they're in world space already)
+            PushConstantData starPc{};
+            math::Mat4 identity = math::Mat4::identity();
+            for (int i = 0; i < 16; ++i) starPc.model[i] = identity.m[i];
+            vkCmdPushConstants(cmd, m_pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstantData), &starPc);
+
+            m_starMesh.bind(cmd);
+            // Draw as points — index count = vertex count for point list
+            vkCmdDrawIndexed(cmd, m_starMesh.indexCount(), 1, 0, 0, 0);
+        }
+
+        // --- Draw scene objects (submitted by Kotlin via begin/draw/end_scene) ---
+        if (!m_drawList.empty() && m_pipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+            uint32_t lastBoundToken = 0;
+
+            for (const auto& draw : m_drawList) {
+                uint32_t idx = draw.token - 1;
+                if (!m_meshUsed[idx] || !m_meshPool[idx].isReady()) continue;
+
+                // Rebind vertex/index buffers only when mesh changes
+                if (draw.token != lastBoundToken) {
+                    m_meshPool[idx].bind(cmd);
+                    lastBoundToken = draw.token;
+                }
+
+                PushConstantData pc{};
+                if (draw.billboard) {
+                    const math::Mat4 billboard = m_camera.billboardMatrix(
+                            {draw.center[0], draw.center[1], draw.center[2]},
+                            draw.scale);
+                    std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
+                } else {
+                    std::memcpy(pc.model, draw.modelMatrix, sizeof(float) * 16);
+                }
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
+            }
+        }
+
+        // --- Draw system billboards (non-frame) after scene objects ---
+        if (!m_systemDrawList.empty() && m_systemPipeline != VK_NULL_HANDLE) {
+            bool pipelineBound = false;
+            uint32_t lastBoundToken = 0;
+
+            for (const auto& draw : m_systemDrawList) {
+                if (draw.objectFrame) continue;
+
+                uint32_t idx = draw.token - 1;
+                if (!m_meshUsed[idx] || !m_meshPool[idx].isReady()) continue;
+
+                if (!pipelineBound) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_systemPipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                    pipelineBound = true;
+                }
+
+                if (draw.token != lastBoundToken) {
+                    m_meshPool[idx].bind(cmd);
+                    lastBoundToken = draw.token;
+                }
+
+                PushConstantData pc{};
+                const math::Mat4 billboard = m_camera.billboardMatrix(
+                        {draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
+                std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
+                std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
+            }
+        }
+
+        // --- Draw plasma bolts with additive-blend pipeline ---
+        if (!m_plasmaDrawList.empty() && m_plasmaPipeline != VK_NULL_HANDLE) {
+            bool pipelineBound = false;
+            uint32_t lastBoundToken = 0;
+            for (const auto& draw : m_plasmaDrawList) {
+                uint32_t idx = draw.token - 1;
+                if (!m_meshUsed[idx] || !m_meshPool[idx].isReady()) continue;
+                if (!pipelineBound) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_plasmaPipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                    pipelineBound = true;
+                }
+                if (draw.token != lastBoundToken) {
+                    m_meshPool[idx].bind(cmd);
+                    lastBoundToken = draw.token;
+                }
+                PushConstantData pc{};
+                const math::Mat4 billboard = m_camera.billboardMatrix(
+                        {draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
+                std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
+            }
+        }
+
+        // --- Draw selection frames with constant-width line pipeline ---
+        if (!m_systemDrawList.empty() &&
+            m_framePipeline != VK_NULL_HANDLE &&
+            m_frameLineMesh.isReady() && m_frameLineMeshEnemy.isReady()) {
+
+            const float W  = static_cast<float>(m_sel.extent.width);
+            const float H  = static_cast<float>(m_sel.extent.height);
+            const math::Mat4 vp = m_camera.viewProjection(computeSceneFarClip());
+            bool pipelineBound = false;
+
+            for (const auto& draw : m_systemDrawList) {
+                if (!draw.objectFrame) continue;
+
+                math::Mat4 frame{};
+
+                if (draw.targetToken > 0) {
+                    // Object frame: project mesh vertices to get screen bounds
+                    float sb[7]{};
+                    if (!projectMeshBounds(draw.targetToken, draw.modelMatrix, draw.padding, sb))
+                        continue;
+                    frame = m_camera.frameMatrixForScreenBounds(sb[2], sb[3], sb[4], sb[5], W, H);
+                } else {
+                    // Gameplay frame: project the stored local points to screen bounds
+                    const std::vector<math::Vec3>& pts = draw.framePoints;
+                    if (pts.empty()) continue;
+                    float pb[5]{};
+                    if (!projectLocalPointsToBounds(vp, pts, draw.modelMatrix, draw.padding, W, H, pb))
+                        continue;
+                    frame = m_camera.frameMatrixForScreenBounds(pb[0], pb[1], pb[2], pb[3], W, H, pb[4]);
+                }
+
+                if (!pipelineBound) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_framePipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                    pipelineBound = true;
+                }
+
+                // Bind per-draw: enemy (tint.a > 0.5) gets red mesh, allied gets green.
+                const bool isEnemy = (draw.tint[3] > 0.5f);
+                (isEnemy ? m_frameLineMeshEnemy : m_frameLineMesh).bind(cmd);
+
+                const float lw = (m_wideLines && draw.scale > 1.0f) ? draw.scale : 1.0f;
+                vkCmdSetLineWidth(cmd, lw);
+
+                PushConstantData pc{};
+                std::memcpy(pc.model, frame.m, sizeof(float) * 16);
+                std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, 16, 1, 0, 0, 0); // 8 line segments (4 corner brackets)
+            }
+        }
+
+        vkCmdEndRenderPass(cmd);
+        vkEndCommandBuffer(cmd);
+
+        VkPipelineStageFlags ws = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.waitSemaphoreCount = 1; si.pWaitSemaphores = &m_renderResources.imageAvailableSemaphore;
+        si.pWaitDstStageMask = &ws; si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
+        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &m_renderResources.renderFinishedSemaphore;
+        vkQueueSubmit(m_graphicsQueue, 1, &si, m_renderResources.inFlightFence);
+
+        VkPresentInfoKHR pi{};
+        pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &m_renderResources.renderFinishedSemaphore;
+        pi.swapchainCount = 1; pi.pSwapchains = &m_swapchain; pi.pImageIndices = &imageIndex;
+        vkQueuePresentKHR(m_graphicsQueue, &pi);
+    }
+
+} // namespace station
