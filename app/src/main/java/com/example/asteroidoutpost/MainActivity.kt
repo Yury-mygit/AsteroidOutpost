@@ -979,6 +979,7 @@ class MainActivity : AppCompatActivity() {
     private fun showMissionSelect() {
         gameState = GameState.MENU
         menuOverlay.visibility          = View.GONE
+        removeWinLoseOverlays()
         missionSelectOverlay.visibility = View.VISIBLE
     }
 
