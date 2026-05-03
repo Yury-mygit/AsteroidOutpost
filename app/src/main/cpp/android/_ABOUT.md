@@ -6,7 +6,7 @@ JNI bridge between Kotlin and the C engine API.
 
 ### EngineJni.cpp
 
-Implements all `Java_com_example_g3_EngineJni_native*` functions.
+Implements all `Java_com_example_asteroidoutpost_EngineJni_native*` functions.
 Each function maps 1:1 to a `station_engine_*` call in `engine_api.h`.
 
 | JNI method | Engine API |

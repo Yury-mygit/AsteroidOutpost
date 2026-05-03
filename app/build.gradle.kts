@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.g3"
+    namespace = "com.example.asteroidoutpost"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.g3"
+        applicationId = "com.example.asteroidoutpost"
         minSdk = 28
         targetSdk = 36
         versionCode = 1

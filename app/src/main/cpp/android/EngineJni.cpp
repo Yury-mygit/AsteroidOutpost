@@ -10,17 +10,17 @@
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_com_example_g3_EngineJni_nativeCreate(JNIEnv* /*env*/, jobject /*thiz*/) {
+Java_com_example_asteroidoutpost_EngineJni_nativeCreate(JNIEnv* /*env*/, jobject /*thiz*/) {
     return reinterpret_cast<jlong>(station_engine_create());
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDestroy(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+Java_com_example_asteroidoutpost_EngineJni_nativeDestroy(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     station_engine_destroy(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeSetShader(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeSetShader(JNIEnv* env, jobject /*thiz*/,
                                               jlong handle, jstring name, jbyteArray spv) {
     if (!spv) return;
     const char* nameStr = env->GetStringUTFChars(name, nullptr);
@@ -37,7 +37,7 @@ Java_com_example_g3_EngineJni_nativeSetShader(JNIEnv* env, jobject /*thiz*/,
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeSurfaceCreated(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeSurfaceCreated(JNIEnv* env, jobject /*thiz*/,
                                                    jlong handle, jobject surface,
                                                    jint width, jint height) {
     ANativeWindow* win = ANativeWindow_fromSurface(env, surface);
@@ -47,29 +47,29 @@ Java_com_example_g3_EngineJni_nativeSurfaceCreated(JNIEnv* env, jobject /*thiz*/
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeSurfaceDestroyed(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeSurfaceDestroyed(JNIEnv* /*env*/, jobject /*thiz*/,
                                                      jlong handle) {
     station_engine_surface_destroyed(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeSurfaceChanged(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeSurfaceChanged(JNIEnv* /*env*/, jobject /*thiz*/,
                                                    jlong handle, jint w, jint h) {
     station_engine_surface_changed(reinterpret_cast<StationEngine*>(handle), w, h);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeResume(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+Java_com_example_asteroidoutpost_EngineJni_nativeResume(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     station_engine_resume(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativePause(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+Java_com_example_asteroidoutpost_EngineJni_nativePause(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     station_engine_pause(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_example_g3_EngineJni_nativeLoadMesh(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeLoadMesh(JNIEnv* env, jobject /*thiz*/,
                                              jlong handle, jbyteArray data) {
     if (!data) return 0L;
     jsize  len   = env->GetArrayLength(data);
@@ -83,7 +83,7 @@ Java_com_example_g3_EngineJni_nativeLoadMesh(JNIEnv* env, jobject /*thiz*/,
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_example_g3_EngineJni_nativeLoadMeshColored(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeLoadMeshColored(JNIEnv* env, jobject /*thiz*/,
                                                      jlong handle, jbyteArray data,
                                                      jfloat r, jfloat g, jfloat b) {
     if (!data) return 0L;
@@ -99,19 +99,19 @@ Java_com_example_g3_EngineJni_nativeLoadMeshColored(JNIEnv* env, jobject /*thiz*
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeUnloadMesh(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeUnloadMesh(JNIEnv* /*env*/, jobject /*thiz*/,
                                                jlong engineHandle, jlong meshHandle) {
     station_engine_unload_mesh(reinterpret_cast<StationEngine*>(engineHandle),
                                reinterpret_cast<StationMesh*>(meshHandle));
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeBeginScene(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+Java_com_example_asteroidoutpost_EngineJni_nativeBeginScene(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     station_engine_begin_scene(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDrawMesh(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawMesh(JNIEnv* env, jobject /*thiz*/,
                                              jlong engineHandle, jlong meshHandle,
                                              jfloatArray modelMatrix) {
     if (!modelMatrix) return;
@@ -126,7 +126,7 @@ Java_com_example_g3_EngineJni_nativeDrawMesh(JNIEnv* env, jobject /*thiz*/,
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDrawPickableMesh(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawPickableMesh(JNIEnv* env, jobject /*thiz*/,
                                                      jlong engineHandle, jlong meshHandle,
                                                      jint objectId, jfloatArray modelMatrix,
                                                      jfloat pickRadius) {
@@ -144,7 +144,7 @@ Java_com_example_g3_EngineJni_nativeDrawPickableMesh(JNIEnv* env, jobject /*thiz
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDrawBillboardMesh(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawBillboardMesh(JNIEnv* /*env*/, jobject /*thiz*/,
                                                       jlong engineHandle, jlong meshHandle,
                                                       jfloat x, jfloat y, jfloat z,
                                                       jfloat scale) {
@@ -156,7 +156,7 @@ Java_com_example_g3_EngineJni_nativeDrawBillboardMesh(JNIEnv* /*env*/, jobject /
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*env*/, jobject /*thiz*/,
                                                         jlong engineHandle, jlong meshHandle,
                                                         jfloat x, jfloat y, jfloat z,
                                                         jfloat scale) {
@@ -168,7 +168,7 @@ Java_com_example_g3_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*env*/, jobject
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDrawObjectFrameMesh(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawObjectFrameMesh(JNIEnv* env, jobject /*thiz*/,
                                                         jlong engineHandle, jlong frameMeshHandle,
                                                         jlong targetMeshHandle,
                                                         jfloatArray modelMatrix,
@@ -195,7 +195,7 @@ Java_com_example_g3_EngineJni_nativeDrawObjectFrameMesh(JNIEnv* env, jobject /*t
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeDrawGameplayFrameMesh(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawGameplayFrameMesh(JNIEnv* env, jobject /*thiz*/,
                                                           jlong engineHandle, jlong frameMeshHandle,
                                                           jfloatArray modelMatrix,
                                                           jfloatArray localPoints,
@@ -230,12 +230,12 @@ Java_com_example_g3_EngineJni_nativeDrawGameplayFrameMesh(JNIEnv* env, jobject /
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeEndScene(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+Java_com_example_asteroidoutpost_EngineJni_nativeEndScene(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     station_engine_end_scene(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT jint JNICALL
-Java_com_example_g3_EngineJni_nativePickObject(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativePickObject(JNIEnv* /*env*/, jobject /*thiz*/,
                                                jlong handle, jfloat x, jfloat y,
                                                jint currentObjectId) {
     return station_engine_pick_object(reinterpret_cast<StationEngine*>(handle),
@@ -243,7 +243,7 @@ Java_com_example_g3_EngineJni_nativePickObject(JNIEnv* /*env*/, jobject /*thiz*/
 }
 
 JNIEXPORT jfloatArray JNICALL
-Java_com_example_g3_EngineJni_nativeProjectGameplayBounds(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeProjectGameplayBounds(JNIEnv* env, jobject /*thiz*/,
                                                           jlong engineHandle,
                                                           jfloatArray modelMatrix,
                                                           jfloatArray localPoints,
@@ -278,7 +278,7 @@ Java_com_example_g3_EngineJni_nativeProjectGameplayBounds(JNIEnv* env, jobject /
 }
 
 JNIEXPORT jfloatArray JNICALL
-Java_com_example_g3_EngineJni_nativeProjectMeshBounds(JNIEnv* env, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeProjectMeshBounds(JNIEnv* env, jobject /*thiz*/,
                                                       jlong engineHandle,
                                                       jlong meshHandle,
                                                       jfloatArray modelMatrix,
@@ -305,31 +305,31 @@ Java_com_example_g3_EngineJni_nativeProjectMeshBounds(JNIEnv* env, jobject /*thi
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeOrbitCamera(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeOrbitCamera(JNIEnv* /*env*/, jobject /*thiz*/,
                                                 jlong handle, jfloat dy, jfloat dp) {
     station_engine_orbit_camera(reinterpret_cast<StationEngine*>(handle), dy, dp);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeRollCamera(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeRollCamera(JNIEnv* /*env*/, jobject /*thiz*/,
                                                jlong handle, jfloat angle) {
     station_engine_roll_camera(reinterpret_cast<StationEngine*>(handle), angle);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativePanCamera(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativePanCamera(JNIEnv* /*env*/, jobject /*thiz*/,
                                               jlong handle, jfloat dx, jfloat dy) {
     station_engine_pan_camera(reinterpret_cast<StationEngine*>(handle), dx, dy);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeZoomCamera(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeZoomCamera(JNIEnv* /*env*/, jobject /*thiz*/,
                                                jlong handle, jfloat factor) {
     station_engine_zoom_camera(reinterpret_cast<StationEngine*>(handle), factor);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeZoomCameraAt(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeZoomCameraAt(JNIEnv* /*env*/, jobject /*thiz*/,
                                                  jlong handle, jfloat factor,
                                                  jfloat screenX, jfloat screenY) {
     station_engine_zoom_camera_at(reinterpret_cast<StationEngine*>(handle),
@@ -337,13 +337,13 @@ Java_com_example_g3_EngineJni_nativeZoomCameraAt(JNIEnv* /*env*/, jobject /*thiz
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeResetCamera(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeResetCamera(JNIEnv* /*env*/, jobject /*thiz*/,
                                                 jlong handle) {
     station_engine_reset_camera(reinterpret_cast<StationEngine*>(handle));
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_g3_EngineJni_nativeRenderFrame(JNIEnv* /*env*/, jobject /*thiz*/,
+Java_com_example_asteroidoutpost_EngineJni_nativeRenderFrame(JNIEnv* /*env*/, jobject /*thiz*/,
                                                 jlong handle) {
     station_engine_render_frame(reinterpret_cast<StationEngine*>(handle));
 }

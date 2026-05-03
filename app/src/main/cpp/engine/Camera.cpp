@@ -9,11 +9,13 @@ namespace station {
     Camera::Camera() { reset(); }
 
     void Camera::reset() {
+        // DRAFT — Asteroid Outpost: side-view, X=right, Z=up, Y=depth.
+        // pitch=π/2 rotates the camera so it looks horizontally instead of top-down.
         using namespace math;
-        m_target   = {8.0f, 25.0f, 35.0f};
-        m_radius   = 200.0f;
+        m_target   = {0.0f, 0.0f, 4.0f};
+        m_radius   = 22.0f;
         m_normCounter = 0;
-        Quat pitch = Quat::fromAxisAngle(1, 0, 0, 0.75f);
+        Quat pitch = Quat::fromAxisAngle(1, 0, 0, 1.5707963f); // 90°
         m_rotation = pitch.normalized();
     }
 

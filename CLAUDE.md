@@ -4,27 +4,58 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-This project is **Asteroid Outpost** (an Android tower-defense / roguelite, design in `ROADMAP.md`, in Russian) built on top of an existing native Vulkan engine that was originally a separate project called **g3**. The engine source set was copied verbatim from `D:\g3\app\src\main\` into `app/src/main/`. As a consequence:
+**Asteroid Outpost** is a 2D side-view shoot-'em-up for Android, built on top of an existing native Vulkan engine that was originally a separate project called **g3**. The engine source set was copied from `D:\g3\app\src\main\` into `app/src/main/`, then heavily repurposed and rebranded.
 
-- All Kotlin code lives under **`com.example.g3.*`** (not `com.example.asteroidoutpost`). The `applicationId` and `namespace` in `app/build.gradle.kts` are also `com.example.g3` to match the JNI symbols (`Java_com_example_g3_*` in `cpp/android/EngineJni.cpp`). **Do not rename the package piecemeal** — the C++ JNI bridge is name-mangled against this exact path.
-- The Gradle root project is still `"Asteroid(Outpost"` (with the stray `(`), but the strings.xml `app_name` is still `g3` and the theme is `Theme.G3`. These will need to be rebranded when the game is closer to release; for now the engine assumes them.
-- The g3 engine ships a demo scene with allied/enemy fighters and stations — none of the Asteroid Outpost gameplay (turrets, waves, elemental synergies, swipe cannon) exists yet. M1 of the roadmap is the next layer to build on top.
-- Engine is **landscape-only** (`android:screenOrientation="sensorLandscape"`). The roadmap originally pitched a portrait 1080×2400 layout — that's an open contradiction to resolve before touching the UI layer.
+### What the game is
 
-`ROADMAP.md` is the source of truth for *what* the game should become; respond in Russian when discussing it unless asked otherwise.
+Portrait-orientation arcade game.
+
+- **Player robot** — small red rectangle on a wide grey platform at the bottom of the screen. Drag your finger across the screen to move it horizontally; release to stop. The robot fires bullets straight up at a fixed rate.
+- **Two stationary blue turrets** sit on the platform near its left and right edges. Each auto-aims at the nearest asteroid and fires bullets at an angle, with lower damage than the robot. Bullets are oriented along their velocity vector.
+- **Grey asteroid squares** spawn at the top at random X positions, falling slowly downward. Bullets damage them; asteroids that reach the platform damage the platform and disappear.
+- **Wave-based missions.** Each mission is a list of waves; a wave spawns N asteroids at a fixed interval, ends when all asteroids are gone, then a 2-sec break, then the next wave. Three missions exist (Учебная тревога / Метеоритный поток / Тяжёлые астероиды) with progressively harder numbers.
+- **Win** = all waves cleared. **Lose** = platform HP ≤ 0.
+- **Meta-progression.** Each destroyed asteroid awards 1 metal; winning gives +20 bonus. Metal persists across launches. Spend metal in the **Upgrades** screen on three tracks: robot damage (10/15/22), base HP (+0/+50/+120 over mission baseline), turret damage (5/8/12), each with a 3-level cap.
+- **Screens.** Main menu → Mission select → Game (with HUD: Score, HP, "Волна X/Y") → Win or Lose with stats and buttons (Next mission / Repeat / Upgrades / Mission select). Upgrades screen accessible from menu and from win/lose.
+
+### Code layout
+
+```
+app/src/main/
+├── AndroidManifest.xml          (portrait, AppCompat theme)
+├── assets/
+│   ├── models/                  ship.gltf, station.glb, quad.gltf, selection_frame_*.gltf
+│   ├── shaders/                 compiled .spv (do not hand-edit)
+│   ├── ml/                      g3 voice command model (unused by Outpost)
+│   └── sound/                   g3 sounds (unused by Outpost)
+├── shaders/                     GLSL source (.vert, .frag) — recompile after editing
+├── res/                         AppCompat layouts, themes, mipmaps
+├── cpp/
+│   ├── android/EngineJni.cpp    JNI bridge
+│   └── engine/                  Vulkan engine (Camera.cpp, VulkanContext.cpp, ...)
+└── java/com/example/asteroidoutpost/
+    ├── (root)                   MainActivity, EngineView, EngineJni, Scene, overlay views
+    ├── game/                    Outpost gameplay & UI: GameProgress, MissionRun,
+    │                            MissionConfig+Missions, UpgradeCatalog, OverlayFactory,
+    │                            ProgressRepository, UiTheme + UiHelpers (sci-fi style)
+    ├── sim/, intelligence/,     g3 simulation/AI/missions — present in source but
+    │   ai/, mission/            BYPASSED at runtime (Outpost tick doesn't use them)
+```
+
+The g3 simulation, fleet AI, voice commands, missions, and orbit-camera controls are all left in-tree but unused. Don't expand them; new gameplay should land in `game/` and in `MainActivity`'s draft tick.
 
 ## Build & run
 
 ```bash
-./gradlew assembleDebug              # build debug APK (also invokes CMake for native libs)
+./gradlew assembleDebug              # build debug APK (CMake builds native libs)
 ./gradlew installDebug               # build + install on connected device/emulator
-./gradlew test                       # JVM unit tests (none currently — see "Tests" below)
-./gradlew connectedAndroidTest       # instrumented tests on device
+./gradlew clean                      # nuke build outputs
 ./gradlew lint
-./gradlew clean
 ```
 
-Use `gradlew.bat` on Windows shells. Native build runs through CMake (`app/src/main/cpp/CMakeLists.txt`) — first build downloads the NDK if missing and is slow.
+Use `gradlew.bat` on Windows shells. First build downloads the NDK if missing — slow.
+
+There are **no tests** in this repo. The original g3 project has ~9 unit tests under `D:\g3\app\src\test\java\com\example\g3\` (covering its `sim/`, `mission/`, `intelligence/` packages); they would need their package declarations updated to `com.example.asteroidoutpost.*` to compile here.
 
 ## Shader compilation
 
@@ -42,73 +73,92 @@ Never edit files in `assets/shaders/` directly — they are build outputs.
 
 Pinned in `gradle/libs.versions.toml`:
 
-- AGP **9.1.1**, Kotlin **2.2.10**
+- AGP **9.1.1**, Kotlin **2.1.0**
 - `compileSdk = 36`, `minSdk = 28`, `targetSdk = 36`, **Java 17** source/target
+- Package: `com.example.asteroidoutpost`
 - NDK ABIs: `arm64-v8a`, `x86_64` only (no 32-bit)
 - C++20 (`-std=c++20`), Vulkan, no `game-activity` lib
-- AppCompat 1.7.1 (no Compose anywhere — the original Compose scaffold was removed when g3 was copied in)
+- AppCompat 1.7.1 (no Compose anywhere)
 - Toolchain JDK 21 (`gradle/gradle-daemon-jvm.properties`)
+
+Note: although AGP 9.1.1 supports Kotlin 2.2.x, applying `kotlin.android` plugin alongside AGP 9 raises "Cannot add extension with name 'kotlin'" when both register the extension. Workaround used here: declare the plugin in `libs.versions.toml` but do **not** apply it in `app/build.gradle.kts` — AGP supplies the Kotlin extension itself.
 
 ## Architecture
 
-```text
-Kotlin (UI, lifecycle, AI, scene state, asset loading)
-    -> JNI via EngineJni.kt / cpp/android/EngineJni.cpp
+```
+Kotlin (UI, lifecycle, game state, scene assembly, asset loading)
+    ↓ JNI via EngineJni.kt / cpp/android/EngineJni.cpp
 C API (cpp/engine/engine_api.h — the only crossing point)
-    ->
-C++ Vulkan engine -> libstationcore.so
+    ↓
+C++ Vulkan engine → libstationcore.so
 ```
 
-- Kotlin owns gameplay, UI, selection, object identity, asset bytes. The engine is "dumb": each frame Kotlin submits a draw list (`beginScene → drawMesh* → endScene → renderFrame`).
-- The engine knows nothing about missions, tactics, or game rules.
+- Kotlin owns gameplay, UI, asset bytes. The engine is "dumb" — every frame Kotlin submits a draw list (`beginScene → drawMesh* → endScene → renderFrame`).
+- The engine knows nothing about missions, scoring, or game rules.
 - All `.cpp` files must be listed in `cpp/CMakeLists.txt` — adding a source file without updating CMake silently fails to link.
+- JNI symbols are mangled into the package path: `Java_com_example_asteroidoutpost_EngineJni_<funcName>`. Renaming the package requires updating all of these symbols simultaneously (and the C++ side).
 
-### Kotlin layers (`java/com/example/g3/`)
+### Outpost runtime (in MainActivity)
 
-| Package | Role |
-|---|---|
-| (root) | Activities, `EngineView` (SurfaceView + render thread + touch), `Scene.kt`, `EngineJni.kt`, overlay views |
-| `sim/` | **Simulation runtime** — `SimulationWorld` owns ships, projectiles, explosions, world objects. `SceneAdapter` turns snapshots into render lists. `WeaponController`, `ShipMotor`, `ShipController` translate intents into state. |
-| `intelligence/` | **Tactical command layer** — `StationAI` is the rule-based commander emitting `ShipIntent`s. `CommandClassifier` loads `assets/ml/model.json` for Russian voice/text commands. `FleetRegistry` maps wing names (Alpha=0,1,2; Beta=3,4) to ship ids. |
-| `ai/` | Mixed: `MissionController` still drives the fly-around path; `ShipAgent`, `FormationDef`, `SlotAssigner` support it. Not pure legacy — don't delete blindly. |
-| `mission/` | Mission abstractions (`AttackMission`, `FlyAroundMission`). |
+Game state machine: `MENU / PLAYING / WON / LOST`. The tick handler runs only in `PLAYING`. Per tick:
 
-### Per-frame tick flow
-
-```text
-MainActivity.ensureTicking()
-  → StationAI.tick(dt, simWorld)
-  → simWorld.update(dt, intents)
-  → StationAI.onEvents(events, simWorld)
-  → optional MissionController.update(dt)
-  → SceneAdapter.sceneFromWorld(...)
-  → SceneAdapter.plasmaBillboards(...)
-```
+1. Move robot toward touch X (only while finger is down).
+2. Robot fires bullets straight up at fixed interval.
+3. Each turret fires at the nearest asteroid (vector pointing to target).
+4. Move bullets along their velocity vector; cull off-screen and on hit (apply per-bullet damage to asteroid HP).
+5. Move asteroids down at mission's speed.
+6. Asteroid touches platform → damage platform, remove asteroid.
+7. Wave control: spawn current wave's asteroids at intervals; when wave fully spawned and asteroids list is empty, start a 2-sec break or trigger win.
+8. Build the scene (platform, robot, turrets, asteroids, bullets) and submit.
+9. Win/lose checks → `showWin()` / `showLose()` triggers + presentation overlays.
 
 ### Vulkan pipelines (`cpp/engine/VulkanContext.cpp`)
 
-`system` (opaque meshes), `frame` (additive depth-tested selection frames), `star` (point field), `plasma` (additive camera-facing billboards), `billboard` (normal billboards).
+`system` (opaque meshes), `frame` (additive depth-tested selection frames — disabled by Outpost), `star` (point field — visible in background), `plasma` (additive camera-facing billboards — unused by Outpost), `billboard` (normal billboards — unused).
 
-Selection frames are *rectangular UI markers*, not mesh contours — Kotlin sends gameplay shape points, native code projects them and fits the frame mesh around the screen-space bounds.
+### Camera
 
-### Demo scene (will be replaced when M1 starts)
+Configured in `cpp/engine/Camera.cpp::reset()` for fixed side-view: target `(0, 0, 4)`, radius `22`, pitch `π/2` (rotation around X). Touch input on the engine surface is swallowed by `MainActivity`'s onTouchListener so the player's drag doesn't move the camera; it sets the robot's target X instead.
 
-ids `0..4` allied fighters near `(15, 10, 0)`; id `5` allied station `(0,-2,-5)`; id `6` enemy station `(0,150,0)`; ids `7..11` enemy fighters at `y=120`.
+### Coordinate convention
+
+X = horizontal screen, Z = vertical screen, Y = depth (always 0 for game objects). Visible area at the target plane on a 1080×2400 device: X ∈ [−2.47, +2.47], Z ∈ [−1.49, +9.49]. Same world-units-to-pixels ratio horizontally and vertically, so equal `scaleX` and `scaleZ` produce a visually square shape.
+
+## SceneObject extensions for Outpost
+
+`Scene.kt`'s `SceneObject` was extended with:
+- `scaleX`, `scaleY`, `scaleZ` (NaN means "fall back to uniform `scale`") — for stretching primitives.
+- `rotationY` — rotation around world Y axis, used to orient bullets along their velocity vector.
+
+`modelMatrix()` composes `T * Rz * Ry * S`. Default values are no-ops, so existing g3 code that only uses uniform `scale` and `rotationZ` is unaffected.
+
+All Outpost geometry (platform, robot, turrets, asteroids, bullets) uses a single primitive: `app/src/main/assets/models/quad.gltf` — an X-Z plane unit quad with double-sided indices and white per-vertex colours. It's loaded with three tints (red / grey / blue). Real models are a backlog item.
 
 ## Adding an engine API function
 
 1. Declare + implement in `cpp/engine/engine_api.h` and `engine_api.cpp`.
-2. Add a JNI wrapper in `cpp/android/EngineJni.cpp` (symbol must be `Java_com_example_g3_EngineJni_<funcName>`).
+2. Add a JNI wrapper in `cpp/android/EngineJni.cpp` (symbol must be `Java_com_example_asteroidoutpost_EngineJni_<funcName>`).
 3. Add a matching `external fun` in `EngineJni.kt`.
-4. If you added a new `.cpp` file, also list it in `cpp/CMakeLists.txt`.
-
-## Tests
-
-**The g3 source copy intentionally excluded `app/src/test/` and `app/src/androidTest/`** — the original g3 project has ~9 unit tests under `D:\g3\app\src\test\java\com\example\g3\` (covering `sim/`, `mission/`, `intelligence/`) plus an instrumented example. They are not in this repo. If you need them, copy them over from `D:\g3\app\src\test\` and `D:\g3\app\src\androidTest\` — they should compile against the engine code as-is since the package paths match.
+4. If you added a new `.cpp` file, list it in `cpp/CMakeLists.txt`.
 
 ## Project quirks
 
-- Root project name in `settings.gradle.kts` is literally `"Asteroid(Outpost"` (stray `(`). Leave it.
-- `_ABOUT.md` files exist in `cpp/`, `cpp/engine/`, `cpp/android/`, and `java/com/example/g3/` and document each layer. Update them when you change the layer's responsibilities (rule 5 from the original g3 conventions).
+- Root project name in `settings.gradle.kts` is literally `"Asteroid(Outpost"` (stray `(`). Cosmetic — leave it.
+- `RECORD_AUDIO` permission is declared because of the inherited g3 voice-input feature; the corresponding mic UI is hidden by Outpost (`applySettings` forces `btnMic` to GONE). Permission can be dropped if voice never comes back.
+- The full g3 `activity_main.xml` is still inflated, but every g3 control (commands drawer, build menu, ship card, mic, settings tab, axis indicator) is hidden in `MainActivity.onCreate`. Outpost UI (HUD text views + overlays) is added programmatically. When introducing real Outpost UI, consider replacing the layout entirely.
+- `_ABOUT.md` files exist in `cpp/`, `cpp/engine/`, `cpp/android/`, and `java/com/example/asteroidoutpost/` and document each layer. Keep them in sync when changing layer responsibilities.
 - Don't make architectural changes to the Kotlin↔C boundary or Vulkan pipelines without discussing first — they are the most expensive parts to get wrong.
-- `RECORD_AUDIO` permission is declared because of the speech-input feature (`btnMic` → `CommandClassifier`).
+
+## UI / styling
+
+The game's "clean sci-fi arcade" look is centralised in two files:
+
+- **`game/UiTheme.kt`** — single source of truth for the 5-colour palette (overlay bg, panel bg, accent red/blue/green, warning amber, text variants), border colours, corner radii (panel 18dp, card 14dp, button 12dp), paddings, gaps, button heights, and text sizes (title 28sp, heading 20sp, body 16sp, caption 13sp). Touch this file to retune the look — overlays must not hard-code values.
+- **`game/UiHelpers.kt`** — programmatic helpers: `stylePanel(view, raised?)`, `buildCard(ctx, raised?)`, `buildPrimaryButton`, `buildSecondaryButton`, `buildDisabledButton`, `buildTitle/Heading/Body/Caption`, `buildPill(fill)`. All built with `GradientDrawable` (no XML drawables), styled from `UiTheme` constants.
+
+`OverlayFactory` consumes both — it owns the layout structure of each overlay (menu / mission select / upgrades / win-lose / generic), but never sets a colour or padding directly. Adding a new overlay screen: build root via `makeOverlayRoot`, populate with `UiHelpers.build*` widgets, add gaps via `gapParams(ctx, dp)`.
+
+## Memory & persistence
+
+- `GameProgress` (data class) — persistent state: `metal`, three upgrade levels, `highestMissionUnlocked`. Loaded once in `onCreate` from `SharedPreferences("outpost_progress", MODE_PRIVATE)` via `ProgressRepository`. Mutations go through `MainActivity.updateProgress { ... }` which copies + saves immediately.
+- `MissionRun` (data class) — in-flight stats for the current run: asteroids destroyed, score, metal earned, win bonus, current wave display, total waves, mission name. Reset on each `startMission`.

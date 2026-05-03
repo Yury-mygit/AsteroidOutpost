@@ -3,7 +3,17 @@
     "allow": [
       "Bash(./gradlew :app:tasks)",
       "Bash(git init *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git branch *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(./gradlew assembleDebug)",
+      "Bash(./gradlew installDebug)",
+      "Bash(/c/Users/user/AppData/Local/Android/Sdk/platform-tools/adb.exe pull *)",
+      "Bash(/c/Python314/python *)",
+      "Bash(./gradlew clean *)",
+      "Bash(git log *)"
     ]
   }
 }

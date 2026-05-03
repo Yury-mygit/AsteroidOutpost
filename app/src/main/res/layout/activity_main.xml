@@ -5,12 +5,12 @@
     android:layout_height="match_parent">
 
     <!-- Vulkan render surface -->
-    <com.example.g3.EngineView
+    <com.example.asteroidoutpost.EngineView
         android:id="@+id/engineView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <com.example.g3.SelectionOverlayView
+    <com.example.asteroidoutpost.SelectionOverlayView
         android:id="@+id/selectionOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -213,7 +213,7 @@
     </LinearLayout>
     </LinearLayout>
 
-    <com.example.g3.CameraJoystickView
+    <com.example.asteroidoutpost.CameraJoystickView
         android:id="@+id/cameraJoystick"
         android:layout_width="168dp"
         android:layout_height="168dp"
@@ -257,7 +257,7 @@
             android:textSize="14sp"
             android:background="#44000000" />
 
-        <com.example.g3.AxisIndicatorView
+        <com.example.asteroidoutpost.AxisIndicatorView
             android:id="@+id/axisIndicator"
             android:layout_width="36dp"
             android:layout_height="36dp" />
