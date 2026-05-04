@@ -19,6 +19,7 @@ layout(location = 2) in vec3 inNormal;
 layout(location = 0) out vec4 vColor;     // RGB → lit/tinted in fragment, A → output alpha
 layout(location = 1) out vec3 vNormal;    // world-space normal
 layout(location = 2) out vec3 vWorldPos;  // world-space position
+layout(location = 3) out vec2 vLocalXZ;   // model-space X/Z — used for radial soft-fade (E2.1)
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
@@ -27,7 +28,8 @@ void main() {
     // Normal in world space (no non-uniform scale so transpose-inverse = model)
     vNormal = normalize(mat3(pc.model) * inNormal);
 
-    vColor = inColor;
+    vColor   = inColor;
+    vLocalXZ = inPosition.xz;
 
     gl_Position = ubo.proj * ubo.view * worldPos;
 }

@@ -1407,6 +1407,11 @@ namespace station {
                 const math::Mat4 billboard = m_camera.billboardMatrix(
                         {draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
                 std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
+                // E2.1 — flag plasma fragment shader to apply radial soft-fade.
+                // Project's plasma billboards use quad.gltf (corners at ±1 in X-Z).
+                // Fragment shader maps length(vLocalXZ) → alpha so the visible
+                // glow inscribes the quad and corners go transparent.
+                pc.tint[0] = 1.0f;
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);

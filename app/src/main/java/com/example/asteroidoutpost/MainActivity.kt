@@ -103,7 +103,6 @@ class MainActivity : AppCompatActivity() {
     private var quadMeshHandle:     Long = 0L  // unit X-Z quad, red tint (central turret, bullets)
     private var quadGreyHandle:     Long = 0L  // unit X-Z quad, grey tint (platform)
     private var quadBlueHandle:     Long = 0L  // unit X-Z quad, blue tint (side turrets)
-    private var quadDomeHandle:     Long = 0L  // unit X-Z quad, soft cyan-blue (M7 shield-dome plasma billboard)
     private var asteroidMesh3D:        Long = 0L  // Asteroid_1.glb tinted grey  (NORMAL / FAST)
     private var asteroidMeshHeavy:     Long = 0L  // Asteroid_1.glb tinted dark red (HEAVY)
     private var asteroidMeshExplosive: Long = 0L  // Asteroid_1.glb tinted orange   (EXPLOSIVE)
@@ -114,6 +113,18 @@ class MainActivity : AppCompatActivity() {
     // so when rendered through the translucent pipeline it fades smoothly to
     // the background instead of showing hard quad edges. One handle per tint.
     private val nebulaHandles: LongArray = LongArray(5)
+    // Shield dome (E2.2) — procedural half-ring (annular half-disk) mesh.
+    // Three concentric arcs over the upper half-circle (θ ∈ [0, π]), built as
+    // two triangle strips: alpha 0 at the inner rim, peak alpha at the middle
+    // arc, alpha 0 at the outer rim. Drawn through the translucent pipeline →
+    // the result reads as a thin energy-membrane outline of the dome instead
+    // of a filled blue wash. Interior is fully transparent so the central
+    // turret stays visible inside the shield.
+    private var domeMembraneHandle: Long = 0L
+    // Static translucent scene (background nebulae) — captured once in
+    // setupBackgroundNebulae so buildScene can compose it with per-frame
+    // dynamic translucent objects (currently just the shield dome).
+    private var nebulaeTranslucent: List<SceneObject> = emptyList()
 
     // Aim state. Player drags on the screen to aim the central turret; while the
     // finger is down, the turret fires along the aim direction at fire-rate.
@@ -673,14 +684,10 @@ class MainActivity : AppCompatActivity() {
             quadGreyHandle  = engineView.engine.loadMeshColored(quadBytes, 0.55f, 0.55f, 0.60f)
             quadBlueHandle  = engineView.engine.loadMeshColored(quadBytes, 0.30f, 0.55f, 1.00f)
             quadFlashHandle = engineView.engine.loadMeshColored(quadBytes, 1.00f, 0.85f, 0.30f)
-            // Soft cyan-blue tint kept moderate so additive stacks read as glow
-            // rather than blowing out to white. Used by the shield dome.
-            quadDomeHandle  = engineView.engine.loadMeshColored(quadBytes, 0.18f, 0.45f, 0.85f)
             if (quadMeshHandle  == 0L) quadMeshHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadGreyHandle  == 0L) quadGreyHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadBlueHandle  == 0L) quadBlueHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadFlashHandle == 0L) quadFlashHandle = engineView.engine.loadMesh(quadBytes)
-            if (quadDomeHandle  == 0L) quadDomeHandle  = quadBlueHandle  // graceful fallback
             if (quadMeshHandle == 0L || quadGreyHandle == 0L || quadBlueHandle == 0L || quadFlashHandle == 0L)
                 showStatus("Quad load failed (handle=0)")
         } catch (e: Exception) {
@@ -744,9 +751,73 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Procedural half-ring (annular half-disk) mesh for the shield dome (E2.2).
+     * Three concentric arcs over the upper half-circle in the X-Z plane:
+     *  - inner arc at radius `innerR`, alpha = 0 (transparent — interior of dome)
+     *  - middle arc at radius `midR`,  alpha = `peakAlpha` (bright energy band)
+     *  - outer arc at radius `outerR`, alpha = 0 (transparent — outside dome)
+     * Two triangle strips connect (inner→middle) and (middle→outer); per-vertex
+     * alpha interpolates linearly so each strip fades 0→peak→0 across its
+     * width, producing a thin glowing half-circle outline. Interior of the
+     * dome stays fully transparent — the central turret remains visible inside.
+     */
+    private fun buildDomeMembraneMesh(
+        r: Float, g: Float, b: Float,
+        peakAlpha: Float = 0.85f,
+        innerR: Float = 0.85f,
+        midR:   Float = 0.92f,
+        outerR: Float = 1.00f,
+        sectors: Int = 48,
+    ): Long {
+        val nVertsPerArc = sectors + 1
+        val nVerts = nVertsPerArc * 3
+        val vertices = FloatArray(nVerts * 10)
+        val radii  = floatArrayOf(innerR, midR, outerR)
+        val alphas = floatArrayOf(0f, peakAlpha, 0f)
+
+        for (ring in 0..2) {
+            for (s in 0..sectors) {
+                val ang = (s.toDouble() * Math.PI / sectors).toFloat()  // 0 → π
+                val off = (ring * nVertsPerArc + s) * 10
+                vertices[off + 0] = kotlin.math.cos(ang) * radii[ring]
+                vertices[off + 1] = 0f
+                vertices[off + 2] = kotlin.math.sin(ang) * radii[ring]
+                vertices[off + 3] = r
+                vertices[off + 4] = g
+                vertices[off + 5] = b
+                vertices[off + 6] = alphas[ring]
+                vertices[off + 7] = 0f
+                vertices[off + 8] = 1f
+                vertices[off + 9] = 0f
+            }
+        }
+
+        // Two strips × `sectors` quads × 6 indices/quad.
+        val indices = ShortArray(2 * sectors * 6)
+        var idx = 0
+        for (strip in 0..1) {
+            val ring0 = strip
+            val ring1 = strip + 1
+            for (s in 0 until sectors) {
+                val v0 = (ring0 * nVertsPerArc + s    ).toShort()
+                val v1 = (ring0 * nVertsPerArc + s + 1).toShort()
+                val v2 = (ring1 * nVertsPerArc + s    ).toShort()
+                val v3 = (ring1 * nVertsPerArc + s + 1).toShort()
+                // Triangle 1: v0, v1, v2 (counter-clockwise viewed from +Y)
+                indices[idx++] = v0; indices[idx++] = v1; indices[idx++] = v2
+                // Triangle 2: v1, v3, v2
+                indices[idx++] = v1; indices[idx++] = v3; indices[idx++] = v2
+            }
+        }
+        return engineView.engine.loadMeshRaw(vertices, indices)
+    }
+
+    /**
      * Generate the background nebula meshes once and submit them as
      * translucent scene objects. Set once at engine setup; never touched after,
      * so menu / mission select / game / win-lose all share the same backdrop.
+     * Also builds the shield-dome half-disk meshes (E2.2) — they're loaded
+     * here because they share `loadMeshRaw` and the translucent pipeline.
      */
     private fun setupBackgroundNebulae() {
         val tints = arrayOf(
@@ -770,7 +841,7 @@ class MainActivity : AppCompatActivity() {
             N(3,  1.9f, 7.6f, 2.8f),  // twilight blue, top-right
             N(4,  0.0f, 2.8f, 2.0f),  // warm dust, mid-centre
         )
-        engineView.translucentObjects = placements.mapIndexed { i, p ->
+        nebulaeTranslucent = placements.mapIndexed { i, p ->
             SceneObject(
                 id         = 2000 + i,
                 meshHandle = nebulaHandles[p.tint],
@@ -778,6 +849,12 @@ class MainActivity : AppCompatActivity() {
                 scale      = p.scale,
             )
         }
+        // E2.2 — shield dome membrane mesh (single bright cyan-blue ring).
+        // buildShieldDome scales it to fit over the platform.
+        domeMembraneHandle = buildDomeMembraneMesh(0.45f, 0.75f, 1.00f)
+        // Initial assignment so menu / mission-select scenes (which don't run
+        // buildScene) still show the nebulae backdrop.
+        engineView.translucentObjects = nebulaeTranslucent
     }
 
     private fun loadSelectionFrames() {
@@ -840,11 +917,12 @@ class MainActivity : AppCompatActivity() {
         // Screen extents at the target plane: X ∈ [-2.47, +2.47], Z ∈ [-1.49, +9.49].
         // Width-to-height world ratio matches pixel ratio, so equal scaleX and
         // scaleZ produce a visually square shape.
-        // Shield VFX (M7) lives on the additive plasma pipeline below — see
-        // buildShieldDomeBillboards(). The platform itself stays grey at all
-        // times now; the dome glow over the base communicates the shield state.
-        // Background nebulae are translucent meshes set up once in
-        // setupBackgroundNebulae() and pushed to engineView.translucentObjects.
+        // Shield VFX (E2.2) is built by buildShieldDome() and merged into the
+        // translucent list at the end of this function. The platform itself
+        // stays grey at all times now; the dome glow over the base
+        // communicates the shield state. Background nebulae are translucent
+        // meshes built once in setupBackgroundNebulae() and cached in
+        // nebulaeTranslucent — composed with the dome each frame.
 
         // Central-turret reload bar (M7.1c) — sits on the platform face just
         // below the turret base. Backing strip + fill strip; fill width grows
@@ -946,16 +1024,6 @@ class MainActivity : AppCompatActivity() {
                 rotationZ  = a.rotation,
                 scale      = a.half,
             )
-        } + flashes.mapIndexed { i, f ->
-            // Flash grows from 0.6× to 1.4× of its peak half-size during its life.
-            val t = 1f - (f.life / f.maxLife)
-            val s = f.halfMax * (0.6f + t * 0.8f)
-            SceneObject(
-                id         = 400 + i,
-                meshHandle = quadFlashHandle,
-                x = f.x, y = 0f, z = f.z,
-                scaleX = s, scaleY = 1f, scaleZ = s,
-            )
         } + bullets.mapIndexed { i, b ->
             // Rotate the quad so its long (Z) axis aligns with velocity (vx, vz).
             // Rotation around Y maps (0,0,1) → (sin θ, 0, cos θ), so θ = atan2(vx, vz).
@@ -970,46 +1038,62 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        engineView.plasmaBillboards = buildShieldDomeBillboards()
+        // Flash VFX: muzzle flash, bullet trails, asteroid hit, AoE rings, ENERGY-buff
+        // pickup. Routed through the additive plasma pipeline (E2.1) so they read as
+        // soft circular glows that brighten what's behind them — instead of square
+        // yellow placeholders sitting on the dark background.
+        val flashBillboards = flashes.map { f ->
+            val t = 1f - (f.life / f.maxLife)
+            val s = f.halfMax * (0.6f + t * 0.8f)
+            BillboardDraw(quadFlashHandle, f.x, 0f, f.z, s)
+        }
+        engineView.plasmaBillboards   = flashBillboards
+        engineView.translucentObjects = nebulaeTranslucent + buildShieldDome()
     }
 
     /**
-     * Shield dome VFX (M7). Stack of additive plasma billboards forming a
-     * tapered dome silhouette over the base:
-     *  - three wide "ridge" billboards along the platform (left / centre /
-     *    right) form a horizontal energy band at the dome's base
-     *  - one narrower billboard above caps the dome's apex
-     * Additive blending makes the overlap zones glow brighter, so the visible
-     * shape reads as a wide energy bubble that tapers toward the top.
+     * Shield dome VFX (E2.2). Two stacked half-disk meshes drawn through the
+     * translucent pipeline draws the membrane mesh as a thin glowing arc
+     * along the dome silhouette: bright energy band where the line of sight
+     * is tangent to the (notional 3D) dome surface, fully transparent
+     * interior so the central turret remains visible inside the shield.
      *
-     * Geometry is anchored ABOVE the central turret tip (z ≈ -0.34) — keeping
-     * the bottom edge of every layer at z ≥ -0.30 so the platform and turrets
-     * underneath stay their own colour instead of getting tinted blue.
+     * Anchored at platform top (`PLATFORM_TOP_Z`) with y = -0.05 so the
+     * translucent depth-test passes against y = 0 gameplay (smaller y = closer
+     * to camera given the LESS comparison) — the dome draws over turrets but
+     * its transparent interior keeps them visible.
+     *
+     * scaleX = 2.4, scaleZ = 2.0 → dome occupies x ∈ [-2.4, +2.4] (just
+     * inside the visible X = ±2.47 frustum) and z ∈ [PLATFORM_TOP_Z, +1.06]
+     * (just over the platform top, well below where asteroids spawn).
      *
      * Animation:
      *  - Subtle pulse modulates scale by ±4% over time so the dome breathes.
-     *  - Last 0.6 sec of duration: linear fade-out so the shield visibly
-     *    "collapses" before the COOLING transition.
+     *  - Last 0.6 sec of duration: linear fade-out via scale collapse so the
+     *    shield visibly retracts before the COOLING transition. (Per-vertex
+     *    alpha is baked into the mesh, so we modulate scale rather than alpha.)
      *
-     * Returns empty when the shield isn't active (or the dome mesh failed to
-     * load and there's no fallback) — the engine simply skips the plasma pass.
+     * Returns empty when the shield isn't active or the membrane mesh failed
+     * to load — translucent pass simply skips the dome.
      */
-    private fun buildShieldDomeBillboards(): List<BillboardDraw> {
+    private fun buildShieldDome(): List<SceneObject> {
         if (shieldState != ShieldState.ACTIVE) return emptyList()
-        if (quadDomeHandle == 0L) return emptyList()
+        if (domeMembraneHandle == 0L) return emptyList()
 
         val elapsed = DraftCombat.SHIELD_DURATION_SEC - shieldTimer
         val pulse   = 1f + 0.04f * kotlin.math.sin(elapsed * 5.0f)
         val fade    = (shieldTimer / 0.6f).coerceIn(0f, 1f)
         val mul     = pulse * fade
+        val baseZ   = DraftCombat.PLATFORM_TOP_Z
         return listOf(
-            // Base ridge — three wide billboards along the platform width.
-            // Each is small enough that its bottom edge stays above the turrets.
-            BillboardDraw(quadDomeHandle, -1.5f, 0f, 0.7f, scale = 1.0f * mul),
-            BillboardDraw(quadDomeHandle,  0.0f, 0f, 0.9f, scale = 1.2f * mul),
-            BillboardDraw(quadDomeHandle,  1.5f, 0f, 0.7f, scale = 1.0f * mul),
-            // Apex — narrower billboard sitting on top of the ridge.
-            BillboardDraw(quadDomeHandle,  0.0f, 0f, 1.6f, scale = 0.7f * mul),
+            SceneObject(
+                id         = 700,
+                meshHandle = domeMembraneHandle,
+                x          = 0f, y = -0.05f, z = baseZ,
+                scaleX     = 2.4f * mul,
+                scaleY     = 1f,
+                scaleZ     = 2.0f * mul,
+            ),
         )
     }
 
