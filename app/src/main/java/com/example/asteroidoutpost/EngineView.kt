@@ -39,6 +39,14 @@ class EngineView @JvmOverloads constructor(
     @Volatile
     var plasmaBillboards: List<BillboardDraw> = emptyList()
 
+    /**
+     * E1.2 — translucent SceneObjects rendered through the alpha-blend
+     * pipeline. Mesh's per-vertex alpha controls transparency. Used for soft
+     * nebulae / domes / fade VFX.
+     */
+    @Volatile
+    var translucentObjects: List<SceneObject> = emptyList()
+
     private var renderThread: RenderThread? = null
     @Volatile
     private var pendingScreenFrames: List<ScreenFrame> = emptyList()
@@ -248,7 +256,7 @@ class EngineView @JvmOverloads constructor(
     }
 
     fun submitCurrentScene() {
-        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards)
+        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects)
     }
 
     private fun collectScreenFrames(objects: List<SceneObject>): List<ScreenFrame> {
@@ -290,7 +298,7 @@ class EngineView @JvmOverloads constructor(
         override fun run() {
             while (running) {
                 val currentScene = engineView.scene
-                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards)
+                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects)
                 engine.renderFrame()
                 engineView.publishScreenFrames(engineView.collectScreenFrames(currentScene))
                 try {

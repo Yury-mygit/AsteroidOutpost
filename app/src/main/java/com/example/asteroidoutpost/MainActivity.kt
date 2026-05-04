@@ -103,11 +103,17 @@ class MainActivity : AppCompatActivity() {
     private var quadMeshHandle:     Long = 0L  // unit X-Z quad, red tint (central turret, bullets)
     private var quadGreyHandle:     Long = 0L  // unit X-Z quad, grey tint (platform)
     private var quadBlueHandle:     Long = 0L  // unit X-Z quad, blue tint (side turrets)
+    private var quadDomeHandle:     Long = 0L  // unit X-Z quad, soft cyan-blue (M7 shield-dome plasma billboard)
     private var asteroidMesh3D:        Long = 0L  // Asteroid_1.glb tinted grey  (NORMAL / FAST)
     private var asteroidMeshHeavy:     Long = 0L  // Asteroid_1.glb tinted dark red (HEAVY)
     private var asteroidMeshExplosive: Long = 0L  // Asteroid_1.glb tinted orange   (EXPLOSIVE)
     private var asteroidMeshEnergy:    Long = 0L  // Asteroid_1.glb tinted cyan     (ENERGY)
     private var quadFlashHandle:    Long = 0L  // unit X-Z quad, bright yellow (destruction flash)
+    // Background nebulae — soft-edge disks (E1.4) loaded via `loadMeshRaw`.
+    // Each disk is a triangle fan: centre vertex alpha=1, rim vertices alpha=0,
+    // so when rendered through the translucent pipeline it fades smoothly to
+    // the background instead of showing hard quad edges. One handle per tint.
+    private val nebulaHandles: LongArray = LongArray(5)
 
     // Aim state. Player drags on the screen to aim the central turret; while the
     // finger is down, the turret fires along the aim direction at fire-rate.
@@ -131,6 +137,11 @@ class MainActivity : AppCompatActivity() {
         // aoeDamage applied to every other asteroid within the radius.
         val aoeRadius: Float = 0f,
         val aoeDamage: Int = 0,
+        // Bullet-trail VFX (M7.1). Counts down to next trail-particle emission;
+        // the tick loop drops a tiny fading flash at the current bullet position
+        // each time this hits zero, producing a comet-style streak behind the
+        // projectile. Persisted per-bullet so trails stay even-spaced.
+        var trailTimer: Float = 0f,
     )
     private data class Flash(
         val x: Float, val z: Float,
@@ -158,7 +169,12 @@ class MainActivity : AppCompatActivity() {
         Asteroid(-1.5f, 8.5f, 100),
         Asteroid( 1.0f, 8.0f, 100),
     )
-    private var fireTimer:  Float = 0f
+    // Central turret fire cooldown — counts DOWN regardless of touch state.
+    // A new shot is allowed only when this hits 0; on fire it's reset to the
+    // weapon's `fireIntervalSec`. This ensures rapid taps can't bypass the
+    // weapon's intended rate of fire (the previous `fireTimer` was primed on
+    // every ACTION_DOWN, which made tap-spam fire one shot per tap).
+    private var centralFireCooldown: Float = 0f
     private var spawnTimer: Float = 0f
     // Wave runtime state (set by startMission, advanced by tick).
     private var currentMission:    MissionConfig? = null
@@ -208,6 +224,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var waveAnnounceText:  TextView
     private lateinit var shieldButton:      TextView
     private lateinit var buffIndicator:     TextView
+    private lateinit var abortMissionBtn:   TextView
 
     // DRAFT — game state machine. MENU on launch; PLAYING starts on Play tap;
     // WON/LOST when conditions hit. Tick only advances when PLAYING.
@@ -253,6 +270,22 @@ class MainActivity : AppCompatActivity() {
         const val WAVE_BREAK_SEC:    Float = 2.0f
         const val FLASH_LIFE_SEC:    Float = 0.25f
         const val FLASH_HALF:        Float = 0.20f
+        // M7.1 VFX — turret muzzle, projectile trail, AoE ring.
+        const val MUZZLE_FLASH_LIFE: Float = 0.08f
+        const val MUZZLE_FLASH_HALF: Float = 0.13f
+        const val TRAIL_INTERVAL_SEC:Float = 0.04f
+        const val TRAIL_LIFE_SEC:    Float = 0.12f
+        const val TRAIL_HALF:        Float = 0.05f
+        const val AOE_RING_PARTICLES:Int   = 10
+        const val AOE_RING_PARTICLE_HALF: Float = 0.08f
+        const val AOE_RING_LIFE_SEC: Float = 0.30f
+        // Reload bar — strip on the lower part of the platform (the upper part
+        // is overlapped by the ЩИТ button overlay, which composites on top of
+        // the engine surface, so a bar placed there gets hidden). Anchored
+        // horizontally under the central turret. Fill width = readiness.
+        const val RELOAD_BAR_HALF_W:        Float = 0.40f
+        const val RELOAD_BAR_Z:             Float = -0.30f
+        const val RELOAD_BAR_HALF_THICK:    Float = 0.04f
         // Shield ability — base protection. Single charge with cooldown.
         const val SHIELD_DURATION_SEC: Float = 3.0f
         const val SHIELD_COOLDOWN_SEC: Float = 15.0f
@@ -445,9 +478,11 @@ class MainActivity : AppCompatActivity() {
         btnMic.setOnClickListener       { startListening() }
 
         // DRAFT — camera locked. Touch on engine surface aims the central turret.
-        // Hold-to-fire: while finger is down, fire bullets at fire-rate along the
-        // aim direction. ACTION_DOWN primes the fire timer so the first shot
-        // lands on the very next tick (responsive feel).
+        // Hold-to-fire: while finger is down, the tick fires bullets whenever the
+        // central-turret cooldown hits 0. The cooldown counts down independently
+        // of the touch state, so tapping rapidly cannot bypass the weapon's
+        // fireIntervalSec (early builds primed the timer per-ACTION_DOWN, which
+        // made tap-spam fire once per tap).
         engineView.onCameraOrbited = { _, _ -> }
         engineView.onCameraRolled  = { _ -> }
         engineView.onCameraReset   = { }
@@ -464,10 +499,6 @@ class MainActivity : AppCompatActivity() {
                         aimTargetX = (event.x / w - 0.5f) * (DraftCombat.SCREEN_HALF_W * 2f)
                         val zSpan = DraftCombat.SCREEN_TOP_Z - DraftCombat.SCREEN_BOTTOM_Z
                         aimTargetZ = DraftCombat.SCREEN_TOP_Z - (event.y / h) * zSpan
-                    }
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                        // Prime the timer for instant first shot on press.
-                        fireTimer = currentWeapon.fireIntervalSec
                     }
                     isTouching = true
                 }
@@ -492,26 +523,45 @@ class MainActivity : AppCompatActivity() {
         hudPanel = buildHudPanel()
         val sideMargin = com.example.asteroidoutpost.game.UiTheme.dp(this, 12f)
         val topMargin  = com.example.asteroidoutpost.game.UiTheme.dp(this, 16f)
+        // Reserve room on the right for the ✕ button (added below) so the HUD
+        // panel's right edge stops before the abort button instead of getting
+        // clipped behind it.
+        val hudRightInset = com.example.asteroidoutpost.game.UiTheme.dp(this, 56f)
         val hudParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             android.view.Gravity.TOP,
-        ).apply { setMargins(sideMargin, topMargin, sideMargin, 0) }
+        ).apply { setMargins(sideMargin, topMargin, hudRightInset, 0) }
         root.addView(hudPanel, hudParams)
 
         // Shield ability button — diegetic, sits on the platform area at the
         // bottom centre. Three visual states (READY / ACTIVE / COOLING) are
         // applied via refreshShieldButton() based on the shield state machine.
         shieldButton = buildShieldButton()
+        // Sized to fit on the platform — 36dp tall is just under the platform's
+        // ~44dp on-screen height so the button sits diegetically on the base.
         val shieldParams = FrameLayout.LayoutParams(
-            com.example.asteroidoutpost.game.UiTheme.dp(this, 140f),
-            com.example.asteroidoutpost.game.UiTheme.dp(this, 56f),
+            com.example.asteroidoutpost.game.UiTheme.dp(this, 96f),
+            com.example.asteroidoutpost.game.UiTheme.dp(this, 36f),
             android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL,
         ).apply {
-            bottomMargin = com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 18f)
+            bottomMargin = com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 12f)
         }
         root.addView(shieldButton, shieldParams)
         refreshShieldButton()
+
+        // Abort-mission button — small "✕" pill in the top-right corner. Lets
+        // the player bail out of a mission without playing it through. Shares
+        // visibility with the HUD (only visible during PLAYING).
+        abortMissionBtn = buildAbortMissionButton()
+        val abortSize = com.example.asteroidoutpost.game.UiTheme.dp(this, 36f)
+        val abortParams = FrameLayout.LayoutParams(
+            abortSize, abortSize,
+            android.view.Gravity.TOP or android.view.Gravity.END,
+        ).apply {
+            setMargins(0, topMargin, sideMargin, 0)
+        }
+        root.addView(abortMissionBtn, abortParams)
 
         // Buff indicator — small caption that appears under the HUD while a
         // buff (currently only ENERGY-asteroid main-weapon ×2) is active.
@@ -568,6 +618,7 @@ class MainActivity : AppCompatActivity() {
         // Game starts in MENU — hide HUD until Play tapped.
         hudPanel.visibility = View.GONE
         shieldButton.visibility = View.GONE   // hidden outside PLAYING
+        abortMissionBtn.visibility = View.GONE
         selectionOverlay.visibility = View.VISIBLE
         engineView.onScreenFrames = { frames ->
             latestScreenFrames = frames
@@ -622,10 +673,14 @@ class MainActivity : AppCompatActivity() {
             quadGreyHandle  = engineView.engine.loadMeshColored(quadBytes, 0.55f, 0.55f, 0.60f)
             quadBlueHandle  = engineView.engine.loadMeshColored(quadBytes, 0.30f, 0.55f, 1.00f)
             quadFlashHandle = engineView.engine.loadMeshColored(quadBytes, 1.00f, 0.85f, 0.30f)
+            // Soft cyan-blue tint kept moderate so additive stacks read as glow
+            // rather than blowing out to white. Used by the shield dome.
+            quadDomeHandle  = engineView.engine.loadMeshColored(quadBytes, 0.18f, 0.45f, 0.85f)
             if (quadMeshHandle  == 0L) quadMeshHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadGreyHandle  == 0L) quadGreyHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadBlueHandle  == 0L) quadBlueHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadFlashHandle == 0L) quadFlashHandle = engineView.engine.loadMesh(quadBytes)
+            if (quadDomeHandle  == 0L) quadDomeHandle  = quadBlueHandle  // graceful fallback
             if (quadMeshHandle == 0L || quadGreyHandle == 0L || quadBlueHandle == 0L || quadFlashHandle == 0L)
                 showStatus("Quad load failed (handle=0)")
         } catch (e: Exception) {
@@ -645,6 +700,83 @@ class MainActivity : AppCompatActivity() {
             if (asteroidMesh3D == 0L) showStatus("Asteroid_1.glb load failed")
         } catch (e: Exception) {
             showStatus("Asteroid_1.glb load failed: ${e.message}")
+        }
+        setupBackgroundNebulae()
+    }
+
+    /**
+     * Build a soft-edge disk mesh via `loadMeshRaw` (E1.3): a triangle fan
+     * with the centre vertex fully opaque and the rim vertices at alpha=0.
+     * Drawn through the translucent pipeline (E1.2) it reads as a soft round
+     * blob with no visible quad edges. Disk lies in the X-Z plane to match
+     * the existing camera convention.
+     */
+    private fun buildSoftDiskMesh(r: Float, g: Float, b: Float, sectors: Int = 24): Long {
+        val nVerts = sectors + 1
+        val vertices = FloatArray(nVerts * 10)
+        // Centre vertex: position (0,0,0), RGBA opaque, normal (0,1,0).
+        vertices[0] = 0f; vertices[1] = 0f; vertices[2] = 0f
+        vertices[3] = r;  vertices[4] = g;  vertices[5] = b; vertices[6] = 1f
+        vertices[7] = 0f; vertices[8] = 1f; vertices[9] = 0f
+        // Rim vertices on a unit circle, alpha=0 so the colour fades out.
+        for (s in 0 until sectors) {
+            val ang = (s.toDouble() * 2.0 * Math.PI / sectors).toFloat()
+            val off = (s + 1) * 10
+            vertices[off + 0] = kotlin.math.cos(ang)
+            vertices[off + 1] = 0f
+            vertices[off + 2] = kotlin.math.sin(ang)
+            vertices[off + 3] = r
+            vertices[off + 4] = g
+            vertices[off + 5] = b
+            vertices[off + 6] = 0f  // transparent rim
+            vertices[off + 7] = 0f
+            vertices[off + 8] = 1f
+            vertices[off + 9] = 0f
+        }
+        // Triangle fan: centre → rim[s] → rim[s+1]
+        val indices = ShortArray(sectors * 3)
+        for (s in 0 until sectors) {
+            indices[s * 3 + 0] = 0
+            indices[s * 3 + 1] = (s + 1).toShort()
+            indices[s * 3 + 2] = ((s + 1) % sectors + 1).toShort()
+        }
+        return engineView.engine.loadMeshRaw(vertices, indices)
+    }
+
+    /**
+     * Generate the background nebula meshes once and submit them as
+     * translucent scene objects. Set once at engine setup; never touched after,
+     * so menu / mission select / game / win-lose all share the same backdrop.
+     */
+    private fun setupBackgroundNebulae() {
+        val tints = arrayOf(
+            floatArrayOf(0.42f, 0.18f, 0.55f),  // 0 — deep purple
+            floatArrayOf(0.18f, 0.50f, 0.55f),  // 1 — cyan
+            floatArrayOf(0.55f, 0.22f, 0.30f),  // 2 — dim crimson
+            floatArrayOf(0.25f, 0.32f, 0.60f),  // 3 — twilight blue
+            floatArrayOf(0.50f, 0.42f, 0.22f),  // 4 — warm dust
+        )
+        for (i in tints.indices) {
+            nebulaHandles[i] = buildSoftDiskMesh(tints[i][0], tints[i][1], tints[i][2])
+        }
+        // Hand-placed positions for visual variety. y=+1 puts the nebulae
+        // behind the y=0 gameplay plane (LESS depth test rejects them at any
+        // pixel covered by gameplay geometry).
+        data class N(val tint: Int, val x: Float, val z: Float, val scale: Float)
+        val placements = listOf(
+            N(0, -1.7f, 6.2f, 3.6f),  // purple, upper-left
+            N(1,  1.5f, 4.0f, 3.0f),  // cyan, mid-right
+            N(2, -0.9f, 1.4f, 2.4f),  // crimson, lower-left
+            N(3,  1.9f, 7.6f, 2.8f),  // twilight blue, top-right
+            N(4,  0.0f, 2.8f, 2.0f),  // warm dust, mid-centre
+        )
+        engineView.translucentObjects = placements.mapIndexed { i, p ->
+            SceneObject(
+                id         = 2000 + i,
+                meshHandle = nebulaHandles[p.tint],
+                x          = p.x, y = 1f, z = p.z,
+                scale      = p.scale,
+            )
         }
     }
 
@@ -708,18 +840,56 @@ class MainActivity : AppCompatActivity() {
         // Screen extents at the target plane: X ∈ [-2.47, +2.47], Z ∈ [-1.49, +9.49].
         // Width-to-height world ratio matches pixel ratio, so equal scaleX and
         // scaleZ produce a visually square shape.
-        // Placeholder shield VFX: while ACTIVE the platform mesh swaps to the
-        // blue tint as a readable in-world cue. Proper dome VFX lands in M7.
-        val platformMesh = if (shieldState == ShieldState.ACTIVE) quadBlueHandle else quadGreyHandle
+        // Shield VFX (M7) lives on the additive plasma pipeline below — see
+        // buildShieldDomeBillboards(). The platform itself stays grey at all
+        // times now; the dome glow over the base communicates the shield state.
+        // Background nebulae are translucent meshes set up once in
+        // setupBackgroundNebulae() and pushed to engineView.translucentObjects.
+
+        // Central-turret reload bar (M7.1c) — sits on the platform face just
+        // below the turret base. Backing strip + fill strip; fill width grows
+        // proportionally to readiness so the player can read when the next
+        // shot is coming up. For the automatic gun (interval 0.15 s) it just
+        // looks like a constantly-full bar; for the heavy cannon (1.0 s) it's
+        // a meaningful charge meter.
+        val reloadInterval = currentWeapon.fireIntervalSec
+        val reloadProgress = if (reloadInterval > 0f)
+            (1f - centralFireCooldown / reloadInterval).coerceIn(0f, 1f)
+        else 1f
+        val reloadHalfW = DraftCombat.RELOAD_BAR_HALF_W
+        val reloadFillHalfW = reloadHalfW * reloadProgress
+        // Fill is anchored to the LEFT edge of the backing so it grows L→R.
+        val reloadFillCenterX = -reloadHalfW * (1f - reloadProgress)
         engineView.scene = listOf(
             // Platform — full width, 5% screen height, pinned to bottom.
             SceneObject(
                 id         = 100,
-                meshHandle = platformMesh,
+                meshHandle = quadGreyHandle,
                 x          = 0f, y = 0f, z = -1.215f,
                 scaleX     = 2.47f,
                 scaleY     = 1f,
                 scaleZ     = 0.275f,
+            ),
+            // Reload bar — backing (dim grey, full width).
+            SceneObject(
+                id         = 107,
+                meshHandle = quadGreyHandle,
+                x          = 0f, y = 0f, z = DraftCombat.RELOAD_BAR_Z,
+                scaleX     = reloadHalfW,
+                scaleY     = 1f,
+                scaleZ     = DraftCombat.RELOAD_BAR_HALF_THICK,
+            ),
+            // Reload bar — fill (yellow, width = progress * full). Nudged
+            // slightly forward in Y so it passes the LESS depth test against
+            // the backing (both share the y=0 plane otherwise, and the regular
+            // scene pipeline rejects equal-depth fragments).
+            SceneObject(
+                id         = 108,
+                meshHandle = quadFlashHandle,
+                x          = reloadFillCenterX, y = -0.01f, z = DraftCombat.RELOAD_BAR_Z,
+                scaleX     = reloadFillHalfW,
+                scaleY     = 1f,
+                scaleZ     = DraftCombat.RELOAD_BAR_HALF_THICK,
             ),
             // Central turret — main weapon. Tall red rectangle pivoted at its
             // base on the platform top. The SceneObject's center is offset along
@@ -798,6 +968,76 @@ class MainActivity : AppCompatActivity() {
                 scaleY     = 1f,
                 scaleZ     = b.halfH,
             )
+        }
+
+        engineView.plasmaBillboards = buildShieldDomeBillboards()
+    }
+
+    /**
+     * Shield dome VFX (M7). Stack of additive plasma billboards forming a
+     * tapered dome silhouette over the base:
+     *  - three wide "ridge" billboards along the platform (left / centre /
+     *    right) form a horizontal energy band at the dome's base
+     *  - one narrower billboard above caps the dome's apex
+     * Additive blending makes the overlap zones glow brighter, so the visible
+     * shape reads as a wide energy bubble that tapers toward the top.
+     *
+     * Geometry is anchored ABOVE the central turret tip (z ≈ -0.34) — keeping
+     * the bottom edge of every layer at z ≥ -0.30 so the platform and turrets
+     * underneath stay their own colour instead of getting tinted blue.
+     *
+     * Animation:
+     *  - Subtle pulse modulates scale by ±4% over time so the dome breathes.
+     *  - Last 0.6 sec of duration: linear fade-out so the shield visibly
+     *    "collapses" before the COOLING transition.
+     *
+     * Returns empty when the shield isn't active (or the dome mesh failed to
+     * load and there's no fallback) — the engine simply skips the plasma pass.
+     */
+    private fun buildShieldDomeBillboards(): List<BillboardDraw> {
+        if (shieldState != ShieldState.ACTIVE) return emptyList()
+        if (quadDomeHandle == 0L) return emptyList()
+
+        val elapsed = DraftCombat.SHIELD_DURATION_SEC - shieldTimer
+        val pulse   = 1f + 0.04f * kotlin.math.sin(elapsed * 5.0f)
+        val fade    = (shieldTimer / 0.6f).coerceIn(0f, 1f)
+        val mul     = pulse * fade
+        return listOf(
+            // Base ridge — three wide billboards along the platform width.
+            // Each is small enough that its bottom edge stays above the turrets.
+            BillboardDraw(quadDomeHandle, -1.5f, 0f, 0.7f, scale = 1.0f * mul),
+            BillboardDraw(quadDomeHandle,  0.0f, 0f, 0.9f, scale = 1.2f * mul),
+            BillboardDraw(quadDomeHandle,  1.5f, 0f, 0.7f, scale = 1.0f * mul),
+            // Apex — narrower billboard sitting on top of the ridge.
+            BillboardDraw(quadDomeHandle,  0.0f, 0f, 1.6f, scale = 0.7f * mul),
+        )
+    }
+
+    /**
+     * M7.1 — replace the placeholder "one big yellow square" AoE flash with a
+     * readable ring: a small bright flash at the impact centre plus a ring of
+     * tiny flashes positioned on the AoE perimeter. The ring silhouette
+     * communicates the affected radius without needing a soft-edge shader.
+     */
+    private fun spawnAoeRing(cx: Float, cz: Float, radius: Float) {
+        // Bright centre — keeps the impact moment readable.
+        flashes.add(Flash(
+            x = cx, z = cz,
+            life = DraftCombat.FLASH_LIFE_SEC,
+            maxLife = DraftCombat.FLASH_LIFE_SEC,
+            halfMax = DraftCombat.FLASH_HALF * 1.2f,
+        ))
+        // Perimeter ring — N small flashes spaced evenly around the radius.
+        val n = DraftCombat.AOE_RING_PARTICLES
+        for (i in 0 until n) {
+            val ang = i * 2f * Math.PI.toFloat() / n
+            flashes.add(Flash(
+                x = cx + radius * kotlin.math.cos(ang),
+                z = cz + radius * kotlin.math.sin(ang),
+                life = DraftCombat.AOE_RING_LIFE_SEC,
+                maxLife = DraftCombat.AOE_RING_LIFE_SEC,
+                halfMax = DraftCombat.AOE_RING_PARTICLE_HALF,
+            ))
         }
     }
 
@@ -1131,6 +1371,7 @@ class MainActivity : AppCompatActivity() {
         gameState = GameState.MENU
         hudPanel.visibility     = View.GONE
         shieldButton.visibility = View.GONE
+        abortMissionBtn.visibility = View.GONE
         menuOverlay.visibility          = View.GONE
         removeWinLoseOverlays()
         removeWeaponSelectOverlay()
@@ -1238,7 +1479,7 @@ class MainActivity : AppCompatActivity() {
         isTouching         = false
         bullets.clear()
         asteroids.clear()
-        fireTimer     = 0f
+        centralFireCooldown = 0f
         spawnTimer    = 0f
         turretFireT[0] = 0f
         turretFireT[1] = 0f
@@ -1259,6 +1500,7 @@ class MainActivity : AppCompatActivity() {
         refreshBuffIndicator()
         hudPanel.visibility     = View.VISIBLE
         shieldButton.visibility = View.VISIBLE
+        abortMissionBtn.visibility = View.VISIBLE
         menuOverlay.visibility          = View.GONE
         missionSelectOverlay.visibility = View.GONE
         removeWinLoseOverlays()
@@ -1276,6 +1518,7 @@ class MainActivity : AppCompatActivity() {
         asteroids.clear()
         hudPanel.visibility     = View.GONE
         shieldButton.visibility = View.GONE
+        abortMissionBtn.visibility = View.GONE
         missionSelectOverlay.visibility = View.GONE
         removeWinLoseOverlays()
         removeWeaponSelectOverlay()
@@ -1342,19 +1585,46 @@ class MainActivity : AppCompatActivity() {
     private fun buildShieldButton(): TextView {
         val ctx = this
         return TextView(ctx).apply {
-            textSize = com.example.asteroidoutpost.game.UiTheme.SP_BODY
+            textSize = com.example.asteroidoutpost.game.UiTheme.SP_CAPTION
             setTextColor(com.example.asteroidoutpost.game.UiTheme.COL_TEXT)
             gravity = Gravity.CENTER
             isAllCaps = false
-            val padH = com.example.asteroidoutpost.game.UiTheme.dp(
-                ctx, com.example.asteroidoutpost.game.UiTheme.DP_PAD_BUTTON_HORIZ,
-            )
-            val padV = com.example.asteroidoutpost.game.UiTheme.dp(
-                ctx, com.example.asteroidoutpost.game.UiTheme.DP_PAD_BUTTON_VERT,
-            )
-            setPadding(padH, padV, padH, padV)
+            // Tighter padding than the standard button — the button itself is
+            // only 36dp tall, the body padding would eat the whole interior.
+            val pad = com.example.asteroidoutpost.game.UiTheme.dp(ctx, 4f)
+            setPadding(pad * 2, pad, pad * 2, pad)
             setOnClickListener { onShieldTapped() }
         }
+    }
+
+    /**
+     * Small "✕" button anchored top-right of the screen during PLAYING — gives
+     * the player a way to abandon the current mission and return to the
+     * mission-select screen. No confirmation dialog yet; tap = leave.
+     */
+    private fun buildAbortMissionButton(): TextView {
+        val ctx = this
+        val theme = com.example.asteroidoutpost.game.UiTheme
+        return TextView(ctx).apply {
+            text = "✕"
+            textSize = theme.SP_HEADING
+            setTextColor(theme.COL_TEXT_DIM)
+            gravity = Gravity.CENTER
+            isAllCaps = false
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = theme.dp(ctx, theme.DP_BUTTON_RADIUS).toFloat()
+                setColor(theme.COL_PANEL_BG)
+                setStroke(theme.dp(ctx, theme.DP_BORDER_WIDTH), theme.COL_BORDER)
+            }
+            setOnClickListener { onAbortMissionTapped() }
+        }
+    }
+
+    /** Player tapped the ✕ button — bail out to mission select. */
+    private fun onAbortMissionTapped() {
+        if (gameState != GameState.PLAYING) return
+        showMissionSelect()
     }
 
     private fun shieldButtonDrawable(fill: Int): android.graphics.drawable.GradientDrawable =
@@ -1591,36 +1861,44 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Hold-to-fire: while finger is down, central turret fires the
-            // currently equipped weapon along the aim direction. Timer was primed
-            // to weapon.fireIntervalSec on ACTION_DOWN for an instant first shot.
-            // Active buff multiplies the weapon's per-shot damage.
+            // Central-turret cooldown — counts down EVERY tick, regardless of
+            // touch state, so a player can't fire faster than the weapon allows
+            // by spamming taps. While `isTouching`, fire whenever cooldown <= 0
+            // and reset cooldown to fireIntervalSec; the first shot of a press
+            // is still instant if the player hasn't fired recently (cooldown
+            // already at 0). Active buff multiplies the weapon's per-shot damage.
             val weapon = currentWeapon
             val weaponDamage = (effectiveMainWeaponDamage * weapon.damageMultiplier * activeBuffDamageMul).toInt()
-            if (isTouching) {
-                fireTimer += dt
-                while (fireTimer >= weapon.fireIntervalSec) {
-                    fireTimer -= weapon.fireIntervalSec
-                    val ang = centralTurretAngle
-                    val sinA = kotlin.math.sin(ang)
-                    val cosA = kotlin.math.cos(ang)
-                    val muzzleR = DraftCombat.CENTRAL_TURRET_HALF_H * 2f
-                    bullets.add(Bullet(
-                        x  = pivotX + sinA * muzzleR,
-                        z  = pivotZ + cosA * muzzleR,
-                        vx = sinA * weapon.projectileSpeed,
-                        vz = cosA * weapon.projectileSpeed,
-                        damage = weaponDamage,
-                        halfW = weapon.projectileHalfW,
-                        halfH = weapon.projectileHalfH,
-                        aoeRadius = weapon.aoeRadius,
-                        aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
-                    ))
-                }
-            } else {
-                // Finger up — don't accumulate. Reset so next press doesn't
-                // trigger a delayed leftover shot.
-                fireTimer = 0f
+            if (centralFireCooldown > 0f) {
+                centralFireCooldown -= dt
+                if (centralFireCooldown < 0f) centralFireCooldown = 0f
+            }
+            if (isTouching && centralFireCooldown <= 0f) {
+                centralFireCooldown = weapon.fireIntervalSec
+                val ang = centralTurretAngle
+                val sinA = kotlin.math.sin(ang)
+                val cosA = kotlin.math.cos(ang)
+                val muzzleR = DraftCombat.CENTRAL_TURRET_HALF_H * 2f
+                val muzzleX = pivotX + sinA * muzzleR
+                val muzzleZ = pivotZ + cosA * muzzleR
+                bullets.add(Bullet(
+                    x  = muzzleX,
+                    z  = muzzleZ,
+                    vx = sinA * weapon.projectileSpeed,
+                    vz = cosA * weapon.projectileSpeed,
+                    damage = weaponDamage,
+                    halfW = weapon.projectileHalfW,
+                    halfH = weapon.projectileHalfH,
+                    aoeRadius = weapon.aoeRadius,
+                    aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
+                ))
+                // Muzzle flash at the barrel tip — short bright pop.
+                flashes.add(Flash(
+                    x = muzzleX, z = muzzleZ,
+                    life = DraftCombat.MUZZLE_FLASH_LIFE,
+                    maxLife = DraftCombat.MUZZLE_FLASH_LIFE,
+                    halfMax = DraftCombat.MUZZLE_FLASH_HALF,
+                ))
             }
             // Turrets fire at the nearest asteroid (if any).
             for (i in turretXs.indices) {
@@ -1636,11 +1914,21 @@ class MainActivity : AppCompatActivity() {
                     if (len < 1e-4f) continue
                     val nx = dx / len
                     val nz = dz / len
+                    val muzzleX = tx
+                    val muzzleZ = tz + DraftCombat.TURRET_HALF
                     bullets.add(Bullet(
-                        x = tx, z = tz + DraftCombat.TURRET_HALF,
+                        x = muzzleX, z = muzzleZ,
                         vx = nx * DraftCombat.BULLET_SPEED,
                         vz = nz * DraftCombat.BULLET_SPEED,
                         damage = effectiveTurretDamage,
+                    ))
+                    // Side-turret muzzle flash — same look as the central
+                    // turret's, slightly smaller to keep them visually secondary.
+                    flashes.add(Flash(
+                        x = muzzleX, z = muzzleZ,
+                        life = DraftCombat.MUZZLE_FLASH_LIFE,
+                        maxLife = DraftCombat.MUZZLE_FLASH_LIFE,
+                        halfMax = DraftCombat.MUZZLE_FLASH_HALF * 0.7f,
                     ))
                 }
             }
@@ -1650,6 +1938,18 @@ class MainActivity : AppCompatActivity() {
                 val b = bulletIter.next()
                 b.x += b.vx * dt
                 b.z += b.vz * dt
+                // Drop a tiny fading flash at the current position at fixed
+                // intervals so each bullet visibly trails a comet streak.
+                b.trailTimer -= dt
+                if (b.trailTimer <= 0f) {
+                    b.trailTimer += DraftCombat.TRAIL_INTERVAL_SEC
+                    flashes.add(Flash(
+                        x = b.x, z = b.z,
+                        life = DraftCombat.TRAIL_LIFE_SEC,
+                        maxLife = DraftCombat.TRAIL_LIFE_SEC,
+                        halfMax = DraftCombat.TRAIL_HALF,
+                    ))
+                }
                 if (b.z > DraftCombat.SCREEN_TOP_Z + 1f ||
                     b.z < DraftCombat.SCREEN_BOTTOM_Z - 1f ||
                     b.x < -DraftCombat.SCREEN_HALF_W - 1f ||
@@ -1688,14 +1988,9 @@ class MainActivity : AppCompatActivity() {
                                 a.hp -= b.aoeDamage
                             }
                         }
-                        // Impact flash sized to the AoE radius (placeholder VFX;
-                        // proper explosion sprite lands in M7).
-                        flashes.add(Flash(
-                            x = hitX, z = hitZ,
-                            life = DraftCombat.FLASH_LIFE_SEC,
-                            maxLife = DraftCombat.FLASH_LIFE_SEC,
-                            halfMax = b.aoeRadius,
-                        ))
+                        // M7.1 — ring of small flashes traces the AoE radius
+                        // so the player can read the explosion's reach.
+                        spawnAoeRing(hitX, hitZ, b.aoeRadius)
                     }
                     bulletIter.remove()
                 }
@@ -1722,12 +2017,7 @@ class MainActivity : AppCompatActivity() {
                                     other.hp -= DraftCombat.EXPLOSIVE_AOE_DAMAGE
                                 }
                             }
-                            flashes.add(Flash(
-                                x = a.xPos, z = a.zPos,
-                                life = DraftCombat.FLASH_LIFE_SEC,
-                                maxLife = DraftCombat.FLASH_LIFE_SEC,
-                                halfMax = DraftCombat.EXPLOSIVE_AOE_RADIUS,
-                            ))
+                            spawnAoeRing(a.xPos, a.zPos, DraftCombat.EXPLOSIVE_AOE_RADIUS)
                         }
                         AsteroidType.ENERGY -> {
                             triggeredBuff = true

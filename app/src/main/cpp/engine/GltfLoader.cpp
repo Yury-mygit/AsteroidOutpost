@@ -57,11 +57,12 @@ namespace station {
                 colors  = accessorPtr<float>(model, colIt->second);
             }
 
-            // Fallback color from material
-            float fallback[3] = {0.6f, 0.6f, 0.7f};
+            // Fallback colour from material (alpha defaults to 1 — opaque).
+            float fallback[4] = {0.6f, 0.6f, 0.7f, 1.0f};
             if (!colors && prim.material >= 0) {
                 const auto& bf = model.materials[prim.material].pbrMetallicRoughness.baseColorFactor;
                 if (bf.size() >= 3) { fallback[0]=(float)bf[0]; fallback[1]=(float)bf[1]; fallback[2]=(float)bf[2]; }
+                if (bf.size() >= 4) { fallback[3]=(float)bf[3]; }
             }
 
             // Build vertices
@@ -75,10 +76,13 @@ namespace station {
                     out.vertices[i].color[0] = colors[i*colComp+0];
                     out.vertices[i].color[1] = colors[i*colComp+1];
                     out.vertices[i].color[2] = colors[i*colComp+2];
+                    // VEC4 colours carry per-vertex alpha; VEC3 defaults to opaque.
+                    out.vertices[i].color[3] = (colComp == 4) ? colors[i*colComp+3] : 1.0f;
                 } else {
                     out.vertices[i].color[0] = fallback[0];
                     out.vertices[i].color[1] = fallback[1];
                     out.vertices[i].color[2] = fallback[2];
+                    out.vertices[i].color[3] = fallback[3];
                 }
 
                 if (normals) {

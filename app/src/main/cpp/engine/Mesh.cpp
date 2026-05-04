@@ -40,10 +40,10 @@ namespace station {
         attrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
         attrs[0].offset   = offsetof(Vertex, position);
 
-        // location 1 — color
+        // location 1 — colour (RGBA)
         attrs[1].binding  = 0;
         attrs[1].location = 1;
-        attrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
+        attrs[1].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
         attrs[1].offset   = offsetof(Vertex, color);
 
         // location 2 — normal

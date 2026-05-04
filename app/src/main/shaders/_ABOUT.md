@@ -6,10 +6,12 @@ Edit these. After any change — recompile to .spv.
 
 | File | Purpose |
 |---|---|
-| `triangle.vert` | Vertex shader: applies view+proj (UBO) + model (push constant), outputs world-space normal and position |
-| `triangle.frag` | Fragment shader: diffuse Lambert + fill light + rim glow, plus unlit frame/plasma color paths |
+| `triangle.vert` | Vertex shader: applies view+proj (UBO) + model (push constant), forwards **vec4 RGBA** color, outputs world-space normal and position |
+| `triangle.frag` | Fragment shader: diffuse Lambert + fill light + rim glow, plus unlit frame/plasma color paths. Always passes `vColor.a` through to `outColor.a` so the translucent pipeline can read per-vertex alpha. |
 
 `triangle.frag` treats frame colors (allied green and enemy red) as system colors and outputs them unlit. It also treats cyan projectile meshes as plasma and outputs them emissive/unlit for the additive-blend plasma pipeline.
+
+The same shader pair is reused by all five mesh-rendering pipelines (`system`, `frame`, `plasma`, `billboard`, `translucent`). Pipelines differ only in blend / depth state — colour math is unified. Opaque code paths must stamp A=1 (`load_mesh`/`load_mesh_colored` already do); the translucent pipeline reads A from `load_mesh_raw` mesh data.
 
 ## Compiled files (app/src/main/assets/shaders/)
 
@@ -32,6 +34,6 @@ glslc shaders/triangle.frag -o assets/shaders/triangle.frag.spv
 
 ## Shader inputs
 
-Vertex attributes → see `engine/_ABOUT.md` for locations.
+Vertex attributes (location 0 = vec3 position, **location 1 = vec4 RGBA color**, location 2 = vec3 normal). Full table in `engine/_ABOUT.md`.
 UBO binding 0 = `{mat4 view; mat4 proj}`.
-Push constant = `{mat4 model}` per draw call.
+Push constant = `{mat4 model}` (vertex) + `{vec4 tint @ offset 64}` (fragment).

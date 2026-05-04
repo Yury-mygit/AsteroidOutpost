@@ -1,6 +1,6 @@
 #version 450
 
-layout(location = 0) in vec3 vColor;
+layout(location = 0) in vec4 vColor;   // RGBA — A passes through to outColor
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec3 vWorldPos;
 
@@ -16,14 +16,14 @@ void main() {
     bool isFrame = (vColor.g > 0.95 && vColor.r < 0.05 && vColor.b < 0.20)
                 || (vColor.r > 0.90 && vColor.g < 0.50);
     if (isFrame) {
-        outColor = vec4(vColor, 1.0);
+        outColor = vec4(vColor.rgb, vColor.a);
         return;
     }
 
     // Plasma bolt: vivid cyan, rendered via additive-blend pipeline — output emissive unlit.
     bool isPlasma = (vColor.b > 0.88 && vColor.g > 0.78 && vColor.r < 0.25);
     if (isPlasma) {
-        outColor = vec4(vColor.r * 0.6 + 0.15, vColor.g * 1.15, vColor.b, 1.0);
+        outColor = vec4(vColor.r * 0.6 + 0.15, vColor.g * 1.15, vColor.b, vColor.a);
         return;
     }
 
@@ -45,10 +45,11 @@ void main() {
     float rim = pow(1.0 - max(dot(N, lightDir), 0.0), 3.0) * 0.15;
     vec3 rimColor = vec3(0.2, 0.4, 0.8);
 
-    // Combine
+    // Combine — RGB lit, alpha passes through from vertex (1.0 for opaque meshes,
+    // <1.0 for translucent meshes that use the alpha-blend pipeline).
     vec3 lighting = ambient
-                  + vColor * (diff + fill)
+                  + vColor.rgb * (diff + fill)
                   + rimColor * rim;
 
-    outColor = vec4(lighting, 1.0);
+    outColor = vec4(lighting, vColor.a);
 }

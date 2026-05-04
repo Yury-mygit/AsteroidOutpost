@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Asteroid Outpost** is a 2D side-view shoot-'em-up for Android, built on top of an existing native Vulkan engine that was originally a separate project called **g3**. The engine source set was copied from `D:\g3\app\src\main\` into `app/src/main/`, then heavily repurposed and rebranded.
 
-> **Active milestone plan & change log live in `ROADMAP.md`** (the project's living doc). Source spec for the active refactor wave is `idea.txt` — 12 tasks grouped into milestones M1–M7. **M1–M5 are complete as of 2026-05-04** (manual-aim central turret, weapon abstraction + heavy cannon + weapon-select screen, base shield ability, upgrade-catalog rename, asteroid types + buff system); M6 (campaign rebuild — 5 missions teaching one mechanic each) is next. Treat any drift between this CLAUDE.md and ROADMAP.md as a sign one wasn't updated — ROADMAP is the source of truth for what's done and what's planned.
+> **Active milestone plan & change log live in `ROADMAP.md`** (the project's living doc). Source spec for the active refactor wave is `idea.txt` — 12 tasks grouped into milestones M1–M7. **M1–M6 are complete as of 2026-05-04**; M7 (VFX polish pass) landed 2026-05-04 — shield dome (additive plasma billboards), turret/weapon VFX (muzzle flash, bullet trails, AoE explosion ring), tap-spam cooldown fix + reload bar above the central turret. **Engine wave E1** (per-vertex RGBA + alpha-blend pipeline + procedural-mesh API + soft-disk background nebulae) landed 2026-05-04 — first time we touched the engine since fork. Treat any drift between this CLAUDE.md and ROADMAP.md as a sign one wasn't updated — ROADMAP is the source of truth for what's done and what's planned.
 
 ### What the game is
 
@@ -15,10 +15,10 @@ Portrait-orientation arcade game.
 - **Central turret** — tall red rectangle (~3× the side turrets) sitting at the centre of a wide grey platform at the bottom of the screen. The player drags on the screen to aim: the turret's barrel smoothly rotates toward the touch point. While the finger is held down, it fires continuously along the aim direction (hold-to-fire) at a fixed rate. The turret does not move along the platform; aim Z is clamped non-negative so you can't shoot down through the platform.
 - **Two stationary blue side turrets** flank the central turret on the platform. Each auto-aims at the nearest asteroid and fires at an angle. Their damage is ~50% of the central turret — they're support, the player carries the fight with the central turret. Bullets are oriented along their velocity vector.
 - **Grey asteroid squares** spawn at the top at random X positions, falling slowly downward. Bullets damage them; asteroids that reach the platform damage the platform and disappear.
-- **Wave-based missions.** Each mission is a list of waves; a wave spawns N asteroids at a fixed interval, ends when all asteroids are gone, then a 2-sec break, then the next wave. Three missions exist (Учебная тревога / Метеоритный поток / Тяжёлые астероиды) with progressively harder numbers. M6 will rebuild this campaign into 5 onboarding-style missions.
+- **Wave-based missions.** Each mission is a list of waves; a wave spawns N asteroids at a fixed interval, ends when all asteroids are gone, then a 2-sec break, then the next wave. Five missions teach one mechanic each (Учебная тревога → Быстрые цели → Тяжёлая угроза → Взрывная цепочка → Проверка базы); each mission's `WaveConfig.typeWeights` ramps up the new asteroid type so the lesson lands gradually. Numbers in `game/Missions.kt`.
 - **Asteroid types** (M5, `game/AsteroidType.kt`): NORMAL (baseline), FAST (small, ×2 speed, low HP), HEAVY (big, ×3 HP, ×2 platform damage, slow), EXPLOSIVE (deals AoE damage on death), ENERGY (rare; on death triggers a 5-sec ×2 main-weapon damage buff via the single-slot buff system in `MainActivity`). Each `WaveConfig` carries a `typeWeights: Map<AsteroidType, Float>` — empty map = all NORMAL. Tinted `Asteroid_1.glb` mesh handles per type for visual distinction; size and platform damage scale with type multipliers.
 - **Weapon select.** Before a mission starts, the player picks the central turret's weapon: **Автомат** (fast fire, low per-shot damage, single target) or **Тяжёлая пушка** (slow fire, ×3 damage, AoE splash on hit). Defined in `game/Weapon.kt::WeaponCatalog`. Selection is runtime-only (not yet persisted — M4).
-- **Shield ability.** A button at the bottom-centre of the screen (diegetic — sits on top of the grey platform rectangle) activates a 3-second base shield with a 15-second cooldown. While active, asteroids that touch the platform are absorbed without damaging the base; the platform's mesh tint flips to blue as a placeholder cue (proper dome VFX in M7). State machine `ShieldState { READY, ACTIVE, COOLING }` lives in `MainActivity`; constants are `DraftCombat.SHIELD_DURATION_SEC`/`SHIELD_COOLDOWN_SEC`.
+- **Shield ability.** A button at the bottom-centre of the screen (diegetic — sits on top of the grey platform rectangle) activates a 3-second base shield with a 15-second cooldown. While active, asteroids that touch the platform are absorbed without damaging the base; a glowing energy dome renders over the base via two stacked **additive plasma billboards** (`buildShieldDomeBillboards()` in `MainActivity`, drawn through `engineView.plasmaBillboards`), with a subtle pulse and a ~0.6s fade-out at end-of-duration. State machine `ShieldState { READY, ACTIVE, COOLING }` lives in `MainActivity`; constants are `DraftCombat.SHIELD_DURATION_SEC`/`SHIELD_COOLDOWN_SEC`.
 - **Win** = all waves cleared. **Lose** = platform HP ≤ 0.
 - **Meta-progression.** Each destroyed asteroid awards 1 metal; winning gives +20 bonus. Metal persists across launches. Spend metal in the **Upgrades** screen on three tracks: robot damage (10/15/22), base HP (+0/+50/+120 over mission baseline), turret damage (5/8/12), each with a 3-level cap.
 - **Screens.** Main menu → Mission select → **Weapon select** → Game (with HUD: Score, HP, "Волна X/Y") → Win or Lose with stats and buttons (Next mission / Repeat / Upgrades / Mission select). Upgrades screen accessible from menu and from win/lose.
@@ -109,7 +109,7 @@ Game state machine: `MENU / PLAYING / WON / LOST`. The tick handler runs only in
 
 1. Shield: tick the `ShieldState` machine — count down ACTIVE → COOLING → READY, refresh the shield button on transitions and at integer-second boundaries (`shieldUiSecLast` throttle).
 2. Aim: compute `targetAngle = atan2(aimTargetX − pivotX, max(0, aimTargetZ − pivotZ))`; smooth `centralTurretAngle` toward it (~16/sec exponential).
-3. Hold-to-fire: while `isTouching`, accumulate `fireTimer` and spawn bullets at `currentWeapon.fireIntervalSec` from the muzzle (`pivot + dir * 2*HALF_H`) along the aim direction. Finger up → reset timer. ACTION_DOWN primes timer for instant first shot. Bullet damage = `effectiveMainWeaponDamage * weapon.damageMultiplier`; AoE-capable weapons stamp `aoeRadius`/`aoeDamage` onto the bullet.
+3. Hold-to-fire: `centralFireCooldown` counts DOWN every tick regardless of touch state. While `isTouching` and `centralFireCooldown <= 0`, fire one bullet from the muzzle (`pivot + dir * 2*HALF_H`) and reset cooldown to `currentWeapon.fireIntervalSec`. The independent-of-touch decrement is what stops tap-spam from bypassing the weapon's intended rate. Bullet damage = `effectiveMainWeaponDamage * weapon.damageMultiplier`; AoE-capable weapons stamp `aoeRadius`/`aoeDamage` onto the bullet.
 4. Each side turret fires at the nearest asteroid (vector pointing to target).
 5. Move bullets along their velocity vector; cull off-screen and on hit (apply per-bullet damage to asteroid HP, scaled by `activeBuffDamageMul`). On hit, if `bullet.aoeRadius > 0`, apply `aoeDamage` to other live asteroids within the radius and spawn a large flash. After the bullet pass, dead asteroids' on-death effects fire — EXPLOSIVE deals splash damage to neighbours within `EXPLOSIVE_AOE_RADIUS`; ENERGY arms the buff.
 6. Move asteroids down at their per-asteroid speed (mission baseline × type multiplier captured at spawn).
@@ -122,7 +122,16 @@ Game state machine: `MENU / PLAYING / WON / LOST`. The tick handler runs only in
 
 ### Vulkan pipelines (`cpp/engine/VulkanContext.cpp`)
 
-`system` (opaque meshes), `frame` (additive depth-tested selection frames — disabled by Outpost), `star` (point field — visible in background), `plasma` (additive camera-facing billboards — unused by Outpost), `billboard` (normal billboards — unused).
+Six pipelines, all driven by the same vertex/fragment shader pair (they differ only in blend / depth state):
+
+- **`system`** — opaque meshes (platform, turrets, asteroids, bullets, reload bar). Depth-test on, depth-write on, no blending. The workhorse.
+- **`frame`** — additive depth-tested selection frames. Disabled by Outpost (g3 reticle holdover).
+- **`star`** — point-list star field. Visible behind the gameplay layer.
+- **`plasma`** — additive camera-facing billboards (`ONE / ONE`). Used by Outpost for the shield dome and AoE explosion ring particles.
+- **`billboard`** — normal camera-facing billboards. Unused by Outpost (no images yet).
+- **`translucent`** — alpha-blend mesh pipeline (`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`), depth-test on, **depth-write off**. Added in E1. Used by Outpost for the soft-disk background nebulae. Per-vertex alpha controls transparency — the fragment shader passes `vColor.a` straight through. Render order in `renderFrame`: opaque → system billboards → **translucent** → plasma additive, so opaque gameplay correctly occludes nebulae behind it but translucent layers don't fight each other.
+
+Vertex format is now **position(vec3) + RGBA color(vec4) + normal(vec3)** (E1 widened color from vec3). Opaque code paths stamp A=1, so the change is invisible to existing meshes.
 
 ### Camera
 
@@ -140,7 +149,11 @@ X = horizontal screen, Z = vertical screen, Y = depth (always 0 for game objects
 
 `modelMatrix()` composes `T * Rz * Ry * S`. Default values are no-ops, so existing g3 code that only uses uniform `scale` and `rotationZ` is unaffected.
 
-All Outpost geometry (platform, robot, turrets, asteroids, bullets) uses a single primitive: `app/src/main/assets/models/quad.gltf` — an X-Z plane unit quad with double-sided indices and white per-vertex colours. It's loaded with three tints (red / grey / blue). Real models are a backlog item.
+`EngineView` carries two scene lists each frame: `scene` (opaque, drawn through `drawMesh`) and `translucentObjects` (drawn through `drawTranslucentMesh` on the alpha-blend pipeline). Both are submitted from `MainActivity.buildScene()` via `submitScene(opaque, translucentObjects)`. Translucent objects use the same `SceneObject` type — only the routing differs.
+
+Most Outpost geometry (platform, central turret, side turrets, bullets, reload bar, shield button backdrop) uses a single primitive: `app/src/main/assets/models/quad.gltf` — an X-Z plane unit quad with double-sided indices and white per-vertex colours, loaded with multiple tints (red / grey / blue / dome-blue). Asteroids use `Asteroid_1.glb` with per-type tints (NORMAL grey, HEAVY dark-red, EXPLOSIVE orange, ENERGY cyan).
+
+**Background nebulae** are procedural soft-disk meshes built in `MainActivity.buildSoftDiskMesh()` via `engine.loadMeshRaw(verts, indices)`: a triangle fan with the centre vertex at A=1 and the rim vertices at A=0, so the alpha-blend pipeline draws a smooth circular fade with no visible edges. Five tinted disks (deep purple / cyan / dim crimson / twilight blue / warm dust) are placed across the playfield by `setupBackgroundNebulae()` and live in `engineView.translucentObjects`. They render between opaque scene and plasma billboards, so gameplay objects sit on top of them.
 
 ## Adding an engine API function
 

@@ -51,6 +51,16 @@ StationMesh* station_engine_load_mesh(StationEngine* engine,
 StationMesh* station_engine_load_mesh_colored(StationEngine* engine,
                                               const uint8_t* data, size_t length,
                                               float r, float g, float b);
+
+// E1.3 — upload a procedural mesh from raw vertex + index arrays. Each vertex
+// is 10 floats: position(3) + color(4 RGBA) + normal(3). Indices are uint16.
+// Use this when you need per-vertex alpha or programmatic geometry that
+// doesn't come from a glTF asset (soft-edge nebulae, dome meshes, etc.).
+StationMesh* station_engine_load_mesh_raw(StationEngine* engine,
+                                          const float*    vertices,
+                                          int32_t         vertexCount,
+                                          const uint16_t* indices,
+                                          int32_t         indexCount);
 void         station_engine_unload_mesh(StationEngine* engine, StationMesh* mesh);
 void         station_engine_set_scene_mesh(StationEngine* engine, StationMesh* mesh);
 
@@ -87,6 +97,13 @@ void station_engine_draw_plasma_billboard(StationEngine* engine,
                                           float          y,
                                           float          z,
                                           float          scale);
+
+// E1.2 — alpha-blended mesh draw. Pipeline uses SRC_ALPHA / ONE_MINUS_SRC_ALPHA
+// blending and depth-test on / depth-write off. Mesh's per-vertex alpha
+// controls transparency.
+void station_engine_draw_translucent_mesh(StationEngine* engine,
+                                          StationMesh*   mesh,
+                                          const float    modelMatrix[16]);
 
 void station_engine_draw_object_frame_mesh(StationEngine* engine,
                                            StationMesh*   frameMesh,

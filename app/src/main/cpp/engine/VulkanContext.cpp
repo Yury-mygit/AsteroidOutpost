@@ -72,10 +72,11 @@ namespace station {
                 v.position[0] = radius * sinp * std::cos(t);
                 v.position[1] = radius * sinp * std::sin(t);
                 v.position[2] = radius * cosp;
-                // Stars: white-ish with slight blue tint
+                // Stars: white-ish with slight blue tint, fully opaque.
                 v.color[0] = b * 0.9f;
                 v.color[1] = b * 0.95f;
                 v.color[2] = b * 1.0f;
+                v.color[3] = 1.0f;
                 // Normal points inward (toward camera) — not used for stars
                 v.normal[0] = -v.position[0] / radius;
                 v.normal[1] = -v.position[1] / radius;
@@ -294,7 +295,7 @@ namespace station {
             {
                 MeshData lineMesh;
                 Vertex lv{};
-                lv.color[0] = 0.0f; lv.color[1] = 1.0f; lv.color[2] = 0.0f; // pure green
+                lv.color[0] = 0.0f; lv.color[1] = 1.0f; lv.color[2] = 0.0f; lv.color[3] = 1.0f; // pure green, opaque
                 lv.normal[0] = 0.0f; lv.normal[1] = 0.0f; lv.normal[2] = 1.0f;
                 // 12 vertices: 4 corners + 2 leg-ends each. leg = 30% of half-extent.
                 constexpr float H = 0.5f;   // half-extent
@@ -320,7 +321,7 @@ namespace station {
 
                 // Same geometry, enemy-red vertices.
                 for (auto& v : lineMesh.vertices) {
-                    v.color[0] = 1.0f; v.color[1] = 0.38f; v.color[2] = 0.34f;
+                    v.color[0] = 1.0f; v.color[1] = 0.38f; v.color[2] = 0.34f; v.color[3] = 1.0f;
                 }
                 m_frameLineMeshEnemy.create(m_physicalDevice, m_device, lineMesh);
             }
@@ -588,6 +589,7 @@ namespace station {
         if (m_starPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_starPipeline, nullptr);                   m_starPipeline = VK_NULL_HANDLE; }
         if (m_systemPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_systemPipeline, nullptr);                 m_systemPipeline = VK_NULL_HANDLE; }
         if (m_plasmaPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_plasmaPipeline, nullptr);                 m_plasmaPipeline = VK_NULL_HANDLE; }
+        if (m_translucentPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_translucentPipeline, nullptr);            m_translucentPipeline = VK_NULL_HANDLE; }
         if (m_framePipeline       != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_framePipeline, nullptr);                  m_framePipeline = VK_NULL_HANDLE; }
         if (m_pipelineLayout      != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);           m_pipelineLayout = VK_NULL_HANDLE; }
         if (m_vertModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_vertModule, nullptr);                  m_vertModule = VK_NULL_HANDLE; }
@@ -710,6 +712,21 @@ namespace station {
         cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
         r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_plasmaPipeline);
         if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(plasma): %s", vkRes(r).c_str()); return false; }
+
+        // Translucent pipeline (E1.2): same depth state as plasma (test on,
+        // write off — so multiple translucent layers don't occlude each other
+        // and back-to-front sorting becomes irrelevant for non-overlapping
+        // layers), but standard alpha blending (SRC_ALPHA / ONE_MINUS_SRC_ALPHA)
+        // instead of additive. Used by drawTranslucentMesh from Kotlin.
+        cbAtt.blendEnable         = VK_TRUE;
+        cbAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cbAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cbAtt.colorBlendOp        = VK_BLEND_OP_ADD;
+        cbAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_translucentPipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(translucent): %s", vkRes(r).c_str()); return false; }
         cbAtt.blendEnable = VK_FALSE;  // reset for subsequent pipelines
 
         // Frame pipeline: LINE_LIST, dynamic line width, no depth test
@@ -804,6 +821,7 @@ namespace station {
         m_drawList.clear();
         m_systemDrawList.clear();
         m_plasmaDrawList.clear();
+        m_translucentDrawList.clear();
         m_pickRecords.clear();
         m_sceneOpen = true;
     }
@@ -847,6 +865,19 @@ namespace station {
         cmd.center[0] = x; cmd.center[1] = y; cmd.center[2] = z;
         cmd.scale     = scale;
         m_plasmaDrawList.push_back(cmd);
+    }
+
+    // E1.2 — alpha-blended mesh draw. Uses the regular triangle.frag (RGBA
+    // output) but the translucent pipeline applies SRC_ALPHA blending so the
+    // mesh's per-vertex alpha controls how much it occludes what's behind.
+    void VulkanContext::drawTranslucentMesh(uint32_t token, const float modelMatrix[16]) {
+        if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
+        DrawCommand cmd{};
+        cmd.token       = token;
+        cmd.billboard   = false;
+        cmd.objectFrame = false;
+        std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        m_translucentDrawList.push_back(cmd);
     }
 
     void VulkanContext::drawBillboardMesh(uint32_t token, float x, float y, float z, float scale) {
@@ -1319,6 +1350,35 @@ namespace station {
                         {draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
                 std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
                 std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
+            }
+        }
+
+        // --- Draw translucent meshes with alpha-blend pipeline (E1.2) ---
+        // Slotted between system billboards and plasma so additive plasma VFX
+        // still draws "on top" of soft-edged translucent geometry (nebulae,
+        // shield dome, etc.).
+        if (!m_translucentDrawList.empty() && m_translucentPipeline != VK_NULL_HANDLE) {
+            bool pipelineBound = false;
+            uint32_t lastBoundToken = 0;
+            for (const auto& draw : m_translucentDrawList) {
+                uint32_t idx = draw.token - 1;
+                if (!m_meshUsed[idx] || !m_meshPool[idx].isReady()) continue;
+                if (!pipelineBound) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_translucentPipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                    pipelineBound = true;
+                }
+                if (draw.token != lastBoundToken) {
+                    m_meshPool[idx].bind(cmd);
+                    lastBoundToken = draw.token;
+                }
+                PushConstantData pc{};
+                std::memcpy(pc.model, draw.modelMatrix, sizeof(float) * 16);
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);

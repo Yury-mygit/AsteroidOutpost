@@ -105,6 +105,34 @@ Java_com_example_asteroidoutpost_EngineJni_nativeUnloadMesh(JNIEnv* /*env*/, job
                                reinterpret_cast<StationMesh*>(meshHandle));
 }
 
+JNIEXPORT jlong JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeLoadMeshRaw(JNIEnv* env, jobject /*thiz*/,
+                                                  jlong handle,
+                                                  jfloatArray vertices,
+                                                  jshortArray indices) {
+    if (!vertices || !indices) return 0L;
+    jsize vlen = env->GetArrayLength(vertices);
+    jsize ilen = env->GetArrayLength(indices);
+    // 10 floats per vertex (pos3 + rgba4 + normal3); reject malformed lengths early.
+    if (vlen <= 0 || ilen <= 0 || (vlen % 10) != 0) return 0L;
+    int32_t vertexCount = vlen / 10;
+
+    jfloat* vBytes = env->GetFloatArrayElements(vertices, nullptr);
+    jshort* iBytes = env->GetShortArrayElements(indices, nullptr);
+    if (!vBytes || !iBytes) {
+        if (vBytes) env->ReleaseFloatArrayElements(vertices, vBytes, JNI_ABORT);
+        if (iBytes) env->ReleaseShortArrayElements(indices, iBytes, JNI_ABORT);
+        return 0L;
+    }
+    StationMesh* mesh = station_engine_load_mesh_raw(
+            reinterpret_cast<StationEngine*>(handle),
+            reinterpret_cast<const float*>(vBytes), vertexCount,
+            reinterpret_cast<const uint16_t*>(iBytes), ilen);
+    env->ReleaseFloatArrayElements(vertices, vBytes, JNI_ABORT);
+    env->ReleaseShortArrayElements(indices, iBytes, JNI_ABORT);
+    return reinterpret_cast<jlong>(mesh);
+}
+
 JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeBeginScene(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     station_engine_begin_scene(reinterpret_cast<StationEngine*>(handle));
@@ -165,6 +193,21 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*e
             reinterpret_cast<StationMesh*>(meshHandle),
             x, y, z, scale
     );
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawTranslucentMesh(JNIEnv* env, jobject /*thiz*/,
+                                                        jlong engineHandle, jlong meshHandle,
+                                                        jfloatArray modelMatrix) {
+    if (!modelMatrix) return;
+    jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
+    if (!m) return;
+    station_engine_draw_translucent_mesh(
+            reinterpret_cast<StationEngine*>(engineHandle),
+            reinterpret_cast<StationMesh*>(meshHandle),
+            reinterpret_cast<const float*>(m)
+    );
+    env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL

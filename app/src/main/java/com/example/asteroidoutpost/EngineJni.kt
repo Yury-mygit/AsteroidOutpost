@@ -65,6 +65,17 @@ class EngineJni {
             nativeUnloadMesh(engineHandle, meshHandle)
     }
 
+    /**
+     * E1.3 — upload a procedural mesh from raw vertex + index arrays.
+     * Each vertex is 10 floats: `pos(3) + RGBA(4) + normal(3)`. Indices are
+     * 16-bit (Kotlin Short maps to uint16 in C). Returns 0 on failure.
+     */
+    fun loadMeshRaw(vertices: FloatArray, indices: ShortArray): Long {
+        if (engineHandle == 0L) return 0L
+        if (vertices.isEmpty() || indices.isEmpty() || vertices.size % 10 != 0) return 0L
+        return nativeLoadMeshRaw(engineHandle, vertices, indices)
+    }
+
     // ---------------------------------------------------------------------------
     // Scene — Kotlin owns the scene, submits draw calls each frame
     // ---------------------------------------------------------------------------
@@ -93,6 +104,17 @@ class EngineJni {
     fun drawPlasmaBillboard(meshHandle: Long, x: Float, y: Float, z: Float, scale: Float) {
         if (engineHandle != 0L && meshHandle != 0L)
             nativeDrawPlasmaBillboard(engineHandle, meshHandle, x, y, z, scale)
+    }
+
+    /**
+     * E1.2 — submit a draw call on the translucent (alpha-blend) pipeline.
+     * The mesh's per-vertex alpha controls transparency. Use this for soft
+     * nebulae, shield domes, fade-out VFX — anything where the mesh has
+     * varying alpha across its vertices.
+     */
+    fun drawTranslucentMesh(meshHandle: Long, modelMatrix: FloatArray) {
+        if (engineHandle != 0L && meshHandle != 0L)
+            nativeDrawTranslucentMesh(engineHandle, meshHandle, modelMatrix)
     }
 
     fun drawObjectFrameMesh(
@@ -190,6 +212,7 @@ class EngineJni {
     private external fun nativeLoadMesh(handle: Long, data: ByteArray): Long
     private external fun nativeLoadMeshColored(handle: Long, data: ByteArray, r: Float, g: Float, b: Float): Long
     private external fun nativeUnloadMesh(engineHandle: Long, meshHandle: Long)
+    private external fun nativeLoadMeshRaw(handle: Long, vertices: FloatArray, indices: ShortArray): Long
     private external fun nativeBeginScene(handle: Long)
     private external fun nativeDrawMesh(engineHandle: Long, meshHandle: Long, modelMatrix: FloatArray)
     private external fun nativeDrawPickableMesh(
@@ -208,6 +231,11 @@ class EngineJni {
         engineHandle: Long,
         meshHandle: Long,
         x: Float, y: Float, z: Float, scale: Float
+    )
+    private external fun nativeDrawTranslucentMesh(
+        engineHandle: Long,
+        meshHandle: Long,
+        modelMatrix: FloatArray
     )
     private external fun nativeDrawObjectFrameMesh(
         engineHandle: Long,

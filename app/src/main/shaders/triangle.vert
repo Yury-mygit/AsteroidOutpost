@@ -13,12 +13,12 @@ layout(push_constant) uniform PushConst {
 } pc;
 
 layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inColor;
+layout(location = 1) in vec4 inColor;     // RGBA per-vertex (E1.1)
 layout(location = 2) in vec3 inNormal;
 
-layout(location = 0) out vec3 vColor;
-layout(location = 1) out vec3 vNormal;   // world-space normal
-layout(location = 2) out vec3 vWorldPos; // world-space position
+layout(location = 0) out vec4 vColor;     // RGB → lit/tinted in fragment, A → output alpha
+layout(location = 1) out vec3 vNormal;    // world-space normal
+layout(location = 2) out vec3 vWorldPos;  // world-space position
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);

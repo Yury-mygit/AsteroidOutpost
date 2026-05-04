@@ -140,12 +140,38 @@ extern "C" StationMesh* station_engine_load_mesh_colored(StationEngine* e,
         v.color[0] = r;
         v.color[1] = g;
         v.color[2] = b;
+        v.color[3] = 1.0f;  // opaque — see load_mesh_colored_alpha for translucent variant
     }
     uint32_t token = e->vulkan.uploadMesh(meshData);
     if (!token) { LOGE("load_mesh_colored: uploadMesh failed"); return nullptr; }
     auto* mesh = new StationMesh();
     mesh->token = token;
     LOGI("Mesh loaded (colored), token=%u", token);
+    return mesh;
+}
+
+extern "C" StationMesh* station_engine_load_mesh_raw(StationEngine* e,
+                                                     const float*    vertices,
+                                                     int32_t         vertexCount,
+                                                     const uint16_t* indices,
+                                                     int32_t         indexCount) {
+    if (!e || !vertices || !indices || vertexCount <= 0 || indexCount <= 0) return nullptr;
+    station::MeshData meshData;
+    meshData.vertices.resize((size_t)vertexCount);
+    // Each vertex: 10 floats — pos(3) + RGBA(4) + normal(3).
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        const float* src = vertices + (size_t)i * 10;
+        station::Vertex& v = meshData.vertices[i];
+        v.position[0] = src[0]; v.position[1] = src[1]; v.position[2] = src[2];
+        v.color[0]    = src[3]; v.color[1]    = src[4]; v.color[2]    = src[5]; v.color[3] = src[6];
+        v.normal[0]   = src[7]; v.normal[1]   = src[8]; v.normal[2]   = src[9];
+    }
+    meshData.indices.assign(indices, indices + indexCount);
+    uint32_t token = e->vulkan.uploadMesh(meshData);
+    if (!token) { LOGE("load_mesh_raw: uploadMesh failed"); return nullptr; }
+    auto* mesh = new StationMesh();
+    mesh->token = token;
+    LOGI("Mesh loaded (raw), token=%u, %d verts, %d idx", token, vertexCount, indexCount);
     return mesh;
 }
 
@@ -196,6 +222,13 @@ extern "C" void station_engine_draw_plasma_billboard(StationEngine* e,
                                                      float x, float y, float z, float scale) {
     if (!e || !mesh) return;
     e->vulkan.drawPlasmaBillboard(mesh->token, x, y, z, scale);
+}
+
+extern "C" void station_engine_draw_translucent_mesh(StationEngine* e,
+                                                     StationMesh*   mesh,
+                                                     const float    modelMatrix[16]) {
+    if (!e || !mesh) return;
+    e->vulkan.drawTranslucentMesh(mesh->token, modelMatrix);
 }
 
 extern "C" void station_engine_draw_object_frame_mesh(StationEngine* e,

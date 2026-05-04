@@ -115,7 +115,8 @@ fun submitScene(
     objects: List<SceneObject>,
     highlightMeshes: HighlightMeshes = HighlightMeshes(),
     billboards: List<BillboardDraw> = emptyList(),
-    plasmaBillboards: List<BillboardDraw> = emptyList()
+    plasmaBillboards: List<BillboardDraw> = emptyList(),
+    translucentObjects: List<SceneObject> = emptyList(),
 ) {
     engine.beginScene()
     for (obj in objects) {
@@ -133,6 +134,9 @@ fun submitScene(
     }
     for (b in billboards) {
         engine.drawBillboardMesh(b.meshHandle, b.x, b.y, b.z, b.scale)
+    }
+    for (t in translucentObjects) {
+        engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix())
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale)

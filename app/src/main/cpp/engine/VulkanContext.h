@@ -40,6 +40,7 @@ namespace station {
                               const float modelMatrix[16], float pickRadius);
         void drawBillboardMesh(uint32_t token, float x, float y, float z, float scale);
         void drawPlasmaBillboard(uint32_t token, float x, float y, float z, float scale);
+        void drawTranslucentMesh(uint32_t token, const float modelMatrix[16]);
         void drawObjectFrameMesh(uint32_t frameToken, uint32_t targetToken, const float modelMatrix[16], float padding, const float tint[4]);
         void drawGameplayFrameMesh(uint32_t frameToken, const float modelMatrix[16],
                                    const float* localPoints, int32_t pointCount,
@@ -115,6 +116,7 @@ namespace station {
         std::vector<DrawCommand> m_drawList;
         std::vector<DrawCommand> m_systemDrawList;
         std::vector<DrawCommand> m_plasmaDrawList;
+        std::vector<DrawCommand> m_translucentDrawList;  // E1.2 — alpha-blend mesh draws
         bool m_sceneOpen = false;
 
         struct PickRecord {
@@ -139,6 +141,7 @@ namespace station {
         VkPipeline            m_starPipeline         = VK_NULL_HANDLE;  // star point pipeline
         VkPipeline            m_systemPipeline       = VK_NULL_HANDLE;  // system overlay pipeline
         VkPipeline            m_plasmaPipeline       = VK_NULL_HANDLE;  // additive-blend plasma pipeline
+        VkPipeline            m_translucentPipeline  = VK_NULL_HANDLE;  // SRC_ALPHA / ONE_MINUS_SRC_ALPHA mesh pipeline (E1.2)
         VkPipeline            m_framePipeline        = VK_NULL_HANDLE;  // LINE_LIST frame pipeline
         VkShaderModule        m_vertModule           = VK_NULL_HANDLE;
         VkShaderModule        m_fragModule           = VK_NULL_HANDLE;
