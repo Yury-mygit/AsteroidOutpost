@@ -3,8 +3,11 @@ package com.example.asteroidoutpost.game
 import android.content.Context
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 
 /**
@@ -144,19 +147,19 @@ object OverlayFactory {
         onStart: (MissionConfig) -> Unit,
         onBack:  () -> Unit,
     ): View {
-        val root = makeOverlayRoot(context, centred = false)
-        root.addView(UiHelpers.buildTitle(context, "Выбор миссии"))
+        val (outer, content) = makeScrollableOverlayRoot(context)
+        content.addView(UiHelpers.buildTitle(context, "Выбор миссии"))
         for (mission in missions) {
-            root.addView(
+            content.addView(
                 buildMissionCard(context, mission, onStart),
                 gapParams(context, UiTheme.DP_GAP_NORMAL),
             )
         }
-        root.addView(
+        content.addView(
             UiHelpers.buildSecondaryButton(context, "Назад", onClick = onBack),
             gapParams(context, UiTheme.DP_GAP_WIDE),
         )
-        return root
+        return outer
     }
 
     private fun buildMissionCard(
@@ -213,6 +216,90 @@ object OverlayFactory {
     }
 
     // ---------------------------------------------------------------------
+    // Weapon select (between mission select and game start).
+    // ---------------------------------------------------------------------
+    fun buildWeaponSelect(
+        context: Context,
+        weapons: List<Weapon>,
+        currentWeaponId: WeaponId,
+        onChoose: (Weapon) -> Unit,
+        onBack:   () -> Unit,
+    ): View {
+        val (outer, content) = makeScrollableOverlayRoot(context)
+        content.addView(UiHelpers.buildTitle(context, "Выбор оружия"))
+        content.addView(
+            UiHelpers.buildBody(
+                context,
+                "Главное оружие центральной турели на эту миссию.",
+                UiTheme.COL_TEXT_DIM,
+            ).apply { gravity = Gravity.CENTER_HORIZONTAL },
+            gapParams(context, UiTheme.DP_GAP_TIGHT),
+        )
+        for (weapon in weapons) {
+            content.addView(
+                buildWeaponCard(context, weapon, weapon.id == currentWeaponId, onChoose),
+                gapParams(context, UiTheme.DP_GAP_NORMAL),
+            )
+        }
+        content.addView(
+            UiHelpers.buildSecondaryButton(context, "Назад", onClick = onBack),
+            gapParams(context, UiTheme.DP_GAP_WIDE),
+        )
+        return outer
+    }
+
+    private fun buildWeaponCard(
+        context: Context,
+        weapon: Weapon,
+        selected: Boolean,
+        onChoose: (Weapon) -> Unit,
+    ): View {
+        val card = UiHelpers.buildCard(context, raised = selected)
+
+        // Header: weapon name (left) + "Выбрано" pill if active.
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(
+            UiHelpers.buildHeading(context, weapon.displayName),
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        if (selected) {
+            header.addView(UiHelpers.buildPill(context, "Выбрано", UiTheme.COL_ACCENT_GREEN))
+        }
+        card.addView(header)
+
+        // Description.
+        card.addView(
+            UiHelpers.buildBody(context, weapon.description),
+            gapParams(context, UiTheme.DP_GAP_TIGHT),
+        )
+        // Stats line — fire rate, damage feel, AoE if present.
+        val rps = if (weapon.fireIntervalSec > 0f) 1f / weapon.fireIntervalSec else 0f
+        val rateLabel = if (rps >= 2f) "%.1f выстр/сек".format(rps) else "1 выстрел в %.1f сек".format(weapon.fireIntervalSec)
+        val dmgLabel  = "урон ×${"%.1f".format(weapon.damageMultiplier)}"
+        val aoeLabel  = if (weapon.aoeRadius > 0f) "  •  AoE радиус ${"%.1f".format(weapon.aoeRadius)}" else ""
+        card.addView(
+            UiHelpers.buildCaption(context, "$rateLabel  •  $dmgLabel$aoeLabel"),
+            gapParams(context, UiTheme.DP_GAP_TIGHT),
+        )
+
+        // Choose button — always enabled. Tapping any weapon's button starts
+        // the mission with that weapon, including the one already marked as
+        // "Выбрано" (the pill is purely an indicator of the prior selection).
+        val btn = UiHelpers.buildPrimaryButton(context, "Выбрать") { onChoose(weapon) }
+        card.addView(
+            btn,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = UiTheme.dp(context, UiTheme.DP_GAP_NORMAL) },
+        )
+        return card
+    }
+
+    // ---------------------------------------------------------------------
     // Upgrades.
     // ---------------------------------------------------------------------
     fun buildUpgrades(
@@ -221,25 +308,25 @@ object OverlayFactory {
         onPurchase: (UpgradeType, Int) -> Unit,
         onBack: () -> Unit,
     ): View {
-        val root = makeOverlayRoot(context, centred = false)
-        root.addView(UiHelpers.buildTitle(context, "Улучшения"))
-        root.addView(
+        val (outer, content) = makeScrollableOverlayRoot(context)
+        content.addView(UiHelpers.buildTitle(context, "Улучшения"))
+        content.addView(
             UiHelpers.buildHeading(context, "Металл: ${progress.metal}", UiTheme.COL_WARNING).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
             },
             gapParams(context, UiTheme.DP_GAP_TIGHT),
         )
         for (type in UpgradeType.values()) {
-            root.addView(
+            content.addView(
                 buildUpgradeCard(context, type, progress, onPurchase),
                 gapParams(context, UiTheme.DP_GAP_NORMAL),
             )
         }
-        root.addView(
+        content.addView(
             UiHelpers.buildSecondaryButton(context, "Назад", onClick = onBack),
             gapParams(context, UiTheme.DP_GAP_WIDE),
         )
-        return root
+        return outer
     }
 
     private fun buildUpgradeCard(
@@ -338,9 +425,9 @@ object OverlayFactory {
     }
 
     private fun upgradeIconColour(type: UpgradeType): Int = when (type) {
-        UpgradeType.ROBOT_DAMAGE  -> UiTheme.COL_ACCENT_RED
-        UpgradeType.BASE_HP       -> UiTheme.COL_TEXT_DIM
-        UpgradeType.TURRET_DAMAGE -> UiTheme.COL_ACCENT_BLUE
+        UpgradeType.MAIN_WEAPON_DAMAGE -> UiTheme.COL_ACCENT_RED
+        UpgradeType.BASE_HP            -> UiTheme.COL_TEXT_DIM
+        UpgradeType.SIDE_TURRET_DAMAGE -> UiTheme.COL_ACCENT_BLUE
     }
 
     // ---------------------------------------------------------------------
@@ -357,6 +444,38 @@ object OverlayFactory {
             setPadding(padH, padV * 3, padH, padV)
             UiHelpers.overlayBackground(this)
         }
+    }
+
+    /**
+     * Scrollable overlay root for screens whose content can overflow the
+     * viewport (mission list, weapon list, upgrades). Returns the outer
+     * ScrollView (add to the root view) and the inner LinearLayout (add
+     * children to it). The outer view holds the dark scrim background and
+     * swallows taps; the inner layout has the standard overlay padding.
+     */
+    private data class ScrollableRoot(val outer: View, val content: LinearLayout)
+
+    private fun makeScrollableOverlayRoot(context: Context): ScrollableRoot {
+        val padH = UiTheme.dp(context, UiTheme.DP_PAD_OVERLAY_HORIZ)
+        val padV = UiTheme.dp(context, UiTheme.DP_PAD_OVERLAY_VERT)
+        val scroll = ScrollView(context).apply {
+            isClickable = true
+            isFillViewport = true   // background fills even when content is short
+            UiHelpers.overlayBackground(this)
+        }
+        val content = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            setPadding(padH, padV * 3, padH, padV)
+        }
+        scroll.addView(
+            content,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        return ScrollableRoot(scroll, content)
     }
 
     private fun gapParams(ctx: Context, topMarginDp: Float): LinearLayout.LayoutParams =

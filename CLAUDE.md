@@ -6,17 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Asteroid Outpost** is a 2D side-view shoot-'em-up for Android, built on top of an existing native Vulkan engine that was originally a separate project called **g3**. The engine source set was copied from `D:\g3\app\src\main\` into `app/src/main/`, then heavily repurposed and rebranded.
 
+> **Active milestone plan & change log live in `ROADMAP.md`** (the project's living doc). Source spec for the active refactor wave is `idea.txt` — 12 tasks grouped into milestones M1–M7. **M1–M5 are complete as of 2026-05-04** (manual-aim central turret, weapon abstraction + heavy cannon + weapon-select screen, base shield ability, upgrade-catalog rename, asteroid types + buff system); M6 (campaign rebuild — 5 missions teaching one mechanic each) is next. Treat any drift between this CLAUDE.md and ROADMAP.md as a sign one wasn't updated — ROADMAP is the source of truth for what's done and what's planned.
+
 ### What the game is
 
 Portrait-orientation arcade game.
 
-- **Player robot** — small red rectangle on a wide grey platform at the bottom of the screen. Drag your finger across the screen to move it horizontally; release to stop. The robot fires bullets straight up at a fixed rate.
-- **Two stationary blue turrets** sit on the platform near its left and right edges. Each auto-aims at the nearest asteroid and fires bullets at an angle, with lower damage than the robot. Bullets are oriented along their velocity vector.
+- **Central turret** — tall red rectangle (~3× the side turrets) sitting at the centre of a wide grey platform at the bottom of the screen. The player drags on the screen to aim: the turret's barrel smoothly rotates toward the touch point. While the finger is held down, it fires continuously along the aim direction (hold-to-fire) at a fixed rate. The turret does not move along the platform; aim Z is clamped non-negative so you can't shoot down through the platform.
+- **Two stationary blue side turrets** flank the central turret on the platform. Each auto-aims at the nearest asteroid and fires at an angle. Their damage is ~50% of the central turret — they're support, the player carries the fight with the central turret. Bullets are oriented along their velocity vector.
 - **Grey asteroid squares** spawn at the top at random X positions, falling slowly downward. Bullets damage them; asteroids that reach the platform damage the platform and disappear.
-- **Wave-based missions.** Each mission is a list of waves; a wave spawns N asteroids at a fixed interval, ends when all asteroids are gone, then a 2-sec break, then the next wave. Three missions exist (Учебная тревога / Метеоритный поток / Тяжёлые астероиды) with progressively harder numbers.
+- **Wave-based missions.** Each mission is a list of waves; a wave spawns N asteroids at a fixed interval, ends when all asteroids are gone, then a 2-sec break, then the next wave. Three missions exist (Учебная тревога / Метеоритный поток / Тяжёлые астероиды) with progressively harder numbers. M6 will rebuild this campaign into 5 onboarding-style missions.
+- **Asteroid types** (M5, `game/AsteroidType.kt`): NORMAL (baseline), FAST (small, ×2 speed, low HP), HEAVY (big, ×3 HP, ×2 platform damage, slow), EXPLOSIVE (deals AoE damage on death), ENERGY (rare; on death triggers a 5-sec ×2 main-weapon damage buff via the single-slot buff system in `MainActivity`). Each `WaveConfig` carries a `typeWeights: Map<AsteroidType, Float>` — empty map = all NORMAL. Tinted `Asteroid_1.glb` mesh handles per type for visual distinction; size and platform damage scale with type multipliers.
+- **Weapon select.** Before a mission starts, the player picks the central turret's weapon: **Автомат** (fast fire, low per-shot damage, single target) or **Тяжёлая пушка** (slow fire, ×3 damage, AoE splash on hit). Defined in `game/Weapon.kt::WeaponCatalog`. Selection is runtime-only (not yet persisted — M4).
+- **Shield ability.** A button at the bottom-centre of the screen (diegetic — sits on top of the grey platform rectangle) activates a 3-second base shield with a 15-second cooldown. While active, asteroids that touch the platform are absorbed without damaging the base; the platform's mesh tint flips to blue as a placeholder cue (proper dome VFX in M7). State machine `ShieldState { READY, ACTIVE, COOLING }` lives in `MainActivity`; constants are `DraftCombat.SHIELD_DURATION_SEC`/`SHIELD_COOLDOWN_SEC`.
 - **Win** = all waves cleared. **Lose** = platform HP ≤ 0.
 - **Meta-progression.** Each destroyed asteroid awards 1 metal; winning gives +20 bonus. Metal persists across launches. Spend metal in the **Upgrades** screen on three tracks: robot damage (10/15/22), base HP (+0/+50/+120 over mission baseline), turret damage (5/8/12), each with a 3-level cap.
-- **Screens.** Main menu → Mission select → Game (with HUD: Score, HP, "Волна X/Y") → Win or Lose with stats and buttons (Next mission / Repeat / Upgrades / Mission select). Upgrades screen accessible from menu and from win/lose.
+- **Screens.** Main menu → Mission select → **Weapon select** → Game (with HUD: Score, HP, "Волна X/Y") → Win or Lose with stats and buttons (Next mission / Repeat / Upgrades / Mission select). Upgrades screen accessible from menu and from win/lose.
 
 ### Code layout
 
@@ -102,15 +107,18 @@ C++ Vulkan engine → libstationcore.so
 
 Game state machine: `MENU / PLAYING / WON / LOST`. The tick handler runs only in `PLAYING`. Per tick:
 
-1. Move robot toward touch X (only while finger is down).
-2. Robot fires bullets straight up at fixed interval.
-3. Each turret fires at the nearest asteroid (vector pointing to target).
-4. Move bullets along their velocity vector; cull off-screen and on hit (apply per-bullet damage to asteroid HP).
-5. Move asteroids down at mission's speed.
-6. Asteroid touches platform → damage platform, remove asteroid.
-7. Wave control: spawn current wave's asteroids at intervals; when wave fully spawned and asteroids list is empty, start a 2-sec break or trigger win.
-8. Build the scene (platform, robot, turrets, asteroids, bullets) and submit.
-9. Win/lose checks → `showWin()` / `showLose()` triggers + presentation overlays.
+1. Shield: tick the `ShieldState` machine — count down ACTIVE → COOLING → READY, refresh the shield button on transitions and at integer-second boundaries (`shieldUiSecLast` throttle).
+2. Aim: compute `targetAngle = atan2(aimTargetX − pivotX, max(0, aimTargetZ − pivotZ))`; smooth `centralTurretAngle` toward it (~16/sec exponential).
+3. Hold-to-fire: while `isTouching`, accumulate `fireTimer` and spawn bullets at `currentWeapon.fireIntervalSec` from the muzzle (`pivot + dir * 2*HALF_H`) along the aim direction. Finger up → reset timer. ACTION_DOWN primes timer for instant first shot. Bullet damage = `effectiveMainWeaponDamage * weapon.damageMultiplier`; AoE-capable weapons stamp `aoeRadius`/`aoeDamage` onto the bullet.
+4. Each side turret fires at the nearest asteroid (vector pointing to target).
+5. Move bullets along their velocity vector; cull off-screen and on hit (apply per-bullet damage to asteroid HP, scaled by `activeBuffDamageMul`). On hit, if `bullet.aoeRadius > 0`, apply `aoeDamage` to other live asteroids within the radius and spawn a large flash. After the bullet pass, dead asteroids' on-death effects fire — EXPLOSIVE deals splash damage to neighbours within `EXPLOSIVE_AOE_RADIUS`; ENERGY arms the buff.
+6. Move asteroids down at their per-asteroid speed (mission baseline × type multiplier captured at spawn).
+7. Asteroid touches platform: if `shieldState == ACTIVE`, asteroid is absorbed (small flash, no HP loss); otherwise damage platform by the asteroid's `platformDmg` (HEAVY hits twice as hard), remove asteroid.
+8. Wave control: spawn current wave's asteroids at intervals; when wave fully spawned and asteroids list is empty, start a 2-sec break or trigger win.
+9. Build the scene (platform — blue tint while shield active, central turret, side turrets, asteroids, bullets, flashes) and submit.
+10. Win/lose checks → `showWin()` / `showLose()` triggers + presentation overlays.
+
+**Central turret rotation pivot.** The model rotates around `SceneObject` origin (its centre), but visually we want pivot at the *base* sitting on the platform. To get base-anchored rotation without a custom mesh, `buildScene()` offsets the SceneObject centre along the barrel direction: `centerX = pivotX + sin(angle) * HALF_H`, `centerZ = pivotZ + cos(angle) * HALF_H`. The base stays glued to `(pivotX, pivotZ)` for any angle.
 
 ### Vulkan pipelines (`cpp/engine/VulkanContext.cpp`)
 
@@ -118,7 +126,7 @@ Game state machine: `MENU / PLAYING / WON / LOST`. The tick handler runs only in
 
 ### Camera
 
-Configured in `cpp/engine/Camera.cpp::reset()` for fixed side-view: target `(0, 0, 4)`, radius `22`, pitch `π/2` (rotation around X). Touch input on the engine surface is swallowed by `MainActivity`'s onTouchListener so the player's drag doesn't move the camera; it sets the robot's target X instead.
+Configured in `cpp/engine/Camera.cpp::reset()` for fixed side-view: target `(0, 0, 4)`, radius `22`, pitch `π/2` (rotation around X). Touch input on the engine surface is swallowed by `MainActivity`'s onTouchListener so the player's drag doesn't move the camera; it maps to `(aimTargetX, aimTargetZ)` in world coords for aiming the central turret.
 
 ### Coordinate convention
 
@@ -160,5 +168,5 @@ The game's "clean sci-fi arcade" look is centralised in two files:
 
 ## Memory & persistence
 
-- `GameProgress` (data class) — persistent state: `metal`, three upgrade levels, `highestMissionUnlocked`. Loaded once in `onCreate` from `SharedPreferences("outpost_progress", MODE_PRIVATE)` via `ProgressRepository`. Mutations go through `MainActivity.updateProgress { ... }` which copies + saves immediately.
+- `GameProgress` (data class) — persistent state: `metal`, three upgrade levels (`mainWeaponDamageLevel`, `baseHpLevel`, `sideTurretDamageLevel`), `highestMissionUnlocked`. Loaded once in `onCreate` from `SharedPreferences("outpost_progress_v2", MODE_PRIVATE)` via `ProgressRepository`. The `_v2` suffix is the M4 rename break — pre-M4 builds wrote to `outpost_progress`; that file is now ignored. Mutations go through `MainActivity.updateProgress { ... }` which copies + saves immediately.
 - `MissionRun` (data class) — in-flight stats for the current run: asteroids destroyed, score, metal earned, win bonus, current wave display, total waves, mission name. Reset on each `startMission`.

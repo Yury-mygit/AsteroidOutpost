@@ -3,14 +3,17 @@ package com.example.asteroidoutpost.game
 /**
  * Persistent player progress, saved across app launches via SharedPreferences.
  *
- * Phase A: only `metal` is used. Upgrade levels and unlocked-mission index
- * will be added in phases D and C respectively — declared here as defaults
- * so the persistence layer doesn't have to be revisited.
+ * Three upgrade tracks under the new combat system (M4 rename):
+ * - mainWeaponDamageLevel — central turret base damage (formerly "robot").
+ * - baseHpLevel — additive bonus to mission baseHp.
+ * - sideTurretDamageLevel — automatic side turrets' damage (~50% of central).
+ *
+ * highestMissionUnlocked is reserved for future progression gating.
  */
 data class GameProgress(
     val metal: Int = 0,
-    val robotDamageLevel:   Int = 1,
-    val baseHpLevel:        Int = 1,
-    val turretDamageLevel:  Int = 1,
+    val mainWeaponDamageLevel:  Int = 1,
+    val baseHpLevel:            Int = 1,
+    val sideTurretDamageLevel:  Int = 1,
     val highestMissionUnlocked: Int = 0,
 )
