@@ -101,9 +101,12 @@ void station_engine_draw_plasma_billboard(StationEngine* engine,
 // E1.2 — alpha-blended mesh draw. Pipeline uses SRC_ALPHA / ONE_MINUS_SRC_ALPHA
 // blending and depth-test on / depth-write off. Mesh's per-vertex alpha
 // controls transparency.
+// E3.1 — `material` selects a fragment-shader branch: 0 = plain, 1 = nebula
+// (FBM noise on alpha), 2 = hex (procedural hex grid on alpha).
 void station_engine_draw_translucent_mesh(StationEngine* engine,
                                           StationMesh*   mesh,
-                                          const float    modelMatrix[16]);
+                                          const float    modelMatrix[16],
+                                          int32_t        material);
 
 void station_engine_draw_object_frame_mesh(StationEngine* engine,
                                            StationMesh*   frameMesh,

@@ -49,7 +49,10 @@ data class SceneObject(
     val frameZMax: Float = 0f,
     val orbitRadiusMultiplier: Float = 2f,
     val orbitMargin: Float = 0f,
-    val isEnemy: Boolean = false
+    val isEnemy: Boolean = false,
+    // E3.1 — for translucent draws, picks a fragment-shader branch:
+    // 0 = plain, 1 = nebula (FBM), 2 = hex grid. Ignored on opaque routes.
+    val material: Int = 0,
 ) {
     fun orbitRadius(): Float =
         gameplayShape.boundingRadius() * scale * orbitRadiusMultiplier + orbitMargin
@@ -136,7 +139,7 @@ fun submitScene(
         engine.drawBillboardMesh(b.meshHandle, b.x, b.y, b.z, b.scale)
     }
     for (t in translucentObjects) {
-        engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix())
+        engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix(), t.material)
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale)

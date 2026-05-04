@@ -6,6 +6,14 @@ class EngineJni {
 
     companion object {
         init { System.loadLibrary("stationcore") }
+
+        // E3.1 — material flags for translucent draws. Fragment shader branches
+        // on these: PLAIN passes per-vertex alpha straight through; NEBULA
+        // multiplies alpha by 3-octave value-noise from world position; HEX
+        // multiplies alpha by a procedural hex-grid pattern from local X/Z.
+        const val MATERIAL_PLAIN  = 0
+        const val MATERIAL_NEBULA = 1
+        const val MATERIAL_HEX    = 2
     }
 
     private var engineHandle: Long = 0L
@@ -112,9 +120,9 @@ class EngineJni {
      * nebulae, shield domes, fade-out VFX — anything where the mesh has
      * varying alpha across its vertices.
      */
-    fun drawTranslucentMesh(meshHandle: Long, modelMatrix: FloatArray) {
+    fun drawTranslucentMesh(meshHandle: Long, modelMatrix: FloatArray, material: Int = MATERIAL_PLAIN) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawTranslucentMesh(engineHandle, meshHandle, modelMatrix)
+            nativeDrawTranslucentMesh(engineHandle, meshHandle, modelMatrix, material)
     }
 
     fun drawObjectFrameMesh(
@@ -235,7 +243,8 @@ class EngineJni {
     private external fun nativeDrawTranslucentMesh(
         engineHandle: Long,
         meshHandle: Long,
-        modelMatrix: FloatArray
+        modelMatrix: FloatArray,
+        material: Int,
     )
     private external fun nativeDrawObjectFrameMesh(
         engineHandle: Long,

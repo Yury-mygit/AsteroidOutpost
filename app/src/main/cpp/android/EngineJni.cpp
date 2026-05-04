@@ -198,14 +198,15 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*e
 JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawTranslucentMesh(JNIEnv* env, jobject /*thiz*/,
                                                         jlong engineHandle, jlong meshHandle,
-                                                        jfloatArray modelMatrix) {
+                                                        jfloatArray modelMatrix, jint material) {
     if (!modelMatrix) return;
     jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
     if (!m) return;
     station_engine_draw_translucent_mesh(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
-            reinterpret_cast<const float*>(m)
+            reinterpret_cast<const float*>(m),
+            static_cast<int32_t>(material)
     );
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
 }

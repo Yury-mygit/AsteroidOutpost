@@ -40,7 +40,11 @@ namespace station {
                               const float modelMatrix[16], float pickRadius);
         void drawBillboardMesh(uint32_t token, float x, float y, float z, float scale);
         void drawPlasmaBillboard(uint32_t token, float x, float y, float z, float scale);
-        void drawTranslucentMesh(uint32_t token, const float modelMatrix[16]);
+        // E3.1 — `material` selects a fragment-shader branch in the translucent
+        // pipeline: 0 = plain (per-vertex alpha only), 1 = nebula (FBM noise
+        // modulates alpha), 2 = hex (procedural hex grid modulates alpha).
+        // Encoded into pc.tint.y/z so the shader can branch with no extra API.
+        void drawTranslucentMesh(uint32_t token, const float modelMatrix[16], int32_t material = 0);
         void drawObjectFrameMesh(uint32_t frameToken, uint32_t targetToken, const float modelMatrix[16], float padding, const float tint[4]);
         void drawGameplayFrameMesh(uint32_t frameToken, const float modelMatrix[16],
                                    const float* localPoints, int32_t pointCount,

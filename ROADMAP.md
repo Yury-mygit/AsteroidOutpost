@@ -1,7 +1,7 @@
 # Asteroid Outpost — Концепция и состояние
 
 > Живой документ. Обновляй после каждой значимой сессии.
-> Последнее обновление: **2026-05-05**
+> Последнее обновление: **2026-05-05** (after E3)
 
 ## Концепция
 
@@ -125,8 +125,11 @@
 | E1 | Движок: alpha + RGBA + процедурные меши | engine wave         | ✅ **Готово** (2026-05-04) — нéбулы вместо градиента, translucent pipeline, `load_mesh_raw` |
 | E2.1 | Движок: радиальный soft-fade на plasma-биллбордах | engine wave    | ✅ **Готово** (2026-05-05) — vLocalXZ во vertex-шейдере, fade в fragment по флагу `pc.tint.x`, вспышки переведены на plasma |
 | E2.2 | Купол щита через процедурную half-membrane    | engine wave        | ✅ **Готово** (2026-05-05) — заменили стэк plasma-биллбордов на одну annular half-membrane mesh через translucent pipeline (Fresnel-имитация, прозрачный интерьер) |
+| E3.1 | Material plumbing для translucent draws       | engine wave        | ✅ **Готово** (2026-05-05) — `int material` параметр через C → JNI → Kotlin; флаги в `pc.tint.y/z` |
+| E3.2 | FBM-нéбулы (procedural cloud noise)           | engine wave        | ✅ **Готово** (2026-05-05) — domain-warped 4-octave value-noise по `vWorldPos.xz`, нéбулы стали wispy облаками |
+| E3.3 | Hex-щит (procedural hex grid)                 | engine wave        | ✅ **Готово** (2026-05-05) — мягкий hex pattern по `vLocalXZ` поверх filled half-disk dome, силовое поле вместо просто кольца |
 
-Зависимости: M1 → {M2, M3, M5}; M2 → M4; {M2, M3, M5} → M6; всё → M7. E1 параллельно (затрагивает только нативку). E2.2 зависит от E1 (`load_mesh_raw` + translucent pipeline).
+Зависимости: M1 → {M2, M3, M5}; M2 → M4; {M2, M3, M5} → M6; всё → M7. E1 параллельно (затрагивает только нативку). E2.2 зависит от E1 (`load_mesh_raw` + translucent pipeline). E3.2/E3.3 зависят от E3.1 (material flags).
 
 ### M1 — Новое ядро управления (завершено 2026-05-04)
 
@@ -302,9 +305,59 @@
 - Не реализовали FBM-шум / hex-pattern на мембране (concept art показывал hex grid и interference layer) — это потребовало бы UV+текстур (см. E2-бэклог), а E2.2 закрывает базовый «правильный силуэт». Орнамент — отдельная задача когда заведём UV.
 - Не использовали plasma pipeline (additive) для купола — translucent (alpha-blend) даёт более «материальный» силовой щит, additive для тонкой мембраны выглядел бы как «глоу-облако» без чёткой границы.
 
-## Бэклог по движку (после E2)
+### E3 — Procedural shader patterns (завершено 2026-05-05)
 
-E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола щита. Что осталось — для следующей волны движка, когда снова упрёмся в визуальный потолок:
+Триггер: E2.1+E2.2 закрыли «коробчатые» силуэты у вспышек и купола, но и нéбулы (идеальные мягкие диски), и купол (голый кольцевой контур) выглядели «слишком чисто» — ни облачной клочковатости, ни структурной фактуры. UV+текстуры (та задача из E2-бэклога) — большой кусок работы; дешевле получить «pre-UV» полировку через процедурные паттерны в фрагмент-шейдере, используя уже существующие `vWorldPos` и `vLocalXZ` от E2.1. После E3 (если ещё захочется визуального апгрейда) — переходим в E4 = UV+textures.
+
+#### E3.1 — Material plumbing (завершено 2026-05-05)
+
+Сделано:
+- ✅ **C++ слой.** `VulkanContext::drawTranslucentMesh` теперь принимает `int32_t material` (default 0). При material=1 пишет `cmd.tint[1] = 1.0f` (NEBULA flag), при material=2 — `cmd.tint[2] = 1.0f` (HEX flag). `renderFrame` translucent-loop теперь делает `memcpy(pc.tint, draw.tint, ...)` → флаги доходят до фрагмент-шейдера.
+- ✅ **C API.** `station_engine_draw_translucent_mesh(...)` получил `int32_t material` в сигнатуре.
+- ✅ **JNI.** `nativeDrawTranslucentMesh` принимает `jint material`.
+- ✅ **Kotlin.** `EngineJni.drawTranslucentMesh(handle, mat4, material: Int = MATERIAL_PLAIN)`. Константы `MATERIAL_PLAIN=0`, `MATERIAL_NEBULA=1`, `MATERIAL_HEX=2` в `EngineJni.Companion`.
+- ✅ **Scene.** `SceneObject.material: Int = 0`. `submitScene` пробрасывает в engine.
+
+После E3.1 фрагмент-шейдер ничего не делает по новым флагам — просто плумбинг готов. Нéбулы и купол визуально без изменений.
+
+Принятые решения:
+- Не плодим новые pipeline'ы под каждый паттерн — все варианты живут в одном fragment-шейдере с ветвлением по флагам. Это позволяет смешивать (например, плазменный soft-fade `tint.x` сохраняется параллельно с nebula/hex). Если в будущем у нас вырастет 5+ материалов — стоит подумать об отдельных шейдерах по material-id, но пока 3 ветки экономно укладываются в один.
+- Флаги через `pc.tint` (4 unused канала, кроме `tint.x` который уже забил E2.1), а не через структурное расширение `DrawCommand`. Самый дешёвый путь — никаких структурных изменений.
+
+#### E3.2 — FBM-нéбулы (завершено 2026-05-05)
+
+Триггер: пользователь увидел в первом проходе откровенный «грид value-noise» — нéбулы выглядели как сетка квадратных тайлов, особенно после `smoothstep` контрастирования. Потребовалось две итерации: сначала повернули октавы (~40°) и подняли `*0.6 → *0.9`, грид частично ушёл; затем добавили **domain warping** (сэмпл шума не в `p`, а в `p + warp(p)`, где `warp` — отдельный fbm) — оставшиеся прямоугольные кластеры размылись в завитки и тендрилы.
+
+Финальная реализация:
+- ✅ `hash21(vec2)` — 1D hash из 2D через `sin(dot)*43758`.
+- ✅ `vnoise2(vec2)` — 2D value-noise с smoothstep-весами `f*f*(3-2f)`.
+- ✅ `fbm4(vec2)` — 4 октавы value-noise с per-octave rotation matrix `R(40°)` + non-power-of-2 freq-step `*2.13` (ломает выравнивание сеток между октавами).
+- ✅ `nebulaAlphaMod()` — domain warping: `warp = vec2(fbm4(p), fbm4(p + offset))`, `n = fbm4(p + warp * 0.5)`, затем `smoothstep(0.20, 0.85, n)`. Стоит ~12 шумовых сэмплов на фрагмент — на Pixel 9 эмуляторе тянет без проблем.
+- ✅ Все 5 нéбул в `MainActivity.setupBackgroundNebulae` помечены `material = EngineJni.MATERIAL_NEBULA`.
+
+Принятые решения:
+- Domain warping вместо более дорогого Perlin/gradient noise — комбинация ротированной FBM + warp визуально эквивалентна гладкому шуму в нашем масштабе, но дешевле в реализации.
+- World-pos sampling (`vWorldPos.xz`), не local-pos — нéбулы в разных позициях видят разные срезы шумового поля → не выглядят одинаковыми «копипастами».
+
+#### E3.3 — Hex-щит (завершено 2026-05-05)
+
+Триггер: щит после E2.2 был просто светящимся ободом — функционально читался как «силовое поле», но без структурной фактуры из концепт-арта пользователя (force field с hex-сеткой, multiple layers). E3.3 добавил hex-grid поверх filled half-disk dome.
+
+Сделано:
+- ✅ **Топология купола.** `buildDomeMembraneMesh` теперь поддерживает 2 формы: annular ring (centerAlpha=0, как было в E2.2) и filled half-disk (centerAlpha>0, добавляется центральная вершина и triangle-fan от центра до peak-арки). Hex-щит использует filled (centerAlpha=0.22, peakAlpha=0.55) — hex-узор имеет непрерывную поверхность для отрисовки, не лезет в «вакуум» интерьера.
+- ✅ **Hex tiling в шейдере.** Адаптация Inigo Quilez hex-tile snippet: `hexTile(vec2 p)` возвращает локальные координаты внутри ближайшей hex-ячейки + индекс ячейки. `hexEdgeDist(vec2)` считает расстояние от точки до ближайшего ребра ячейки (0 на грани, 0.866 в центре).
+- ✅ **`hexAlphaMod()`.** Sample в `vLocalXZ * 6.0` (~6 ячеек поперёк купола). После двух итераций тюнинга — мягкий узор: `base = 0.85`, `line bonus = 0.15`, переход `smoothstep(0.10, 0.55)`. Сетку видно как **намёк**, не wireframe.
+- ✅ **Силуэт мягче.** `midR` сдвинут с 0.92 на 0.80 — фейд от peak-альфы к внешнему ободу занимает 20% радиуса, не 8% → силуэт купола плавно растворяется в фоне.
+- ✅ Купол в `MainActivity.buildShieldDome` помечен `material = EngineJni.MATERIAL_HEX`.
+
+Принятые решения:
+- Первая попытка с агрессивным hex (`base=0.35`, `line=0.65`) выглядела как тёмные ячейки с яркими гранями — пользователь сказал «странно, нужно более гладким». Резко смягчили (base 0.35→0.85, line 0.65→0.15) — стало читаться как структурный hint.
+- Не добавляли animation pulsation на hex (концепт показывал ripple/wave при impact) — для этого нужно прокинуть time через push-constant, отложили до момента когда понадобится impact-effect.
+- Hex sample в `vLocalXZ` (model-space), не `vWorldPos` — паттерн прибит к мешу, не к мировым координатам, поэтому при `mul`-пульсации (E2.2 breathing) hex масштабируется вместе с куполом, не «плывёт».
+
+## Бэклог по движку (после E3)
+
+E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны. Что осталось — для следующей волны движка, когда снова упрёмся в визуальный потолок:
 
 - **UV-координаты + текстуры.** Сейчас вершина = `pos + rgba + normal + vLocalXZ`. UV нет → нельзя сэмплить текстуру в фрагменте → не получится нормальный «облачный» нéбул-шейдер, тинтованные иконки, спрайтовые VFX. **Нужно:** второй vertex-attribute UV (`vec2 @ location 4`) во всех пайплайнах, descriptor-set с `combined image sampler`, API `load_texture(bytes)` + `draw_textured_mesh(token, textureToken, mat4)`. Большая правка — затронет `Mesh`, `VulkanContext`, шейдеры, C API.
 - **Procedural-shader варианты для нéбул.** Текущий нéбул = одноцветный soft-disk. Реальные туманности — клочковатые, многоцветные, с FBM-шумом. **Нужно:** альтернативный fragment-шейдер с procedural noise (FBM по UV или world-pos), отдельный пайплайн `nebula` либо ветка в `translucent`-фрагменте по material-id. Дешевле через UV → текстура (см. выше) с заранее запечённым шумом.
@@ -314,6 +367,9 @@ E1 закрыл базовую прозрачность и процедурны�
 Закрытые в E1: ✅ полупрозрачный mesh-pipeline, ✅ per-vertex alpha (RGBA), ✅ процедурные меши через `load_mesh_raw`.
 Закрытые в E2.1: ✅ радиальный soft-fade на plasma-биллбордах (vLocalXZ + `pc.tint.x` как флаг).
 Закрытые в E2.2: ✅ annular half-membrane mesh для купола щита (force-field-силуэт через translucent pipeline + per-vertex alpha).
+Закрытые в E3.1: ✅ material plumbing (translucent draws + `pc.tint.y/z` флаги для шейдера).
+Закрытые в E3.2: ✅ FBM нéбулы с domain warping (wispy clouds вместо soft-disks).
+Закрытые в E3.3: ✅ hex-grid pattern на куполе щита (force-field structural hint).
 
 ## Старый бэклог (мелкая шерсть)
 

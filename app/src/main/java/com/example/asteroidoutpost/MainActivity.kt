@@ -751,63 +751,117 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Procedural half-ring (annular half-disk) mesh for the shield dome (E2.2).
-     * Three concentric arcs over the upper half-circle in the X-Z plane:
-     *  - inner arc at radius `innerR`, alpha = 0 (transparent — interior of dome)
-     *  - middle arc at radius `midR`,  alpha = `peakAlpha` (bright energy band)
-     *  - outer arc at radius `outerR`, alpha = 0 (transparent — outside dome)
-     * Two triangle strips connect (inner→middle) and (middle→outer); per-vertex
-     * alpha interpolates linearly so each strip fades 0→peak→0 across its
-     * width, producing a thin glowing half-circle outline. Interior of the
-     * dome stays fully transparent — the central turret remains visible inside.
+     * Procedural shield dome mesh (E2.2 + E3.3). Supports two topologies:
+     *
+     *  1. Annular ring (centerAlpha = 0): three concentric half-arcs at
+     *     radii `innerR`/`midR`/`outerR` with alphas 0/peakAlpha/0. Used in
+     *     E2.2 for the bright-rim-only force-field silhouette.
+     *
+     *  2. Filled half-disk with rim peak (centerAlpha > 0): adds a centre
+     *     vertex with `centerAlpha`, an inner triangle-fan from centre to
+     *     the `midR` arc fills the interior at peakAlpha, and the outer
+     *     strip from `midR` to `outerR` fades to 0. Used by E3.3 so the
+     *     hex-pattern alpha modulation has a continuous surface across the
+     *     whole dome (not just a thin ring).
+     *
+     * Both topologies live on the upper half-circle (θ ∈ [0, π]) in the
+     * X-Z plane, drawn through the translucent pipeline. Inner-fan triangles
+     * interpolate alpha linearly from `centerAlpha` at the centre to
+     * `peakAlpha` at the mid-arc.
      */
     private fun buildDomeMembraneMesh(
         r: Float, g: Float, b: Float,
         peakAlpha: Float = 0.85f,
+        centerAlpha: Float = 0f,
         innerR: Float = 0.85f,
         midR:   Float = 0.92f,
         outerR: Float = 1.00f,
         sectors: Int = 48,
+    ): Long {
+        return if (centerAlpha > 0f) {
+            buildFilledDomeMesh(r, g, b, peakAlpha, centerAlpha, midR, outerR, sectors)
+        } else {
+            buildAnnularDomeMesh(r, g, b, peakAlpha, innerR, midR, outerR, sectors)
+        }
+    }
+
+    private fun buildAnnularDomeMesh(
+        r: Float, g: Float, b: Float,
+        peakAlpha: Float, innerR: Float, midR: Float, outerR: Float, sectors: Int,
     ): Long {
         val nVertsPerArc = sectors + 1
         val nVerts = nVertsPerArc * 3
         val vertices = FloatArray(nVerts * 10)
         val radii  = floatArrayOf(innerR, midR, outerR)
         val alphas = floatArrayOf(0f, peakAlpha, 0f)
-
         for (ring in 0..2) {
             for (s in 0..sectors) {
-                val ang = (s.toDouble() * Math.PI / sectors).toFloat()  // 0 → π
+                val ang = (s.toDouble() * Math.PI / sectors).toFloat()
                 val off = (ring * nVertsPerArc + s) * 10
                 vertices[off + 0] = kotlin.math.cos(ang) * radii[ring]
                 vertices[off + 1] = 0f
                 vertices[off + 2] = kotlin.math.sin(ang) * radii[ring]
-                vertices[off + 3] = r
-                vertices[off + 4] = g
-                vertices[off + 5] = b
+                vertices[off + 3] = r; vertices[off + 4] = g; vertices[off + 5] = b
                 vertices[off + 6] = alphas[ring]
-                vertices[off + 7] = 0f
-                vertices[off + 8] = 1f
-                vertices[off + 9] = 0f
+                vertices[off + 7] = 0f; vertices[off + 8] = 1f; vertices[off + 9] = 0f
             }
         }
-
-        // Two strips × `sectors` quads × 6 indices/quad.
         val indices = ShortArray(2 * sectors * 6)
         var idx = 0
         for (strip in 0..1) {
-            val ring0 = strip
-            val ring1 = strip + 1
+            val ring0 = strip; val ring1 = strip + 1
             for (s in 0 until sectors) {
                 val v0 = (ring0 * nVertsPerArc + s    ).toShort()
                 val v1 = (ring0 * nVertsPerArc + s + 1).toShort()
                 val v2 = (ring1 * nVertsPerArc + s    ).toShort()
                 val v3 = (ring1 * nVertsPerArc + s + 1).toShort()
-                // Triangle 1: v0, v1, v2 (counter-clockwise viewed from +Y)
                 indices[idx++] = v0; indices[idx++] = v1; indices[idx++] = v2
-                // Triangle 2: v1, v3, v2
                 indices[idx++] = v1; indices[idx++] = v3; indices[idx++] = v2
             }
+        }
+        return engineView.engine.loadMeshRaw(vertices, indices)
+    }
+
+    private fun buildFilledDomeMesh(
+        r: Float, g: Float, b: Float,
+        peakAlpha: Float, centerAlpha: Float, midR: Float, outerR: Float, sectors: Int,
+    ): Long {
+        val ringSize = sectors + 1
+        val nVerts = 1 + 2 * ringSize
+        val vertices = FloatArray(nVerts * 10)
+        fun put(idx: Int, x: Float, z: Float, alpha: Float) {
+            val off = idx * 10
+            vertices[off + 0] = x; vertices[off + 1] = 0f; vertices[off + 2] = z
+            vertices[off + 3] = r; vertices[off + 4] = g; vertices[off + 5] = b
+            vertices[off + 6] = alpha
+            vertices[off + 7] = 0f; vertices[off + 8] = 1f; vertices[off + 9] = 0f
+        }
+        put(0, 0f, 0f, centerAlpha)
+        for (s in 0..sectors) {
+            val ang = (s.toDouble() * Math.PI / sectors).toFloat()
+            put(1 + s,
+                kotlin.math.cos(ang) * midR,
+                kotlin.math.sin(ang) * midR,
+                peakAlpha)
+        }
+        for (s in 0..sectors) {
+            val ang = (s.toDouble() * Math.PI / sectors).toFloat()
+            put(1 + ringSize + s,
+                kotlin.math.cos(ang) * outerR,
+                kotlin.math.sin(ang) * outerR,
+                0f)
+        }
+        // sectors triangles in the inner fan + 2*sectors in the outer strip.
+        val indices = ShortArray(3 * sectors * 3)
+        var idx = 0
+        for (s in 0 until sectors) {
+            val peakS    = (1 + s).toShort()
+            val peakNext = (1 + s + 1).toShort()
+            val rimS     = (1 + ringSize + s).toShort()
+            val rimNext  = (1 + ringSize + s + 1).toShort()
+            indices[idx++] = 0; indices[idx++] = peakS; indices[idx++] = peakNext
+            indices[idx++] = peakS;    indices[idx++] = rimS;    indices[idx++] = rimNext
+            indices[idx++] = peakS;    indices[idx++] = rimNext; indices[idx++] = peakNext
         }
         return engineView.engine.loadMeshRaw(vertices, indices)
     }
@@ -847,11 +901,24 @@ class MainActivity : AppCompatActivity() {
                 meshHandle = nebulaHandles[p.tint],
                 x          = p.x, y = 1f, z = p.z,
                 scale      = p.scale,
+                // E3.2 — fragment shader applies FBM-noise alpha modulation
+                // for this material → soft-disk turns into wispy clouds.
+                material   = EngineJni.MATERIAL_NEBULA,
             )
         }
-        // E2.2 — shield dome membrane mesh (single bright cyan-blue ring).
-        // buildShieldDome scales it to fit over the platform.
-        domeMembraneHandle = buildDomeMembraneMesh(0.45f, 0.75f, 1.00f)
+        // E3.3 — filled half-disk so the hex shader has a continuous surface
+        // to draw onto. centerAlpha is low (subtle interior fill, turret stays
+        // visible) and the mid-arc carries the rim glow. midR pulled inward to
+        // 0.80 so the falloff from peak to outer rim is wider — softer dome
+        // silhouette instead of a hard edge. Hex modulation is intentionally
+        // subtle (see hexAlphaMod in triangle.frag).
+        domeMembraneHandle = buildDomeMembraneMesh(
+            r = 0.45f, g = 0.75f, b = 1.00f,
+            peakAlpha   = 0.55f,
+            centerAlpha = 0.22f,
+            midR        = 0.80f,
+            outerR      = 1.00f,
+        )
         // Initial assignment so menu / mission-select scenes (which don't run
         // buildScene) still show the nebulae backdrop.
         engineView.translucentObjects = nebulaeTranslucent
@@ -1093,6 +1160,8 @@ class MainActivity : AppCompatActivity() {
                 scaleX     = 2.4f * mul,
                 scaleY     = 1f,
                 scaleZ     = 2.0f * mul,
+                // E3.3 — fragment shader overlays a hex grid on the dome.
+                material   = EngineJni.MATERIAL_HEX,
             ),
         )
     }

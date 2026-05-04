@@ -226,9 +226,10 @@ extern "C" void station_engine_draw_plasma_billboard(StationEngine* e,
 
 extern "C" void station_engine_draw_translucent_mesh(StationEngine* e,
                                                      StationMesh*   mesh,
-                                                     const float    modelMatrix[16]) {
+                                                     const float    modelMatrix[16],
+                                                     int32_t        material) {
     if (!e || !mesh) return;
-    e->vulkan.drawTranslucentMesh(mesh->token, modelMatrix);
+    e->vulkan.drawTranslucentMesh(mesh->token, modelMatrix, material);
 }
 
 extern "C" void station_engine_draw_object_frame_mesh(StationEngine* e,

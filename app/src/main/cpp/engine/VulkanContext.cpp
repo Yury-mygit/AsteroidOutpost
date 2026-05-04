@@ -870,13 +870,17 @@ namespace station {
     // E1.2 — alpha-blended mesh draw. Uses the regular triangle.frag (RGBA
     // output) but the translucent pipeline applies SRC_ALPHA blending so the
     // mesh's per-vertex alpha controls how much it occludes what's behind.
-    void VulkanContext::drawTranslucentMesh(uint32_t token, const float modelMatrix[16]) {
+    // E3.1 — material flags packed into tint slots so the fragment shader can
+    // branch on them: pc.tint.y = NEBULA, pc.tint.z = HEX. plain = no flags.
+    void VulkanContext::drawTranslucentMesh(uint32_t token, const float modelMatrix[16], int32_t material) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token       = token;
         cmd.billboard   = false;
         cmd.objectFrame = false;
         std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        if (material == 1) cmd.tint[1] = 1.0f;  // NEBULA → fragment FBM mode
+        if (material == 2) cmd.tint[2] = 1.0f;  // HEX    → fragment hex-grid mode
         m_translucentDrawList.push_back(cmd);
     }
 
@@ -1379,6 +1383,9 @@ namespace station {
                 }
                 PushConstantData pc{};
                 std::memcpy(pc.model, draw.modelMatrix, sizeof(float) * 16);
+                // E3.1 — propagate material flags (cmd.tint set by
+                // drawTranslucentMesh). Fragment shader reads pc.tint.y/z.
+                std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
