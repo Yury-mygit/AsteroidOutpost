@@ -190,11 +190,35 @@ namespace station {
         if (!err.empty())  LOGE("GltfLoader err:  %s", err.c_str());
         if (!ok)           { LOGE("GltfLoader: parse failed"); return false; }
 
+        // Merge every triangle primitive of every mesh into a single MeshData.
+        // glTF authoring tools split a model into one primitive per material
+        // (e.g. Bullet.glb has 3 prims for the brass casing, copper tip, and
+        // base ring). Without merging we would render only the first primitive
+        // — the rest of the model would be missing. `load_mesh_colored` later
+        // re-stamps every vertex's tint to a single colour, so we don't lose
+        // anything visible by collapsing the per-material split here.
+        bool any = false;
         for (const auto& mesh : model.meshes) {
             for (const auto& prim : mesh.primitives) {
                 if (prim.mode != TINYGLTF_MODE_TRIANGLES) continue;
-                LOGI("GltfLoader: mesh='%s'", mesh.name.c_str());
-                return convertPrimitive(model, prim, outMesh);
+                MeshData primData;
+                if (!convertPrimitive(model, prim, primData)) continue;
+                uint16_t base = (uint16_t)outMesh.vertices.size();
+                outMesh.vertices.insert(outMesh.vertices.end(),
+                                        primData.vertices.begin(),
+                                        primData.vertices.end());
+                for (uint16_t idx : primData.indices) {
+                    outMesh.indices.push_back(base + idx);
+                }
+                any = true;
+            }
+            if (any) {
+                LOGI("GltfLoader: mesh='%s' merged %zu prims → %zu verts, %zu indices",
+                     mesh.name.c_str(),
+                     mesh.primitives.size(),
+                     outMesh.vertices.size(),
+                     outMesh.indices.size());
+                return true;
             }
         }
         LOGE("GltfLoader: no triangle mesh found");

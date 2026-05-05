@@ -103,10 +103,17 @@ class MainActivity : AppCompatActivity() {
     private var quadMeshHandle:     Long = 0L  // unit X-Z quad, red tint (central turret, bullets)
     private var quadGreyHandle:     Long = 0L  // unit X-Z quad, grey tint (platform)
     private var quadBlueHandle:     Long = 0L  // unit X-Z quad, blue tint (side turrets)
-    private var asteroidMesh3D:        Long = 0L  // Asteroid_1.glb tinted grey  (NORMAL / FAST)
-    private var asteroidMeshHeavy:     Long = 0L  // Asteroid_1.glb tinted dark red (HEAVY)
-    private var asteroidMeshExplosive: Long = 0L  // Asteroid_1.glb tinted orange   (EXPLOSIVE)
-    private var asteroidMeshEnergy:    Long = 0L  // Asteroid_1.glb tinted cyan     (ENERGY)
+    // Per-type asteroid meshes. NORMAL/FAST randomize across two grey variants
+    // at spawn so common waves don't look like clones; HEAVY/EXPLOSIVE/ENERGY
+    // each get their own silhouette + tint so the type is readable at a glance.
+    private var asteroidMeshGrey1:     Long = 0L  // Asteroid_1.glb grey  (NORMAL/FAST variant A)
+    private var asteroidMeshGrey2:     Long = 0L  // Asteroid_2.glb grey  (NORMAL/FAST variant B)
+    private var asteroidMeshHeavy:     Long = 0L  // Asteroid_3.glb dark red (HEAVY — chunky/round)
+    private var asteroidMeshExplosive: Long = 0L  // Asteroid_4.glb orange   (EXPLOSIVE)
+    private var asteroidMeshEnergy:    Long = 0L  // Asteroid_9.glb cyan     (ENERGY)
+    // Bullet meshes (replace red-quad placeholders).
+    private var bulletMeshHandle:      Long = 0L  // Bullet.glb        (automatic + side turrets)
+    private var bulletHeavyMeshHandle: Long = 0L  // Bullet_Heavy.glb  (heavy cannon)
     private var quadFlashHandle:    Long = 0L  // unit X-Z quad, bright yellow (destruction flash)
     // Background nebulae — soft-edge disks (E1.4) loaded via `loadMeshRaw`.
     // Each disk is a triangle fan: centre vertex alpha=1, rim vertices alpha=0,
@@ -144,6 +151,9 @@ class MainActivity : AppCompatActivity() {
         val damage: Int,
         val halfW: Float = DraftCombat.BULLET_HALF_W,
         val halfH: Float = DraftCombat.BULLET_HALF_H,
+        // Render mesh — Bullet.glb for normal/side, Bullet_Heavy.glb for the
+        // heavy cannon. 0 falls back to the red quad on the engine side.
+        val meshHandle: Long = 0L,
         // AoE on impact. aoeRadius == 0 means single-target (default).
         // aoeDamage applied to every other asteroid within the radius.
         val aoeRadius: Float = 0f,
@@ -174,6 +184,9 @@ class MainActivity : AppCompatActivity() {
         val speed: Float = 0f,            // units/sec downward
         val half:  Float = DraftCombat.ASTEROID_HALF,
         val platformDmg: Int = DraftCombat.PLATFORM_DMG_PER_HIT,
+        // Picked at spawn from the per-type mesh pool (NORMAL/FAST randomize
+        // across two grey variants for visual diversity). 0 = engine fallback.
+        val meshHandle: Long = 0L,
     )
     private val bullets:    MutableList<Bullet>   = mutableListOf()
     private val asteroids:  MutableList<Asteroid> = mutableListOf(
@@ -278,6 +291,25 @@ class MainActivity : AppCompatActivity() {
         const val CENTRAL_TURRET_BASE_Z:   Float = -0.94f // platform top — rotation pivot
         const val CENTRAL_TURRET_HALF_W:   Float = 0.10f  // narrow barrel
         const val CENTRAL_TURRET_HALF_H:   Float = 0.30f  // ~3× side turret height
+        // Aim-alignment threshold for the central turret. While `isTouching`
+        // and the cooldown is ready, the turret only fires once it's rotated
+        // close enough to the target angle (within ~5.7°). Without this gate
+        // the first shot of a press lands wherever the barrel happened to be
+        // pointing while the rotation was still catching up to the touch.
+        const val AIM_ALIGN_THRESHOLD_RAD: Float = 0.10f
+        // Yaw correction applied to Bullet.glb / Bullet_Heavy.glb when oriented
+        // along the velocity vector. atan2(vx, vz) aligns the model's local +Z
+        // with the flight direction; the bullet .glbs are authored with their
+        // long axis along +X (bbox [0.02..0.72] in X, ±0.18 in Y/Z), so we
+        // rotate by -PI/2 so that +X (rest pose nose direction) maps onto +Z
+        // (velocity-aligned forward axis).
+        const val BULLET_MODEL_YAW_OFFSET: Float = -1.5707963f
+        // Uniform scale for the bullet model. The .glb is ~0.7 units long;
+        // we want it roughly the size of the previous quad placeholder
+        // (≈0.36 units long when scaled by halfH=0.18). 2× brings it visually
+        // on par with the trail/muzzle flash so the projectile is readable
+        // alongside its VFX instead of vanishing into the additive haze.
+        const val BULLET_MODEL_SCALE_MUL: Float = 2.0f
         const val WAVE_BREAK_SEC:    Float = 2.0f
         const val FLASH_LIFE_SEC:    Float = 0.25f
         const val FLASH_HALF:        Float = 0.20f
@@ -672,7 +704,7 @@ class MainActivity : AppCompatActivity() {
             val bytes = assets.open("models/station.glb").readBytes()
             stationMeshHandle = engineView.engine.loadMesh(bytes)
             // DRAFT — legacy tinted variant of station.glb. Outpost no longer
-            // renders this; left for the asteroidMesh3D fallback path only.
+            // renders this; left as a defensive fallback if asteroid loads fail.
             asteroidMeshHandle = engineView.engine.loadMeshColored(bytes, 0.55f, 0.55f, 0.60f)
             if (stationMeshHandle == 0L) showStatus("Station load failed")
         } catch (e: Exception) {
@@ -694,19 +726,40 @@ class MainActivity : AppCompatActivity() {
             showStatus("Quad load failed: ${e.message}")
         }
         try {
-            val asteroidBytes = assets.open("models/Asteroid_1.glb").readBytes()
-            asteroidMesh3D        = engineView.engine.loadMeshColored(asteroidBytes, 0.55f, 0.55f, 0.60f)
-            asteroidMeshHeavy     = engineView.engine.loadMeshColored(asteroidBytes, 0.70f, 0.20f, 0.20f)
-            asteroidMeshExplosive = engineView.engine.loadMeshColored(asteroidBytes, 0.95f, 0.55f, 0.20f)
-            asteroidMeshEnergy    = engineView.engine.loadMeshColored(asteroidBytes, 0.30f, 0.85f, 0.95f)
-            if (asteroidMesh3D == 0L) asteroidMesh3D = engineView.engine.loadMesh(asteroidBytes)
-            // Fallback any failed tint to the grey mesh so the scene still renders.
-            if (asteroidMeshHeavy     == 0L) asteroidMeshHeavy     = asteroidMesh3D
-            if (asteroidMeshExplosive == 0L) asteroidMeshExplosive = asteroidMesh3D
-            if (asteroidMeshEnergy    == 0L) asteroidMeshEnergy    = asteroidMesh3D
-            if (asteroidMesh3D == 0L) showStatus("Asteroid_1.glb load failed")
+            val a1 = assets.open("models/Asteroid_1.glb").readBytes()
+            val a2 = assets.open("models/Asteroid_2.glb").readBytes()
+            val a3 = assets.open("models/Asteroid_3.glb").readBytes()
+            val a4 = assets.open("models/Asteroid_4.glb").readBytes()
+            val a9 = assets.open("models/Asteroid_9.glb").readBytes()
+            asteroidMeshGrey1     = engineView.engine.loadMeshColored(a1, 0.55f, 0.55f, 0.60f)
+            asteroidMeshGrey2     = engineView.engine.loadMeshColored(a2, 0.55f, 0.55f, 0.60f)
+            asteroidMeshHeavy     = engineView.engine.loadMeshColored(a3, 0.70f, 0.20f, 0.20f)
+            asteroidMeshExplosive = engineView.engine.loadMeshColored(a4, 0.95f, 0.55f, 0.20f)
+            asteroidMeshEnergy    = engineView.engine.loadMeshColored(a9, 0.30f, 0.85f, 0.95f)
+            if (asteroidMeshGrey1 == 0L) asteroidMeshGrey1 = engineView.engine.loadMesh(a1)
+            // Fallback any failed mesh to the grey-1 baseline so the scene still renders.
+            if (asteroidMeshGrey2     == 0L) asteroidMeshGrey2     = asteroidMeshGrey1
+            if (asteroidMeshHeavy     == 0L) asteroidMeshHeavy     = asteroidMeshGrey1
+            if (asteroidMeshExplosive == 0L) asteroidMeshExplosive = asteroidMeshGrey1
+            if (asteroidMeshEnergy    == 0L) asteroidMeshEnergy    = asteroidMeshGrey1
+            if (asteroidMeshGrey1 == 0L) showStatus("Asteroid meshes load failed")
         } catch (e: Exception) {
-            showStatus("Asteroid_1.glb load failed: ${e.message}")
+            showStatus("Asteroid mesh load failed: ${e.message}")
+        }
+        try {
+            val bulletBytes = assets.open("models/Bullet.glb").readBytes()
+            val heavyBytes  = assets.open("models/Bullet_Heavy.glb").readBytes()
+            // Brass-and-copper tint on the regular bullet so it reads warm against
+            // the dark space background; heavier shell gets a slightly cooler steely
+            // tone for a heftier feel.
+            bulletMeshHandle      = engineView.engine.loadMeshColored(bulletBytes, 1.00f, 0.85f, 0.55f)
+            bulletHeavyMeshHandle = engineView.engine.loadMeshColored(heavyBytes,  0.90f, 0.80f, 0.60f)
+            if (bulletMeshHandle      == 0L) bulletMeshHandle      = engineView.engine.loadMesh(bulletBytes)
+            if (bulletHeavyMeshHandle == 0L) bulletHeavyMeshHandle = engineView.engine.loadMesh(heavyBytes)
+            if (bulletHeavyMeshHandle == 0L) bulletHeavyMeshHandle = bulletMeshHandle
+            if (bulletMeshHandle == 0L) showStatus("Bullet meshes load failed")
+        } catch (e: Exception) {
+            showStatus("Bullet mesh load failed: ${e.message}")
         }
         setupBackgroundNebulae()
     }
@@ -1073,35 +1126,32 @@ class MainActivity : AppCompatActivity() {
                 scaleZ     = DraftCombat.TURRET_HALF,
             ),
         ) + asteroids.mapIndexed { i, a ->
-            // Asteroid_1.glb has a roughly unit bbox (±1 in all axes). Scale by
-            // the per-asteroid `half` (mission baseline × type multiplier) so
-            // FAST asteroids look small and HEAVY ones look chunky. Mesh tint
-            // varies by type for readability — placeholder until M7 polish.
-            val mesh = when (a.type) {
-                AsteroidType.HEAVY     -> asteroidMeshHeavy
-                AsteroidType.EXPLOSIVE -> asteroidMeshExplosive
-                AsteroidType.ENERGY    -> asteroidMeshEnergy
-                AsteroidType.NORMAL,
-                AsteroidType.FAST      -> asteroidMesh3D
-            }
+            // Per-asteroid mesh chosen at spawn (5 distinct .glbs across 5 types
+            // + grey variant pool). Roughly unit bbox; scale by `half` so FAST
+            // asteroids look small and HEAVY ones look chunky.
             SceneObject(
                 id         = 200 + i,
-                meshHandle = mesh,
+                meshHandle = if (a.meshHandle != 0L) a.meshHandle else asteroidMeshGrey1,
                 x          = a.xPos, y = 0f, z = a.zPos,
                 rotationZ  = a.rotation,
                 scale      = a.half,
             )
         } + bullets.mapIndexed { i, b ->
-            // Rotate the quad so its long (Z) axis aligns with velocity (vx, vz).
-            // Rotation around Y maps (0,0,1) → (sin θ, 0, cos θ), so θ = atan2(vx, vz).
+            // Bullet model — long axis aligned with velocity. Y-rotation =
+            // atan2(vx, vz) maps the model's local +Z to the velocity vector,
+            // plus BULLET_MODEL_YAW_OFFSET so we can correct if the .glb's
+            // forward axis turns out not to be +Z.
+            //
+            // Scale: the .glb has its own intrinsic bbox (~unit), so `b.halfW`
+            // (≈0.04..0.10) gives a small bullet sized roughly like the old
+            // quad placeholder. Uniform scale keeps the model's proportions.
+            val mesh = if (b.meshHandle != 0L) b.meshHandle else quadMeshHandle
             SceneObject(
                 id         = 300 + i,
-                meshHandle = quadMeshHandle,
+                meshHandle = mesh,
                 x          = b.x, y = 0f, z = b.z,
-                rotationY  = kotlin.math.atan2(b.vx, b.vz),
-                scaleX     = b.halfW,
-                scaleY     = 1f,
-                scaleZ     = b.halfH,
+                rotationY  = kotlin.math.atan2(b.vx, b.vz) + DraftCombat.BULLET_MODEL_YAW_OFFSET,
+                scale      = b.halfH * DraftCombat.BULLET_MODEL_SCALE_MUL,
             )
         }
 
@@ -2017,16 +2067,21 @@ class MainActivity : AppCompatActivity() {
             // Central-turret cooldown — counts down EVERY tick, regardless of
             // touch state, so a player can't fire faster than the weapon allows
             // by spamming taps. While `isTouching`, fire whenever cooldown <= 0
-            // and reset cooldown to fireIntervalSec; the first shot of a press
-            // is still instant if the player hasn't fired recently (cooldown
-            // already at 0). Active buff multiplies the weapon's per-shot damage.
+            // AND the barrel has rotated close enough to the touch direction
+            // (AIM_ALIGN_THRESHOLD_RAD). Without that align gate, holding the
+            // first frame after a touch fires a shot in the OLD aim direction
+            // before the exponential rotation has caught up — which felt like
+            // the turret ignoring the player's aim. Active buff multiplies the
+            // weapon's per-shot damage.
             val weapon = currentWeapon
             val weaponDamage = (effectiveMainWeaponDamage * weapon.damageMultiplier * activeBuffDamageMul).toInt()
             if (centralFireCooldown > 0f) {
                 centralFireCooldown -= dt
                 if (centralFireCooldown < 0f) centralFireCooldown = 0f
             }
-            if (isTouching && centralFireCooldown <= 0f) {
+            val aimAligned = kotlin.math.abs(targetAngle - centralTurretAngle) <
+                             DraftCombat.AIM_ALIGN_THRESHOLD_RAD
+            if (isTouching && centralFireCooldown <= 0f && aimAligned) {
                 centralFireCooldown = weapon.fireIntervalSec
                 val ang = centralTurretAngle
                 val sinA = kotlin.math.sin(ang)
@@ -2034,6 +2089,11 @@ class MainActivity : AppCompatActivity() {
                 val muzzleR = DraftCombat.CENTRAL_TURRET_HALF_H * 2f
                 val muzzleX = pivotX + sinA * muzzleR
                 val muzzleZ = pivotZ + cosA * muzzleR
+                // Heavy cannon → Bullet_Heavy.glb (chunky shell), automatic →
+                // Bullet.glb (slim round). aoeRadius is the fire-mode tell —
+                // only the heavy cannon ships AoE.
+                val bulletMesh = if (weapon.aoeRadius > 0f) bulletHeavyMeshHandle
+                                 else                       bulletMeshHandle
                 bullets.add(Bullet(
                     x  = muzzleX,
                     z  = muzzleZ,
@@ -2042,6 +2102,7 @@ class MainActivity : AppCompatActivity() {
                     damage = weaponDamage,
                     halfW = weapon.projectileHalfW,
                     halfH = weapon.projectileHalfH,
+                    meshHandle = bulletMesh,
                     aoeRadius = weapon.aoeRadius,
                     aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
                 ))
@@ -2074,6 +2135,7 @@ class MainActivity : AppCompatActivity() {
                         vx = nx * DraftCombat.BULLET_SPEED,
                         vz = nz * DraftCombat.BULLET_SPEED,
                         damage = effectiveTurretDamage,
+                        meshHandle = bulletMeshHandle,
                     ))
                     // Side-turret muzzle flash — same look as the central
                     // turret's, slightly smaller to keep them visually secondary.
@@ -2289,6 +2351,18 @@ class MainActivity : AppCompatActivity() {
                             val spinSign = if (Math.random() < 0.5) -1f else 1f
                             val spin     = spinSign * (0.5f + Math.random().toFloat() * 1.5f)
                             val phase    = (Math.random() * Math.PI * 2).toFloat()
+                            // Pick mesh by type. NORMAL/FAST randomize between
+                            // two grey variants so common waves don't look like
+                            // copy-pastes; HEAVY/EXPLOSIVE/ENERGY get unique
+                            // silhouettes + tints.
+                            val mesh = when (type) {
+                                AsteroidType.HEAVY     -> asteroidMeshHeavy
+                                AsteroidType.EXPLOSIVE -> asteroidMeshExplosive
+                                AsteroidType.ENERGY    -> asteroidMeshEnergy
+                                AsteroidType.NORMAL,
+                                AsteroidType.FAST      ->
+                                    if (Math.random() < 0.5) asteroidMeshGrey1 else asteroidMeshGrey2
+                            }
                             asteroids.add(
                                 Asteroid(
                                     xPos = rx,
@@ -2301,6 +2375,7 @@ class MainActivity : AppCompatActivity() {
                                     half          = half,
                                     platformDmg   = (DraftCombat.PLATFORM_DMG_PER_HIT * type.platformDmgMul)
                                                        .toInt().coerceAtLeast(1),
+                                    meshHandle    = mesh,
                                 )
                             )
                             currentWaveSpawned++
