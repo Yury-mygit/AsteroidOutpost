@@ -1,7 +1,7 @@
 # Asteroid Outpost — Концепция и состояние
 
 > Живой документ. Обновляй после каждой значимой сессии.
-> Последнее обновление: **2026-05-05** (after M7.2 content swap)
+> Последнее обновление: **2026-05-05** (after E6 time push-constant; E7-E10 plan rescheduled — Additive Mesh / UV+textures / Particles / Motion blur)
 
 ## Концепция
 
@@ -129,8 +129,16 @@
 | E3.1 | Material plumbing для translucent draws       | engine wave        | ✅ **Готово** (2026-05-05) — `int material` параметр через C → JNI → Kotlin; флаги в `pc.tint.y/z` |
 | E3.2 | FBM-нéбулы (procedural cloud noise)           | engine wave        | ✅ **Готово** (2026-05-05) — domain-warped 4-octave value-noise по `vWorldPos.xz`, нéбулы стали wispy облаками |
 | E3.3 | Hex-щит (procedural hex grid)                 | engine wave        | ✅ **Готово** (2026-05-05) — мягкий hex pattern по `vLocalXZ` поверх filled half-disk dome, силовое поле вместо просто кольца |
+| E4 | Plasma flash polish (огонь вместо квадратов)  | engine wave        | ✅ **Готово** (2026-05-05) — premultiply alpha (фиксит soft-fade no-op на ONE/ONE blend), heat-ramp по `vLocalXZ`, FBM-турбулентность по `vWorldPos.xz` |
+| E5.1 | Per-billboard plasma tint (RGBA через push-constant) | engine wave   | ✅ **Готово** (2026-05-05) — `drawPlasmaBillboard(...,r,g,b,a)`, `pc.plasmaColor` в шейдере, 6 per-event тинтов: muzzle/trail/explosion/energy/death/shield |
+| E5.2 | Non-uniform billboard scale + billboardMatrix fix | engine wave   | ✅ **Готово** (2026-05-05) — диагностировали баг матрицы (X-Z квад мапился в горизонтальную плоскость, не на экран); исправили col 1↔2 swap в `Camera::billboardMatrix`; добавили `scaleH, scaleV` в C API. Вспышки теперь true circles, не horizontal stripes — ретроспективно фиксит intended behaviour E2.1 soft-fade и E4 heat-ramp. |
+| E6 | Time push-constant (animated FBM)             | engine wave        | ✅ **Готово** (2026-05-05) — `float time` в `PushConstantData` (100 байт), `m_renderStart` baseline в `VulkanContext`, elapsed seconds пишется в каждый push-constant. Plasma turbulence warpает по времени (огонь шевелится), нéбулы дрейфят медленным потоком. |
+| E7 | Additive Mesh Pipeline (3D огненные шары / лазеры) | engine wave   | 🟡 **Запланировано** — новый pipeline принимает произвольный 3D-меш через ONE/ONE additive blend (как plasma но не biллборд). Разблокирует настоящий 3D огненный шар взрыва, плазменные лучи лазеров, электроразряды, плазменные двигатели для g3. |
+| E8 | UV + textures                                 | engine wave        | 🟡 **Запланировано** — большой лифт: новый vertex attribute UV, sampler descriptor, `load_texture` + `draw_textured_mesh`. Спрайтовые анимированные взрывы, реальные текстуры на астероидах, иконки в HUD, decals. AAA-mobile уровень визуала. |
+| E9 | Native particle system                        | engine wave        | 🟡 **Запланировано** — native instanced particle buffer + один draw-call на всю систему. Perf-оптимизация под плотные волны (искры от взрывов, дым-шлейфы, обломки). |
+| E10 | Motion blur post-process                     | engine wave        | 🟡 **Запланировано** — full-screen motion blur с velocity-buffer attachment + post-process pass. Решает motion aliasing универсально (быстрые пули перестают мерцать на 60Hz, любое движение становится плавным). После E9 потому что это финальная полировка движущихся эффектов; mobile-perf нужно валидировать. |
 
-Зависимости: M1 → {M2, M3, M5}; M2 → M4; {M2, M3, M5} → M6; всё → M7. E1 параллельно (затрагивает только нативку). E2.2 зависит от E1 (`load_mesh_raw` + translucent pipeline). E3.2/E3.3 зависят от E3.1 (material flags).
+Зависимости: M1 → {M2, M3, M5}; M2 → M4; {M2, M3, M5} → M6; всё → M7. E1 параллельно (затрагивает только нативку). E2.2 зависит от E1 (`load_mesh_raw` + translucent pipeline). E3.2/E3.3 зависят от E3.1 (material flags). E7 независим (переиспользует E4 шейдер-ветку). E8 независим. E9 → нужен E8 (sprite-атласы для частиц). E10 → нужны G-buffer attachment infra и render-to-texture pass; делать после E9 чтобы тестировать на плотных сценах.
 
 ### M1 — Новое ядро управления (завершено 2026-05-04)
 
@@ -373,14 +381,121 @@
 - Не добавляли animation pulsation на hex (концепт показывал ripple/wave при impact) — для этого нужно прокинуть time через push-constant, отложили до момента когда понадобится impact-effect.
 - Hex sample в `vLocalXZ` (model-space), не `vWorldPos` — паттерн прибит к мешу, не к мировым координатам, поэтому при `mul`-пульсации (E2.2 breathing) hex масштабируется вместе с куполом, не «плывёт».
 
-## Бэклог по движку (после E3)
+### E4 — Plasma flash polish (завершено 2026-05-05)
 
-E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны. Что осталось — для следующей волны движка, когда снова упрёмся в визуальный потолок:
+Триггер: пользователь увидел вспышки (muzzle flash, шлейфы пуль, AoE-кольца, удар по астероиду) как «грустные жёлтые прямоугольники» поверх красивого процедурного фона. Хотел вспышки уровня нéбул — с внутренней структурой, не плоские. Развернули общий план движка (E4–E8) и пошли по нему сверху вниз; E4 — самый дешёвый VFX-выигрыш, чисто шейдерный.
 
-- **UV-координаты + текстуры.** Сейчас вершина = `pos + rgba + normal + vLocalXZ`. UV нет → нельзя сэмплить текстуру в фрагменте → не получится нормальный «облачный» нéбул-шейдер, тинтованные иконки, спрайтовые VFX. **Нужно:** второй vertex-attribute UV (`vec2 @ location 4`) во всех пайплайнах, descriptor-set с `combined image sampler`, API `load_texture(bytes)` + `draw_textured_mesh(token, textureToken, mat4)`. Большая правка — затронет `Mesh`, `VulkanContext`, шейдеры, C API.
-- **Procedural-shader варианты для нéбул.** Текущий нéбул = одноцветный soft-disk. Реальные туманности — клочковатые, многоцветные, с FBM-шумом. **Нужно:** альтернативный fragment-шейдер с procedural noise (FBM по UV или world-pos), отдельный пайплайн `nebula` либо ветка в `translucent`-фрагменте по material-id. Дешевле через UV → текстура (см. выше) с заранее запечённым шумом.
-- **Не-uniform масштаб у биллбордов.** `draw_plasma_billboard(x, y, z, scale)` берёт одну скалярную `scale`. Нельзя сделать «широкий и низкий» эффект одним биллбордом. **Нужно:** второй параметр в API (`scaleX, scaleZ`) — поправка `Camera::billboardMatrix` элементарная, но это правка C API → JNI → Kotlin.
-- **Particle system.** Сейчас «частицы» (AoE-кольцо, шлейф пуль) собираются Kotlin-овским `Flash`-механизмом и спавнятся как обычные мелкие SceneObject'ы. Работает, но дорого по CPU при плотных волнах. **Нужно:** native particle-buffer + один draw-call на всю систему (instanced).
+Триггер №2 (попутно открыли): plasma pipeline блендит ONE/ONE (`VulkanContext.cpp:707-711`), значит source.alpha сбрасывается фреймбуфером — `plasmaSoftFade()` от E2.1 фактически был **no-op** для plasma-биллбордов. Это и было первоисточником «прямоугольного» силуэта: alpha рассчитывалась корректно, но никуда не уходила. Заодно фиксим.
+
+Сделано:
+- ✅ **Новая ветка в `triangle.frag`** под флаг `pc.tint.x ≥ 0.5` (= plasma pipeline). Расположена после `isPlasma`-cyan ветки (g3-холдовер плазма-болтов с цианом — должна сохранить свой вид) и до `lit`-ветки (всё прочее по-прежнему проходит lighting). Внутри:
+  - **Premultiply alpha в RGB.** `outColor = vec4(fireColor * fire * alpha, alpha)` — теперь soft-fade реально гасит углы квада, потому что итоговый RGB умножен на alpha; на ONE/ONE-блендинге фреймбуфер видит ровно `RGB*alpha`, а в углах (где alpha→0 от soft-fade) контрибуция нулевая.
+  - **Радиальный heat-ramp.** `mix(hot, cool, smoothstep(0.0, 0.7, r))`, где `r = length(vLocalXZ)`. `hot = (1, 0.95, 0.7)` (тёпло-белое ядро), `cool = (1, 0.4, 0.08)` (оранжевый край). Без per-billboard tint данных получаем «огонь» на любом квад-меше с pc.tint.x флагом.
+  - **FBM-турбулентность.** Переиспользовали `fbm4()` от E3.2 (4 октавы value-noise + per-octave 40°-rotation + freq×2.13). Сэмпл по `vWorldPos.xz * 8.0` — мировые координаты, поэтому каждая вспышка получает уникальный срез шумового поля. Множитель `0.55 + n * 0.95` даёт диапазон ~[0.55, 1.5] по яркости — клочки горящего материала, не равномерное свечение.
+- ✅ Перекомпилирован `triangle.frag.spv` через `glslc`. `./gradlew assembleDebug` — зелёная сборка.
+
+Принятые решения:
+- Не трогали C API, JNI, Kotlin, другие пайплайны. Скоуп E4 строго ограничен фрагмент-шейдером — самая дешёвая итерация в волне.
+- Heat-ramp и turbulence имеют hardcoded числа в шейдере. Если понадобится разная окраска под событие (синие искры от удара, зелёные от ENERGY-астероида) — это уже E5 (per-billboard tint через C API).
+- Не трогали `isPlasma`-cyan ветку, хотя у неё та же проблема с soft-fade no-op. В Outpost cyan-болты не используются (g3-only); если когда-нибудь вернём их, фикс будет в той же манере.
+- FBM в world-space, не в `vLocalXZ`. World-space даёт уникальный pattern на каждую вспышку; local-space заставил бы все вспышки выглядеть одинаково. Цена та же (4 octaves of FBM), профиль рендера не меняется.
+- Frequency multiplier 8.0 для `vWorldPos.xz` — компромисс: при typical scale=0.3 видно 4-5 «клочков» на квад, читается как огонь. Меньше — слишком крупные пятна (0.5 пятен на квад, читается как «полу-яркий полу-тёмный»); больше — мелкая зернистость, теряется силуэт.
+
+Что E4 не закрывает (передаётся в E5/E6):
+- 🟡 Per-billboard цвет — все вспышки сейчас тёпло-оранжевые, нельзя сделать синюю искру или зелёный электро-удар.
+- 🟡 Анимация турбулентности — pattern статичен на время жизни вспышки. Для коротких вспышек (~0.15-0.5 сек) этого достаточно, но при долгом эффекте «горения» pattern будет читаться как «застрявший». E6 (time push-constant) даст бегущую турбулентность.
+- 🟡 Не-uniform масштаб биллбордов — для растянутых streak-эффектов (длинные шлейфы пуль, плоские ударные волны). E5.
+
+### E5.1 — Per-billboard plasma tint (завершено 2026-05-05)
+
+Триггер: после E4 все вспышки (muzzle, шлейф, AoE, удар по щиту, смерть астероида, ENERGY-pickup) рендерились одинаковым тёплым огненным паттерном — heat-ramp + FBM хардкодом. Игрок не мог отличить событие по цвету: AoE и обычная смерть выглядели идентично, ENERGY-астероид при смерти тоже жёлтый. Чтобы дать каждому событию свою визуальную идентичность, нужен per-billboard цвет — без UV/текстур, через push-constant.
+
+Сделано:
+- ✅ **Push-constant расширен.** `PushConstantData` теперь несёт `float plasmaColor[4]` после `tint[4]` — итоговый размер 96 байт (Vulkan гарантирует ≥128, входим). Шейдеры (`triangle.vert/frag`) добавили `vec4 plasmaColor` в push-constant layout с `layout(offset = 80)`. Все остальные пайплайны автоматически пушат 96 байт через `sizeof(PushConstantData)` — junk data в `plasmaColor` для не-плазмы безопасна, потому что фрагмент-шейдер читает её только в гейте `pc.tint.x ≥ 0.5`.
+- ✅ **C API расширен.** `station_engine_draw_plasma_billboard(engine, mesh, x, y, z, scale)` → `(..., scale, r, g, b, a)` — 4 явных float-параметра. Стриктно требуется от вызывающего; default белый ставится на Kotlin-уровне через `EngineJni.drawPlasmaBillboard(..., r=1f, g=1f, b=1f, a=1f)`. JNI-обвязка (`nativeDrawPlasmaBillboard`) пробросила параметры. `VulkanContext::drawPlasmaBillboard` записывает `r,g,b,a` в `DrawCommand.plasmaColor[4]` (новое поле). В render-loop переменная мемкопируется в `pc.plasmaColor`.
+- ✅ **Шейдер использует тинт.** В E4-ветке `if (pc.tint.x >= 0.5)`: `outColor = vec4(fireColor * pc.plasmaColor.rgb * fire * alpha * pc.plasmaColor.a, alpha)`. RGB-каналы тинта умножаются в heat-ramp result (рекrашивая огонь), alpha-канал работает как overall-brightness scalar. White (1,1,1,1) сохраняет E4-look без изменений.
+- ✅ **Kotlin-сцена расширена.** `BillboardDraw` data class добавил `r, g, b, a: Float = 1f`. `Scene.kt::submitScene` пробрасывает их в `engine.drawPlasmaBillboard(...)`. `Flash` data class в `MainActivity` получил `tintR, tintG, tintB, tintA: Float = 1f` (4 явных field — избегаем per-Flash аллокации FloatArray).
+- ✅ **6 per-event тинтов в `DraftCombat`.** `FLASH_TINT_MUZZLE` (тёпло-белый, 1.0/0.95/0.7), `FLASH_TINT_TRAIL` (тёплый дим, 1.0/0.8/0.45/0.85 alpha), `FLASH_TINT_EXPLOSION` (оранжево-красный, 1.0/0.5/0.15), `FLASH_TINT_ENERGY` (циан, 0.45/0.85/1.0/1.1 alpha), `FLASH_TINT_DEATH` (тёплый жёлтый, 1.0/0.85/0.4), `FLASH_TINT_SHIELD` (синий, 0.35/0.75/1.0). Все 8 спавн-сайтов в тике (центральный muzzle, боковой muzzle, trail, AoE-ring center, AoE-ring perimeter, ENERGY death, NORMAL/FAST/HEAVY death, shield-absorb) теперь подцепляют свой тинт.
+
+Принятые решения:
+- Цвет через push-constant, не через per-vertex или textures. Push-constant дешевле всего по байтам и вписывается в текущий fragment-shader switch без структурных изменений. UV+textures отложили на E7 (это большая правка по описанию из бэклога).
+- Алgha-канал `pc.plasmaColor.a` работает как brightness multiplier, не как opacity. Это потому что plasma blend = ONE/ONE — alpha не доходит до фреймбуфера. Использование .a как brightness даёт второй регулятор интенсивности (>1 для ярких событий типа ENERGY-pickup).
+- Не ввели per-event константы ярче/тусклее общую яркость flash — пользователь сам выберет: тинт RGB + alpha-multiplier дают достаточно осей. Если когда-то понадобится — это уже E5.x задача.
+- 4 отдельных Float поля на Flash вместо `FloatArray(4)` — каждая Flash-инстанция тогда не аллоцирует массив. Но в `DraftCombat` тинты — `FloatArray(4)` (читаются один раз и индексируются). Этот пример хорошо иллюстрирует: const-данные = массив, runtime-данные = поля.
+- `isPlasma` cyan-ветку (g3-холдовер) не обновили. Если когда-нибудь cyan-болты вернутся, можно добавить им свой тинт через тот же `pc.plasmaColor`.
+
+Что E5.1 не закрывает (передаётся дальше):
+- 🟡 Не-uniform масштаб биллбордов (E5.2). Для streak'ов / shockwave'ов нужно научить `Camera::billboardMatrix` принимать `scaleH, scaleV` (раздельно по right- и up-осям). При первичной разведке выяснилось, что метод сейчас umiform и что разобраться с тем, какая ось `right`/`up`/`back` — screen-vertical при текущем pitch=π/2, надо отдельно. Поэтому E5.2 не делается одновременно с E5.1.
+- 🟡 Анимация турбулентности (E6, time push-constant) — pattern всё ещё статичен.
+- 🟡 Per-billboard color sampling из текстуры (E7).
+
+### E5.2 — Billboard matrix fix + non-uniform scale (завершено 2026-05-05)
+
+Триггер: пользователь отправил предыдущий план E5.2 («просто пробросить scaleH/V через C API») с требованием перепроверить математику. Проверка нашла, что движок весь это время работал с **багом matrix-mapping**.
+
+Диагностика:
+- Камера: pitch=π/2 around X axis. world axis assignments: X=horizontal, Z=vertical, Y=depth (per `Camera::reset` comment).
+- `m_rotation.rotate(...)` → right=(1,0,0), up=(0,0,1), back=(0,-1,0).
+- Pre-fix `billboardMatrix` ставил col 1 = up·scale, col 2 = back·scale. Для X-Z квада (model.y=0, x∈[-1,1], z∈[-1,1]) это давало:
+  - world.x = scale·model.x + cx (✓ horizontal)
+  - world.y = -scale·model.z + cy (depth)
+  - world.z = cz (constant!)
+- Квад лежал в **горизонтальной мировой плоскости** (Z=cz), не перпендикулярно экрану. На экране визуализировался как горизонтальная полоса с perspective foreshortening, не как screen-aligned билборд.
+- Pытался ли я скрин — вспышки выглядели «прямоугольными» именно из-за этого; E2.1 radial soft-fade и E4 heat-ramp вычислялись в `vLocalXZ` model-space (круглый pattern), но проектировались на горизонтальную полосу — большая часть круга «съедалась» depth foreshortening, оставалась только тонкая полоска.
+- Пользователь подтвердил визуально: трейлы пуль читаются как горизонтальные риски, не круглые точки. Анализ верный.
+
+Сделано:
+- ✅ **Swap col 1 ↔ col 2 в `Camera::billboardMatrix`.** Теперь model.y → camera-back (depth, scale=1, не контрибутирует для нашего X-Z меша), model.z → camera-up (screen-vertical). X-Z квады правильно screen-aligned. `vLocalXZ` радиальный pattern теперь действительно круглый на экране — retroactively фиксит intended behaviour E2.1 soft-fade и E4 heat-ramp + FBM.
+- ✅ **Non-uniform scale**: новая сигнатура `billboardMatrix(center, scaleH, scaleV)` — col 0 (model.x → horizontal) умножается на scaleH, col 2 (model.z → vertical) на scaleV. col 1 (depth) остаётся scale=1. Старая uniform `billboardMatrix(center, scale)` сохранена как wrapper, чтобы не ломать g3-style `drawBillboardMesh`.
+- ✅ **C API расширен.** `station_engine_draw_plasma_billboard(...,scale)` → `(...,scaleH, scaleV)`. JNI и Kotlin EngineJni обновлены. `BillboardDraw` data class получил `scaleV: Float = scale` (default = uniform), `submitScene` пробрасывает его. Все existing call-sites (Outpost flashes + g3 SceneAdapter) автоматически работают как uniform.
+- ✅ **DrawCommand расширен** полем `scaleV` (рядом с существующим `scale`, который теперь семантически = scaleH для plasma).
+- ✅ Build assembleDebug — зелёный, обе ABI.
+
+Принятые решения:
+- Не вводили новый меш — fix матрицы делает существующий `quad.gltf` (X-Z plane) screen-aligned without changes. Меньше работы, нет визуальных регрессий для других мешей.
+- col 1 (depth) не масштабируется через scaleD/scaleZ — для нашего X-Z меша это не нужно (model.y=0). Если когда-то понадобится 3D-геометрия с depth-extent, добавим scale_depth тогда.
+- Старый API `drawBillboardMesh` (g3 system billboards) использует legacy uniform path — не тронут. Outpost их не использует, g3 features bypassed at runtime, поэтому изменение поведения там безопасно даже если он случайно активируется.
+- Выявление этого бага = ROI для будущих волн: правильная screen-aligned билборд-математика разблокирует true streak-эффекты (длинные пули) и flat shockwave'ы (плоские круги ударной волны), которые без E5.2 выглядели бы deformed.
+
+Что E5.2 не закрывает (передаётся дальше):
+- 🟡 Анимация турбулентности (E6, time push-constant).
+- 🟡 UV + textures (E7).
+- 🟡 Particle system (E8).
+- 🟡 Additive mesh pipeline (новая будущая волна — для настоящего 3D огненного шара).
+
+### E6 — Time push-constant (завершено 2026-05-05)
+
+Триггер: после E5.2 fragment-шейдер уже умеет heat-ramp + FBM + per-event тинт + true round silhouette. Pattern статичен — на коротких вспышках (~0.15-0.5 сек) не критично, но взрывы (~0.5 сек) и нéбулы (постоянно) хочется оживить. Также time-канал — общая инфраструктура для будущих effects (пульсация щита, бегущие электроразряды, animated lightning bolts) — лучше провести её сейчас, чем переделывать push-constant в каждой следующей волне.
+
+Сделано:
+- ✅ **`PushConstantData` расширен `float time`** (offset 96, размер 100 байт). Vulkan гарантирует ≥128 байт push-constant size, входим. Все 6 пайплайнов автоматически пушат 100 байт через `sizeof(PushConstantData)`.
+- ✅ **Шейдеры объявляют `float time`.** В `triangle.vert` — внутри push-constant блока после `vec4 plasmaColor`. В `triangle.frag` — `layout(offset = 96) float time;`.
+- ✅ **`std::chrono::steady_clock` baseline в `VulkanContext`.** Новые члены `m_renderStart` (time_point) и `m_renderStartInitialised` (bool). На первом `renderFrame()` устанавливаются; затем `elapsedSec = (now - m_renderStart).count() / 1e9` (через `std::chrono::duration<float>`). Steady_clock не подвержен NTP-коррекциям, что важно для плавной анимации.
+- ✅ **`pc.time = elapsedSec` в каждом push-loop.** Все 6 точек инициализации `PushConstantData pc{}` в renderFrame получили `pc.time = elapsedSec` — opaque scene, system billboards, translucent, plasma, frame meshes, stars.
+- ✅ **Plasma turbulence животная.** В фрагменте `if (pc.tint.x >= 0.5)`: `vec2 fireWarp = vec2(pc.time * 1.4, pc.time * 0.9)`, sample = `fbm4(vWorldPos.xz * 8.0 + fireWarp)`. Два разных (1.4 и 0.9) drift-коэффициента дают не-1D поток, без заметной перидичности. На 0.5-сек взрыве ~0.7 sample-units пройдёт — успеет визуально читаться как «огонь шевелится».
+- ✅ **Нéбулы дрейфят медленно.** В `nebulaAlphaMod()`: `vec2 drift = vec2(pc.time * 0.04, pc.time * 0.025)`, `base = vWorldPos.xz * 0.9 + drift`. Скорость подобрана так, чтобы это читалось как фоновый космический ветер, не «полёт пыли». За 60 сек игры пройдёт ~2.4 sample-units по X — едва заметное движение.
+
+Принятые решения:
+- `float time` (4 байта) вместо `vec4 params` (16 байт). Push-constant у нас всё ещё 100 < 128 байт — есть запас. Если в будущем понадобятся ещё параметры (delta_time, frame_id, sin/cos cache) — добавим их отдельными float'ами или ещё одной vec4.
+- Hex-щит не получил time-pulsation сейчас. Концепт-арт показывал ripple/wave при impact, но без impact-логики (когда пуля бьёт в щит) это просто бесполезный визуальный шум. Отложили до момента, когда появится impact-event-канал.
+- Drift-коэффициенты для fire (1.4/0.9) и нéбул (0.04/0.025) подобраны на интуицию; могут потребовать тонкой настройки. Параметры в одном месте в шейдере, легко подкрутить.
+- Не делали separate `m_lastFrameTime` для дельты — сейчас не нужно, time достаточно для всех применений. Дельта понадобится только если будем динамически обновлять Kotlin-side particle states в шейдере, что не входит в наш скоуп.
+
+Что E6 разблокирует на будущее:
+- 🟡 Pulse hex-щита при попаданиях (нужен также impact event-канал).
+- 🟡 Бегущие электроразряды по procedural lightning mesh (когда будет Additive mesh pipeline).
+- 🟡 Animated nebula colour shifts (gradient evolves over time).
+- 🟡 Twinkling stars (per-vertex hash + sin(time + hash)).
+
+## Бэклог по движку (после E10)
+
+E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны, E4 — plasma flash polish (огонь вместо квадратов + фикс soft-fade no-op), E5.1 — per-billboard plasma tint, E5.2 — billboard matrix fix + non-uniform scale, E6 — time push-constant. Активные запланированные волны: **E7 (Additive Mesh) → E8 (UV+textures) → E9 (Particles) → E10 (Motion blur)** — детали в milestone-таблице выше. Что НЕ запланировано (подумать когда понадобится):
+
+- **Procedural-shader варианты для нéбул.** Текущий нéбул = FBM domain-warped soft-disk (E3.2). Можно ещё богаче: multi-color gradients, nebula-specific noise types. Дешевле всего через E8 (текстуры с запечённым шумом).
+- **Скайбокс / starfield с шириной.** Сейчас звёзды — point-list, без вариаций яркости/цвета. После E8 можно сделать звёзды через текстурированные quads с per-vertex-twinkle.
+- **Decals на повреждённой базе.** После E8 — projector-like меш, накладывает текстуру повреждений на базу при низком HP.
+- **Lightning / electric arc procedural mesh.** После E7 (Additive Mesh) — генерим зигзаг-меш в Kotlin и пускаем через additive pipeline.
+- **TAA или другие screen-space effects.** После E10 (мотion blur) уже будет render-to-texture infra; добавить TAA не сильно дороже.
 
 Закрытые в E1: ✅ полупрозрачный mesh-pipeline, ✅ per-vertex alpha (RGBA), ✅ процедурные меши через `load_mesh_raw`.
 Закрытые в E2.1: ✅ радиальный soft-fade на plasma-биллбордах (vLocalXZ + `pc.tint.x` как флаг).
@@ -388,6 +503,11 @@ E1 закрыл базовую прозрачность и процедурны�
 Закрытые в E3.1: ✅ material plumbing (translucent draws + `pc.tint.y/z` флаги для шейдера).
 Закрытые в E3.2: ✅ FBM нéбулы с domain warping (wispy clouds вместо soft-disks).
 Закрытые в E3.3: ✅ hex-grid pattern на куполе щита (force-field structural hint).
+Закрытые в E4: ✅ plasma flash polish — premultiply alpha (фикс soft-fade no-op на ONE/ONE blend) + heat-ramp + FBM-турбулентность; вспышки превратились из жёлтых квадратов в wispy огненные кляксы.
+Закрытые в E5.1: ✅ per-billboard plasma tint — расширили C API/JNI/Kotlin+push-constant `vec4 plasmaColor`; 6 типов событий теперь имеют свои цвета (muzzle тёпло-белый, trail тёплый дим, AoE оранжево-красный, ENERGY циан, обычная смерть жёлтый, shield-absorb синий).
+Закрытые в E5.2: ✅ billboard matrix bug fix + non-uniform scale — `Camera::billboardMatrix` swapped col 1↔2 чтобы model.z (а не model.y) маппился на screen-vertical; X-Z квады теперь screen-aligned, вспышки стали true circles вместо horizontal stripes; добавлен `scaleH, scaleV` через C API → JNI → Kotlin для streak-эффектов.
+Закрытые в E5.2-followup: ✅ plasma depth test off — после E5.2 круглый взрыв на y=0 заслонялся 3D астероидным мешем (model.y∈[-1,+1] → часть астероида ближе к камере чем плоскость flash). Изменили plasma pipeline `depthTestEnable VK_TRUE → VK_FALSE` (`compareOp LESS_OR_EQUAL → ALWAYS`); вся plasma-VFX теперь честно overlay-режим как и должно быть для аддитивных эффектов.
+Закрытые в E6: ✅ time push-constant — `float time` (offset 96) в `PushConstantData`, `std::chrono::steady_clock` baseline в `VulkanContext`, elapsedSec пишется в каждый push в `renderFrame`; шейдер использует `pc.time` для warp-а FBM в plasma branch (огонь живой), и для медленного дрейфа нéбул (космический газ ползёт). Инфраструктура time push-const разблокирует будущие animated procedural effects (импульсация щита, бегущие электроразряды и т.п.).
 Закрытые в M7.2: ✅ GltfLoader merge multi-primitive meshes (multi-material .glb теперь грузятся целиком, не кусочком).
 
 ## Старый бэклог (мелкая шерсть)

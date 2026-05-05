@@ -2,6 +2,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -39,7 +40,9 @@ namespace station {
         void drawPickableMesh(uint32_t token, int32_t objectId,
                               const float modelMatrix[16], float pickRadius);
         void drawBillboardMesh(uint32_t token, float x, float y, float z, float scale);
-        void drawPlasmaBillboard(uint32_t token, float x, float y, float z, float scale);
+        void drawPlasmaBillboard(uint32_t token, float x, float y, float z,
+                                 float scaleH, float scaleV,
+                                 float r, float g, float b, float a);
         // E3.1 — `material` selects a fragment-shader branch in the translucent
         // pipeline: 0 = plain (per-vertex alpha only), 1 = nebula (FBM noise
         // modulates alpha), 2 = hex (procedural hex grid modulates alpha).
@@ -110,10 +113,12 @@ namespace station {
             bool     billboard;
             bool     objectFrame;
             float    center[3];
-            float    scale;
+            float    scale;            // billboard horizontal half-size (legacy: uniform)
+            float    scaleV;           // E5.2 — billboard vertical half-size (plasma only)
             float    halfExtents[3];
             float    padding;
             float    tint[4];
+            float    plasmaColor[4];   // E5.1 — per-billboard tint for plasma flashes
             float    modelMatrix[16];
             std::vector<math::Vec3> framePoints;
         };
@@ -156,6 +161,13 @@ namespace station {
         bool m_deviceReady  = false;
         bool m_surfaceReady = false;
         bool m_focused      = false;
+
+        // E6 — wall-clock baseline for time push-constant. Set on first
+        // renderFrame; elapsed seconds (now - m_renderStart) feed pc.time
+        // so the fragment shader can animate FBM turbulence and other
+        // procedural effects.
+        std::chrono::steady_clock::time_point m_renderStart{};
+        bool m_renderStartInitialised = false;
 
         bool pickQueueFamily();
         bool createDevice();

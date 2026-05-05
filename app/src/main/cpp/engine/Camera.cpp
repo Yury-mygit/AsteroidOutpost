@@ -147,30 +147,61 @@ namespace station {
         return true;
     }
 
-    math::Mat4 Camera::billboardMatrix(const math::Vec3& center, float scale) const {
+    // E5.2 — Outpost-camera billboard convention (pitch=π/2 around X, target
+    // at +Y, up = world +Z). The project's quad meshes (quad.gltf and the
+    // procedural soft-disks) live in the X-Z plane (model.y = 0). The
+    // pre-E5.2 layout (model.x → right, model.y → up, model.z → back) made
+    // model.z map to camera depth, so X-Z-plane quads ended up lying flat
+    // in a horizontal world plane (Z=cz constant) — they appeared on screen
+    // as horizontal strips with perspective foreshortening, not as
+    // screen-aligned billboards. The radial soft-fade (E2.1) and heat-ramp
+    // (E4) computed circular patterns in `vLocalXZ` model-space; with the
+    // pre-fix matrix that circular pattern got squashed by projection and
+    // read only because flashes were small. Fix: swap col 1 ↔ col 2 so
+    // model.y → camera-back (depth, no extent for our quads) and model.z →
+    // camera-up (screen-vertical). Now X-Z-plane meshes are truly
+    // screen-aligned and `vLocalXZ` traces a circle on screen as intended.
+    //
+    // (scaleH, scaleV) lets callers stretch the quad along screen-horizontal
+    // (col 0) and screen-vertical (col 2) independently — for streak bullets,
+    // shockwave-style flat explosions, etc. The depth column (col 1) keeps
+    // scale=1 since our quads have model.y=0 anyway, so it never contributes.
+    math::Mat4 Camera::billboardMatrix(const math::Vec3& center,
+                                       float scaleH, float scaleV) const {
         using namespace math;
         const Vec3 right = m_rotation.rotate({1.0f, 0.0f, 0.0f});
         const Vec3 up    = m_rotation.rotate({0.0f, 1.0f, 0.0f});
         const Vec3 back  = m_rotation.rotate({0.0f, 0.0f, 1.0f});
 
         Mat4 result{};
-        result.m[0] = right.x * scale;
-        result.m[1] = right.y * scale;
-        result.m[2] = right.z * scale;
+        // col 0 — model.x axis → camera-right (screen horizontal)
+        result.m[0] = right.x * scaleH;
+        result.m[1] = right.y * scaleH;
+        result.m[2] = right.z * scaleH;
 
-        result.m[4] = up.x * scale;
-        result.m[5] = up.y * scale;
-        result.m[6] = up.z * scale;
+        // col 1 — model.y axis → camera-back (depth). Not scaled because
+        // project meshes have model.y=0; scale=1 keeps non-zero meshes
+        // depth-correct without inflation.
+        result.m[4] = back.x;
+        result.m[5] = back.y;
+        result.m[6] = back.z;
 
-        result.m[8]  = back.x * scale;
-        result.m[9]  = back.y * scale;
-        result.m[10] = back.z * scale;
+        // col 2 — model.z axis → camera-up (screen vertical)
+        result.m[8]  = up.x * scaleV;
+        result.m[9]  = up.y * scaleV;
+        result.m[10] = up.z * scaleV;
 
         result.m[12] = center.x;
         result.m[13] = center.y;
         result.m[14] = center.z;
         result.m[15] = 1.0f;
         return result;
+    }
+
+    // Legacy uniform-scale variant — keeps existing call sites working until
+    // they're migrated to (scaleH, scaleV). Forwards to the two-scale form.
+    math::Mat4 Camera::billboardMatrix(const math::Vec3& center, float scale) const {
+        return billboardMatrix(center, scale, scale);
     }
 
     math::Mat4 Camera::frameMatrixForBounds(const float modelMatrix[16],

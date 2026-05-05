@@ -36,8 +36,8 @@ object WeaponCatalog {
         fireIntervalSec = 0.15f,
         damageMultiplier = 1.0f,
         projectileSpeed = 25f,
-        projectileHalfW = 0.04f,
-        projectileHalfH = 0.18f,
+        projectileHalfW = 0.0173f,
+        projectileHalfH = 0.078f,
     )
 
     /**
@@ -53,8 +53,8 @@ object WeaponCatalog {
         fireIntervalSec = 1.0f,
         damageMultiplier = 3.0f,
         projectileSpeed = 18f,
-        projectileHalfW = 0.10f,
-        projectileHalfH = 0.18f,
+        projectileHalfW = 0.065f,
+        projectileHalfH = 0.117f,
         aoeRadius           = 0.5f,
         aoeDamageMultiplier = 0.6f,
     )

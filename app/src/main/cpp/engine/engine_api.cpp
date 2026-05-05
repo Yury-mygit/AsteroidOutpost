@@ -219,9 +219,11 @@ extern "C" void station_engine_draw_billboard_mesh(StationEngine* e,
 
 extern "C" void station_engine_draw_plasma_billboard(StationEngine* e,
                                                      StationMesh*   mesh,
-                                                     float x, float y, float z, float scale) {
+                                                     float x, float y, float z,
+                                                     float scaleH, float scaleV,
+                                                     float r, float g, float b, float a) {
     if (!e || !mesh) return;
-    e->vulkan.drawPlasmaBillboard(mesh->token, x, y, z, scale);
+    e->vulkan.drawPlasmaBillboard(mesh->token, x, y, z, scaleH, scaleV, r, g, b, a);
 }
 
 extern "C" void station_engine_draw_translucent_mesh(StationEngine* e,

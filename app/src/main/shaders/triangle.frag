@@ -7,8 +7,13 @@ layout(location = 3) in vec2 vLocalXZ;   // model-space X/Z — used for radial 
 
 layout(location = 0) out vec4 outColor;
 
+// Push constant: model matrix (vert-only) at offset 0, then tint flags,
+// plasmaColor, and time visible here. Keep these layouts in lockstep with
+// triangle.vert and the C++ PushConstantData struct in VulkanContext.cpp.
 layout(push_constant) uniform PushConst {
     layout(offset = 64) vec4 tint;
+    layout(offset = 80) vec4 plasmaColor;
+    layout(offset = 96) float time;
 } pc;
 
 // E2.1 — radial soft-fade for plasma billboards.
@@ -58,7 +63,11 @@ float fbm4(vec2 p) {
 }
 float nebulaAlphaMod() {
     if (pc.tint.y < 0.5) return 1.0;
-    vec2 base = vWorldPos.xz * 0.9;
+    // E6 — slow drift over time so nebulae feel alive instead of frozen.
+    // Drift speed kept low (~0.04 sample units/sec) so the motion reads as
+    // ambient gas circulation, not visibly flowing.
+    vec2 drift = vec2(pc.time * 0.04, pc.time * 0.025);
+    vec2 base = vWorldPos.xz * 0.9 + drift;
     // Domain warp — perturb the sample point with a second FBM lookup so
     // residual rectangular cell clusters get smeared into curls and
     // tendrils. The cost is 3× FBM per fragment but it's the cleanest fix
@@ -121,6 +130,38 @@ void main() {
     bool isPlasma = (vColor.b > 0.88 && vColor.g > 0.78 && vColor.r < 0.25);
     if (isPlasma) {
         outColor = vec4(vColor.r * 0.6 + 0.15, vColor.g * 1.15, vColor.b, alpha);
+        return;
+    }
+
+    // E4 — plasma flash: unlit emissive output for additive-blend billboards
+    // tagged with pc.tint.x (= flashes in this project — muzzle, trail, AoE,
+    // hit, ENERGY pickup). Three things happen here:
+    //   1) Premultiply `alpha` into RGB. The plasma pipeline blends ONE/ONE
+    //      (VulkanContext.cpp), so source alpha never reaches the framebuffer
+    //      — without this multiply, plasmaSoftFade() was a visual no-op and
+    //      flashes read as boxy yellow rectangles.
+    //   2) Radial heat ramp (warm white-yellow core → orange edge) gives a
+    //      flame look without per-billboard colour data.
+    //   3) FBM turbulence breaks up the uniform disc into wispy structure;
+    //      sampled in world space so adjacent flashes see different slices
+    //      and don't repeat the same pattern.
+    // E5.1 — `pc.plasmaColor.rgb` is multiplied into the heat-ramp result so
+    // each flash type can carry its own tint (cyan ENERGY pickup, blue impact
+    // spark, orange-red AoE), and `pc.plasmaColor.a` is an overall brightness
+    // scalar. Default (1,1,1,1) at the Kotlin layer leaves E4 unchanged.
+    if (pc.tint.x >= 0.5) {
+        vec3 hot  = vec3(1.0, 0.95, 0.70);   // warm white-yellow core
+        vec3 cool = vec3(1.0, 0.40, 0.08);   // orange flame edge
+        float r = length(vLocalXZ);
+        vec3 fireColor = mix(hot, cool, smoothstep(0.0, 0.7, r));
+        // E6 — animate the noise field so flames flicker over time.
+        // Two perpendicular drift speeds keep the flow from feeling 1-D.
+        // Coefficients (1.4, 0.9) give visible motion within a flash's
+        // ~0.15-0.5 sec life without making it look like it's racing.
+        vec2 fireWarp = vec2(pc.time * 1.4, pc.time * 0.9);
+        float n = fbm4(vWorldPos.xz * 8.0 + fireWarp);
+        float fire = 0.55 + n * 0.95;        // ~[0.55, 1.5] turbulence
+        outColor = vec4(fireColor * pc.plasmaColor.rgb * fire * alpha * pc.plasmaColor.a, alpha);
         return;
     }
 

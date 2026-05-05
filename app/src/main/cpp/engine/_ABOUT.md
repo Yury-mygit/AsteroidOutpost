@@ -76,7 +76,7 @@ beginScene()                                           → clears m_drawList + m
 drawMesh(token, mat4)                                  → appends opaque DrawCommand
 drawPickableMesh(token, id, mat4, radius)              → drawMesh + stores pick record
 drawBillboardMesh(token, x,y,z, scale)                 → camera-facing DrawCommand
-drawPlasmaBillboard(token, x,y,z, scale)               → additive-blend camera-facing DrawCommand
+drawPlasmaBillboard(token, x,y,z, scaleH,scaleV, r,g,b,a) → additive-blend camera-facing DrawCommand (E5.1: per-billboard tint, E5.2: non-uniform scale + matrix bug fix)
 drawTranslucentMesh(token, mat4)                       → alpha-blend DrawCommand (per-vertex A)
 drawObjectFrameMesh(frameToken, targetToken, mat4,     → bounds-attached system frame
                     padding, tint[4])

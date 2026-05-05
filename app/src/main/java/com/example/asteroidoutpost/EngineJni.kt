@@ -109,9 +109,18 @@ class EngineJni {
             nativeDrawBillboardMesh(engineHandle, meshHandle, x, y, z, scale)
     }
 
-    fun drawPlasmaBillboard(meshHandle: Long, x: Float, y: Float, z: Float, scale: Float) {
+    /**
+     * E5.1 — `r,g,b,a` is a per-billboard tint multiplied into the plasma
+     * fragment heat-ramp. Default white preserves the E4 warm-flame look.
+     * E5.2 — `scaleH, scaleV` are screen-horizontal and screen-vertical
+     * half-sizes; pass equal values for a square billboard, or stretch
+     * one axis for streak/shockwave-style effects.
+     */
+    fun drawPlasmaBillboard(meshHandle: Long, x: Float, y: Float, z: Float,
+                            scaleH: Float, scaleV: Float,
+                            r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawPlasmaBillboard(engineHandle, meshHandle, x, y, z, scale)
+            nativeDrawPlasmaBillboard(engineHandle, meshHandle, x, y, z, scaleH, scaleV, r, g, b, a)
     }
 
     /**
@@ -238,7 +247,9 @@ class EngineJni {
     private external fun nativeDrawPlasmaBillboard(
         engineHandle: Long,
         meshHandle: Long,
-        x: Float, y: Float, z: Float, scale: Float
+        x: Float, y: Float, z: Float,
+        scaleH: Float, scaleV: Float,
+        r: Float, g: Float, b: Float, a: Float
     )
     private external fun nativeDrawTranslucentMesh(
         engineHandle: Long,

@@ -6,10 +6,16 @@ layout(set = 0, binding = 0) uniform Ubo {
     mat4 proj;
 } ubo;
 
-// Push constant: model matrix + tint color (80 bytes)
+// Push constant: model matrix + tint flags + plasma color + time (100 bytes).
+// `tint` is shader-mode flags (E2.1 plasma soft-fade .x, E3.1 nebula .y,
+// E3.1 hex .z) — NOT colour. `plasmaColor` (E5.1) carries per-billboard
+// tint for plasma flashes; default (1,1,1,1) keeps the E4 look. `time`
+// (E6) is elapsed seconds for animated procedural effects.
 layout(push_constant) uniform PushConst {
     mat4 model;
     vec4 tint;
+    vec4 plasmaColor;
+    float time;
 } pc;
 
 layout(location = 0) in vec3 inPosition;

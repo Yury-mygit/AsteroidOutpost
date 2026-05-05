@@ -29,6 +29,10 @@ namespace station {
         math::Vec3 eyePosition() const;
         math::Vec3 forwardDirection() const;
         float farClip() const { return m_zFar; }
+        // E5.2 — non-uniform billboard scale (scaleH=horizontal, scaleV=vertical).
+        // See Camera.cpp for the col-1/col-2 swap fix and convention notes.
+        math::Mat4 billboardMatrix(const math::Vec3& center, float scaleH, float scaleV) const;
+        // Legacy uniform-scale variant; forwards to the two-scale form.
         math::Mat4 billboardMatrix(const math::Vec3& center, float scale) const;
         math::Mat4 frameMatrixForBounds(const float modelMatrix[16],
                                         const math::Vec3& localCenter,

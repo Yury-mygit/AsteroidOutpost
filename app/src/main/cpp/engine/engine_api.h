@@ -91,12 +91,22 @@ void station_engine_draw_billboard_mesh(StationEngine* engine,
                                         float          z,
                                         float          scale);
 
+// E5.1 — `r,g,b,a` is a per-billboard tint multiplied into the plasma
+// fragment heat-ramp. Pass (1,1,1,1) for the default warm-flame look.
+// E5.2 — `scaleH, scaleV` lets callers stretch the quad along screen-horizontal
+// and screen-vertical independently (streak bullets, flat shockwaves). Pass
+// (s, s) for a square billboard.
 void station_engine_draw_plasma_billboard(StationEngine* engine,
                                           StationMesh*   mesh,
                                           float          x,
                                           float          y,
                                           float          z,
-                                          float          scale);
+                                          float          scaleH,
+                                          float          scaleV,
+                                          float          r,
+                                          float          g,
+                                          float          b,
+                                          float          a);
 
 // E1.2 — alpha-blended mesh draw. Pipeline uses SRC_ALPHA / ONE_MINUS_SRC_ALPHA
 // blending and depth-test on / depth-write off. Mesh's per-vertex alpha

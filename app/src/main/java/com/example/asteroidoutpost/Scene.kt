@@ -100,10 +100,23 @@ data class SceneObject(
     }
 }
 
+/**
+ * E5.1 — `r,g,b,a` is a per-billboard tint applied inside the plasma fragment
+ * branch (no effect on the regular `billboards` list, which still uses the
+ * non-plasma billboard pipeline). Default white preserves the E4 warm-flame
+ * heat-ramp; non-white tints recolour individual flash events.
+ *
+ * E5.2 — `scaleH, scaleV` are screen-horizontal and screen-vertical half-sizes
+ * for plasma billboards; equal values give a square billboard, unequal values
+ * stretch the quad (streak bullets, flat shockwaves). The legacy `scale`
+ * field (forwarded to the non-plasma billboard pipeline) stays uniform.
+ */
 data class BillboardDraw(
     val meshHandle: Long,
     val x: Float, val y: Float, val z: Float,
-    val scale: Float
+    val scale: Float,
+    val r: Float = 1f, val g: Float = 1f, val b: Float = 1f, val a: Float = 1f,
+    val scaleV: Float = scale,
 )
 
 /**
@@ -142,7 +155,7 @@ fun submitScene(
         engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix(), t.material)
     }
     for (p in plasmaBillboards) {
-        engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale)
+        engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV, p.r, p.g, p.b, p.a)
     }
     engine.endScene()
 }

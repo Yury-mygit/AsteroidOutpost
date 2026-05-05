@@ -187,11 +187,13 @@ JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*env*/, jobject /*thiz*/,
                                                         jlong engineHandle, jlong meshHandle,
                                                         jfloat x, jfloat y, jfloat z,
-                                                        jfloat scale) {
+                                                        jfloat scaleH, jfloat scaleV,
+                                                        jfloat r, jfloat g, jfloat b, jfloat a) {
     station_engine_draw_plasma_billboard(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
-            x, y, z, scale
+            x, y, z, scaleH, scaleV,
+            r, g, b, a
     );
 }
 

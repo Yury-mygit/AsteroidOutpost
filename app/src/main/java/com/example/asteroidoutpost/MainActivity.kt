@@ -170,6 +170,10 @@ class MainActivity : AppCompatActivity() {
         // Peak half-size at flash midpoint. Default = small per-asteroid death
         // flash; AoE impacts spawn larger flashes sized to the explosion radius.
         val halfMax: Float = DraftCombat.FLASH_HALF,
+        // E5.1 — per-flash tint applied inside the plasma fragment branch.
+        // Default white preserves the E4 warm-flame look; non-white recolours
+        // by event (cyan ENERGY pickup, blue shield absorb, orange-red AoE).
+        val tintR: Float = 1f, val tintG: Float = 1f, val tintB: Float = 1f, val tintA: Float = 1f,
     )
     private val flashes: MutableList<Flash> = mutableListOf()
     private data class Asteroid(
@@ -249,6 +253,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shieldButton:      TextView
     private lateinit var buffIndicator:     TextView
     private lateinit var abortMissionBtn:   TextView
+    private lateinit var fpsLabel:          TextView
+    private val fpsHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val fpsUpdater = object : Runnable {
+        override fun run() {
+            fpsLabel.text = "FPS ${engineView.fps.toInt()}"
+            fpsHandler.postDelayed(this, 500L)
+        }
+    }
 
     // DRAFT — game state machine. MENU on launch; PLAYING starts on Play tap;
     // WON/LOST when conditions hit. Tick only advances when PLAYING.
@@ -293,10 +305,11 @@ class MainActivity : AppCompatActivity() {
         const val CENTRAL_TURRET_HALF_H:   Float = 0.30f  // ~3× side turret height
         // Aim-alignment threshold for the central turret. While `isTouching`
         // and the cooldown is ready, the turret only fires once it's rotated
-        // close enough to the target angle (within ~5.7°). Without this gate
-        // the first shot of a press lands wherever the barrel happened to be
-        // pointing while the rotation was still catching up to the touch.
-        const val AIM_ALIGN_THRESHOLD_RAD: Float = 0.10f
+        // essentially onto the target angle (within ~1.15°). The exponential
+        // rotation has a long asymptotic tail, so a loose threshold (e.g. 5°)
+        // visibly fires off-aim on big swings — especially with the heavy
+        // cannon's 1-sec cooldown, where one off-target shot is very noticeable.
+        const val AIM_ALIGN_THRESHOLD_RAD: Float = 0.02f
         // Yaw correction applied to Bullet.glb / Bullet_Heavy.glb when oriented
         // along the velocity vector. atan2(vx, vz) aligns the model's local +Z
         // with the flight direction; the bullet .glbs are authored with their
@@ -319,9 +332,19 @@ class MainActivity : AppCompatActivity() {
         const val TRAIL_INTERVAL_SEC:Float = 0.04f
         const val TRAIL_LIFE_SEC:    Float = 0.12f
         const val TRAIL_HALF:        Float = 0.05f
-        const val AOE_RING_PARTICLES:Int   = 10
-        const val AOE_RING_PARTICLE_HALF: Float = 0.08f
-        const val AOE_RING_LIFE_SEC: Float = 0.30f
+        // Perimeter-ring particle constants removed — explosions are now a
+        // single AoE-sized billboard (see spawnExplosion).
+        // E5.1 — per-event flash tints (RGBA), multiplied into the plasma
+        // fragment heat-ramp. RGB channels recolour the warm-flame baseline;
+        // alpha is an overall brightness scalar (>1 = boost). White (default)
+        // keeps the E4 look. Tunable; non-const because Kotlin disallows
+        // const FloatArray in companion objects.
+        val FLASH_TINT_MUZZLE     = floatArrayOf(1.00f, 0.95f, 0.70f, 1.00f)  // warm white-yellow
+        val FLASH_TINT_TRAIL      = floatArrayOf(1.00f, 0.80f, 0.45f, 0.85f)  // warm trail, slightly dimmer
+        val FLASH_TINT_EXPLOSION  = floatArrayOf(1.00f, 0.50f, 0.15f, 1.00f)  // orange-red AoE
+        val FLASH_TINT_ENERGY     = floatArrayOf(0.45f, 0.85f, 1.00f, 1.10f)  // cyan electric, slightly brighter
+        val FLASH_TINT_DEATH      = floatArrayOf(1.00f, 0.85f, 0.40f, 1.00f)  // warm yellow burst
+        val FLASH_TINT_SHIELD     = floatArrayOf(0.35f, 0.75f, 1.00f, 1.00f)  // blue shield deflection
         // Reload bar — strip on the lower part of the platform (the upper part
         // is overlapped by the ЩИТ button overlay, which composites on top of
         // the engine surface, so a bar placed there gets hidden). Anchored
@@ -561,20 +584,18 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(R.id.statusText),
         ).forEach { it?.visibility = View.GONE }
 
-        // Single sci-fi HUD panel anchored at top: left = mission + wave, right = score + HP.
+        // Single sci-fi HUD anchored at top: left = mission + wave, right = score + HP,
+        // ✕ embedded as the rightmost child (no separate floating button). Background
+        // intentionally absent — HUD shouldn't compete visually with gameplay.
         val root = engineView.parent as FrameLayout
         hudPanel = buildHudPanel()
         val sideMargin = com.example.asteroidoutpost.game.UiTheme.dp(this, 12f)
         val topMargin  = com.example.asteroidoutpost.game.UiTheme.dp(this, 16f)
-        // Reserve room on the right for the ✕ button (added below) so the HUD
-        // panel's right edge stops before the abort button instead of getting
-        // clipped behind it.
-        val hudRightInset = com.example.asteroidoutpost.game.UiTheme.dp(this, 56f)
         val hudParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             android.view.Gravity.TOP,
-        ).apply { setMargins(sideMargin, topMargin, hudRightInset, 0) }
+        ).apply { setMargins(sideMargin, topMargin, sideMargin, 0) }
         root.addView(hudPanel, hudParams)
 
         // Shield ability button — diegetic, sits on the platform area at the
@@ -593,18 +614,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(shieldButton, shieldParams)
         refreshShieldButton()
 
-        // Abort-mission button — small "✕" pill in the top-right corner. Lets
-        // the player bail out of a mission without playing it through. Shares
-        // visibility with the HUD (only visible during PLAYING).
-        abortMissionBtn = buildAbortMissionButton()
-        val abortSize = com.example.asteroidoutpost.game.UiTheme.dp(this, 36f)
-        val abortParams = FrameLayout.LayoutParams(
-            abortSize, abortSize,
-            android.view.Gravity.TOP or android.view.Gravity.END,
-        ).apply {
-            setMargins(0, topMargin, sideMargin, 0)
-        }
-        root.addView(abortMissionBtn, abortParams)
+        // Abort ✕ button is built and added inside buildHudPanel() so it
+        // shares the HUD's row and visibility — no separate FrameLayout
+        // child here.
 
         // Buff indicator — small caption that appears under the HUD while a
         // buff (currently only ENERGY-asteroid main-weapon ×2) is active.
@@ -637,6 +649,28 @@ class MainActivity : AppCompatActivity() {
             android.view.Gravity.CENTER,
         )
         root.addView(waveAnnounceText, waveAnnounceParams)
+
+        // Diagnostic FPS readout — bottom-left corner, dim caption-size so it
+        // doesn't compete with gameplay. Reads engineView.fps (sliding 1-sec
+        // window updated by RenderThread). Polled every 500ms by fpsUpdater.
+        fpsLabel = TextView(this).apply {
+            text = "FPS —"
+            setTextColor(com.example.asteroidoutpost.game.UiTheme.COL_TEXT_DIM)
+            textSize = com.example.asteroidoutpost.game.UiTheme.SP_CAPTION * 0.7f
+        }
+        val fpsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.BOTTOM or android.view.Gravity.START,
+        ).apply {
+            setMargins(
+                com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 8f),
+                0, 0,
+                com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 8f),
+            )
+        }
+        root.addView(fpsLabel, fpsParams)
+        fpsHandler.post(fpsUpdater)
 
         // DRAFT — full-screen overlays for menu / mission select / win / lose.
         menuOverlay          = OverlayFactory.build(this, "Asteroid Outpost", "Играть")    { showMissionSelect() }
@@ -1158,11 +1192,12 @@ class MainActivity : AppCompatActivity() {
         // Flash VFX: muzzle flash, bullet trails, asteroid hit, AoE rings, ENERGY-buff
         // pickup. Routed through the additive plasma pipeline (E2.1) so they read as
         // soft circular glows that brighten what's behind them — instead of square
-        // yellow placeholders sitting on the dark background.
+        // yellow placeholders sitting on the dark background. E5.1 — per-flash tint
+        // forwarded to the plasma fragment branch via BillboardDraw → drawPlasmaBillboard.
         val flashBillboards = flashes.map { f ->
             val t = 1f - (f.life / f.maxLife)
             val s = f.halfMax * (0.6f + t * 0.8f)
-            BillboardDraw(quadFlashHandle, f.x, 0f, f.z, s)
+            BillboardDraw(quadFlashHandle, f.x, 0f, f.z, s, f.tintR, f.tintG, f.tintB, f.tintA)
         }
         engineView.plasmaBillboards   = flashBillboards
         engineView.translucentObjects = nebulaeTranslucent + buildShieldDome()
@@ -1217,31 +1252,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * M7.1 — replace the placeholder "one big yellow square" AoE flash with a
-     * readable ring: a small bright flash at the impact centre plus a ring of
-     * tiny flashes positioned on the AoE perimeter. The ring silhouette
-     * communicates the affected radius without needing a soft-edge shader.
+     * Spawn an explosion at (cx, cz) sized to `radius`. Originally (M7.1) this
+     * was a centre-flash plus a ring of perimeter particles to communicate the
+     * AoE radius before the plasma soft-fade existed. After E4 the centre
+     * flash is already a circular soft glow with heat-ramp + FBM turbulence,
+     * so the perimeter ring is redundant — it just additively saturates the
+     * core into a flat orange wash. Now: one big billboard scaled to the AoE
+     * radius. The plasma fragment branch (E4) gives the warm-core/orange-rim
+     * look natively; M7.1's grow-over-life animation (s ≈ 0.6 → 1.4 × halfMax)
+     * already produces an "expanding shockwave" feel from a single billboard.
      */
-    private fun spawnAoeRing(cx: Float, cz: Float, radius: Float) {
-        // Bright centre — keeps the impact moment readable.
+    private fun spawnExplosion(cx: Float, cz: Float, radius: Float) {
+        val t = DraftCombat.FLASH_TINT_EXPLOSION
         flashes.add(Flash(
             x = cx, z = cz,
             life = DraftCombat.FLASH_LIFE_SEC,
             maxLife = DraftCombat.FLASH_LIFE_SEC,
-            halfMax = DraftCombat.FLASH_HALF * 1.2f,
+            // Quad spans ±halfMax * scale (where scale animates 0.6 → 1.4).
+            // halfMax = radius makes the visible glow inscribe the AoE bound
+            // at the start and overshoot it slightly at peak — reads as the
+            // shockwave catching up to the damage radius.
+            halfMax = radius,
+            tintR = t[0], tintG = t[1], tintB = t[2], tintA = t[3],
         ))
-        // Perimeter ring — N small flashes spaced evenly around the radius.
-        val n = DraftCombat.AOE_RING_PARTICLES
-        for (i in 0 until n) {
-            val ang = i * 2f * Math.PI.toFloat() / n
-            flashes.add(Flash(
-                x = cx + radius * kotlin.math.cos(ang),
-                z = cz + radius * kotlin.math.sin(ang),
-                life = DraftCombat.AOE_RING_LIFE_SEC,
-                maxLife = DraftCombat.AOE_RING_LIFE_SEC,
-                halfMax = DraftCombat.AOE_RING_PARTICLE_HALF,
-            ))
-        }
     }
 
     private fun sceneAdapter(worldObjects: List<WorldObject> = simWorld.worldObjectSnapshot()): SceneAdapter =
@@ -1889,17 +1922,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildHudPanel(): View {
         val ctx = this
+        val theme = com.example.asteroidoutpost.game.UiTheme
+        // No stylePanel here — the HUD is intentionally background-less so it
+        // doesn't compete visually with gameplay. Abort ✕ button is embedded
+        // as the rightmost child of the same horizontal row, so it sits in
+        // the (invisible) panel contour rather than floating over the scene.
+        // Text sizes are 30% smaller than the regular sci-fi typography to
+        // keep the readout unobtrusive (HUD is glanceable, not read).
         val panel = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        com.example.asteroidoutpost.game.UiHelpers.stylePanel(panel)
+        val hudScale = 0.7f
 
         // Left column: mission name (caption) + wave (heading).
         val left = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         hudMissionText = com.example.asteroidoutpost.game.UiHelpers
             .buildCaption(ctx, "")
+            .apply { textSize = theme.SP_CAPTION * hudScale }
         hudWaveText = com.example.asteroidoutpost.game.UiHelpers
             .buildHeading(ctx, "")
+            .apply { textSize = theme.SP_HEADING * hudScale }
         left.addView(hudMissionText)
         left.addView(hudWaveText)
 
@@ -1909,10 +1952,11 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.END
         }
         hudScoreText = com.example.asteroidoutpost.game.UiHelpers
-            .buildHeading(ctx, "Score: 0").apply { gravity = Gravity.END }
+            .buildHeading(ctx, "Score: 0")
+            .apply { gravity = Gravity.END; textSize = theme.SP_HEADING * hudScale }
         hudHpText = com.example.asteroidoutpost.game.UiHelpers
-            .buildBody(ctx, "HP: 100", com.example.asteroidoutpost.game.UiTheme.COL_TEXT)
-            .apply { gravity = Gravity.END }
+            .buildBody(ctx, "HP: 100", theme.COL_TEXT)
+            .apply { gravity = Gravity.END; textSize = theme.SP_BODY * hudScale }
         right.addView(hudScoreText)
         right.addView(hudHpText)
 
@@ -1924,6 +1968,19 @@ class MainActivity : AppCompatActivity() {
             right,
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
         )
+
+        // Abort ✕ — embedded in the HUD row so it sits inside the (invisible)
+        // panel contour rather than floating over the scene. Built here and
+        // assigned to `abortMissionBtn` so it shares visibility with the HUD.
+        abortMissionBtn = buildAbortMissionButton().apply {
+            textSize = theme.SP_HEADING * hudScale
+        }
+        val abortSize = theme.dp(ctx, 36f)
+        val abortLp = LinearLayout.LayoutParams(abortSize, abortSize).apply {
+            marginStart = theme.dp(ctx, theme.DP_GAP_TIGHT)
+        }
+        panel.addView(abortMissionBtn, abortLp)
+
         return panel
     }
 
@@ -2107,11 +2164,13 @@ class MainActivity : AppCompatActivity() {
                     aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
                 ))
                 // Muzzle flash at the barrel tip — short bright pop.
+                val mt = DraftCombat.FLASH_TINT_MUZZLE
                 flashes.add(Flash(
                     x = muzzleX, z = muzzleZ,
                     life = DraftCombat.MUZZLE_FLASH_LIFE,
                     maxLife = DraftCombat.MUZZLE_FLASH_LIFE,
                     halfMax = DraftCombat.MUZZLE_FLASH_HALF,
+                    tintR = mt[0], tintG = mt[1], tintB = mt[2], tintA = mt[3],
                 ))
             }
             // Turrets fire at the nearest asteroid (if any).
@@ -2139,11 +2198,13 @@ class MainActivity : AppCompatActivity() {
                     ))
                     // Side-turret muzzle flash — same look as the central
                     // turret's, slightly smaller to keep them visually secondary.
+                    val st = DraftCombat.FLASH_TINT_MUZZLE
                     flashes.add(Flash(
                         x = muzzleX, z = muzzleZ,
                         life = DraftCombat.MUZZLE_FLASH_LIFE,
                         maxLife = DraftCombat.MUZZLE_FLASH_LIFE,
                         halfMax = DraftCombat.MUZZLE_FLASH_HALF * 0.7f,
+                        tintR = st[0], tintG = st[1], tintB = st[2], tintA = st[3],
                     ))
                 }
             }
@@ -2158,11 +2219,13 @@ class MainActivity : AppCompatActivity() {
                 b.trailTimer -= dt
                 if (b.trailTimer <= 0f) {
                     b.trailTimer += DraftCombat.TRAIL_INTERVAL_SEC
+                    val tt = DraftCombat.FLASH_TINT_TRAIL
                     flashes.add(Flash(
                         x = b.x, z = b.z,
                         life = DraftCombat.TRAIL_LIFE_SEC,
                         maxLife = DraftCombat.TRAIL_LIFE_SEC,
                         halfMax = DraftCombat.TRAIL_HALF,
+                        tintR = tt[0], tintG = tt[1], tintB = tt[2], tintA = tt[3],
                     ))
                 }
                 if (b.z > DraftCombat.SCREEN_TOP_Z + 1f ||
@@ -2205,7 +2268,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         // M7.1 — ring of small flashes traces the AoE radius
                         // so the player can read the explosion's reach.
-                        spawnAoeRing(hitX, hitZ, b.aoeRadius)
+                        spawnExplosion(hitX, hitZ, b.aoeRadius)
                     }
                     bulletIter.remove()
                 }
@@ -2232,24 +2295,28 @@ class MainActivity : AppCompatActivity() {
                                     other.hp -= DraftCombat.EXPLOSIVE_AOE_DAMAGE
                                 }
                             }
-                            spawnAoeRing(a.xPos, a.zPos, DraftCombat.EXPLOSIVE_AOE_RADIUS)
+                            spawnExplosion(a.xPos, a.zPos, DraftCombat.EXPLOSIVE_AOE_RADIUS)
                         }
                         AsteroidType.ENERGY -> {
                             triggeredBuff = true
+                            val et = DraftCombat.FLASH_TINT_ENERGY
                             flashes.add(Flash(
                                 x = a.xPos, z = a.zPos,
                                 life = DraftCombat.FLASH_LIFE_SEC,
                                 maxLife = DraftCombat.FLASH_LIFE_SEC,
                                 halfMax = DraftCombat.FLASH_HALF * 1.5f,
+                                tintR = et[0], tintG = et[1], tintB = et[2], tintA = et[3],
                             ))
                         }
                         AsteroidType.NORMAL,
                         AsteroidType.FAST,
                         AsteroidType.HEAVY -> {
+                            val dt2 = DraftCombat.FLASH_TINT_DEATH
                             flashes.add(Flash(
-                                a.xPos, a.zPos,
-                                DraftCombat.FLASH_LIFE_SEC,
-                                DraftCombat.FLASH_LIFE_SEC,
+                                x = a.xPos, z = a.zPos,
+                                life = DraftCombat.FLASH_LIFE_SEC,
+                                maxLife = DraftCombat.FLASH_LIFE_SEC,
+                                tintR = dt2[0], tintG = dt2[1], tintB = dt2[2], tintA = dt2[3],
                             ))
                         }
                     }
@@ -2292,11 +2359,13 @@ class MainActivity : AppCompatActivity() {
                         // Shield absorbs: asteroid is consumed without damaging
                         // the base. Spawn a small flash at the impact point so
                         // the player sees the hit being deflected.
+                        val sh = DraftCombat.FLASH_TINT_SHIELD
                         flashes.add(Flash(
                             x = a.xPos,
                             z = DraftCombat.PLATFORM_TOP_Z + a.half,
                             life = DraftCombat.FLASH_LIFE_SEC,
                             maxLife = DraftCombat.FLASH_LIFE_SEC,
+                            tintR = sh[0], tintG = sh[1], tintB = sh[2], tintA = sh[3],
                         ))
                     } else {
                         // Per-type platform damage (HEAVY hits twice as hard).

@@ -27,10 +27,20 @@ namespace station {
             float proj[16];
         };
 
-        // Push constant: model matrix + tint color (80 bytes)
+        // Push constant: model matrix + tint flags + plasma color + time
+        // (100 bytes — well under the 128-byte Vulkan minimum guarantee).
+        // `tint` carries shader-mode flags (E2.1 plasma soft-fade in .x,
+        // E3.1 nebula material in .y, E3.1 hex material in .z) — NOT colour.
+        // `plasmaColor` (E5.1) is the per-billboard tint applied inside the
+        // plasma fragment branch; default (1,1,1,1) preserves the E4 look.
+        // `time` (E6) is elapsed seconds since first frame; the fragment
+        // shader uses it to animate FBM turbulence (plasma fire) and to
+        // drift nebulae across the field.
         struct PushConstantData {
-            float model[16];
-            float tint[4];
+            float model[16];      // offset 0,  size 64
+            float tint[4];        // offset 64, size 16
+            float plasmaColor[4]; // offset 80, size 16
+            float time;           // offset 96, size 4
         };
 
         struct ProjectedPoint {
@@ -699,10 +709,16 @@ namespace station {
         r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_systemPipeline);
         if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(system): %s", vkRes(r).c_str()); return false; }
 
-        // Plasma pipeline: additive blend (src=ONE, dst=ONE), depth-test read-only
-        dsCI.depthTestEnable  = VK_TRUE;
+        // Plasma pipeline: additive blend (src=ONE, dst=ONE). Depth test is
+        // OFF so flashes (muzzle, trail, hit, explosion, ENERGY pickup,
+        // shield absorb) always render on top of gameplay geometry. With
+        // depth test on (LESS_OR_EQUAL), an explosion centred at y=0 was
+        // occluded by 3D asteroid meshes whose front-half vertices sit at
+        // y<0 — closer to camera than the flash. Plasma overlays VFX, so
+        // depth-suppression matches the semantic intent.
+        dsCI.depthTestEnable  = VK_FALSE;
         dsCI.depthWriteEnable = VK_FALSE;
-        dsCI.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+        dsCI.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
         cbAtt.blendEnable         = VK_TRUE;
         cbAtt.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
         cbAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -857,13 +873,28 @@ namespace station {
         m_pickRecords.push_back(record);
     }
 
-    void VulkanContext::drawPlasmaBillboard(uint32_t token, float x, float y, float z, float scale) {
+    // E5.1 — `r,g,b,a` is the per-billboard tint; default (1,1,1,1) at the
+    // Kotlin layer keeps the E4 heat-ramp look. The shader multiplies the
+    // heat-ramp result by `pc.plasmaColor.rgb` and uses `.a` as a brightness
+    // scalar, so callers can recolour individual flashes (cyan ENERGY pickup,
+    // orange-red AoE explosions, blue impact sparks, etc.) without touching
+    // the underlying mesh tint.
+    // E5.2 — `scaleH` and `scaleV` allow non-uniform billboards (streak
+    // bullets, flat shockwaves). Pass equal values for a square billboard.
+    void VulkanContext::drawPlasmaBillboard(uint32_t token, float x, float y, float z,
+                                            float scaleH, float scaleV,
+                                            float r, float g, float b, float a) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token     = token;
         cmd.billboard = true;
         cmd.center[0] = x; cmd.center[1] = y; cmd.center[2] = z;
-        cmd.scale     = scale;
+        cmd.scale     = scaleH;
+        cmd.scaleV    = scaleV;
+        cmd.plasmaColor[0] = r;
+        cmd.plasmaColor[1] = g;
+        cmd.plasmaColor[2] = b;
+        cmd.plasmaColor[3] = a;
         m_plasmaDrawList.push_back(cmd);
     }
 
@@ -1247,6 +1278,16 @@ namespace station {
         vkWaitForFences(m_device, 1, &m_renderResources.inFlightFence, VK_TRUE, UINT64_MAX);
         vkResetFences(m_device, 1, &m_renderResources.inFlightFence);
 
+        // E6 — elapsed seconds since first frame, written into pc.time for
+        // every draw so the fragment shader can animate procedural effects.
+        const auto now = std::chrono::steady_clock::now();
+        if (!m_renderStartInitialised) {
+            m_renderStart = now;
+            m_renderStartInitialised = true;
+        }
+        const float elapsedSec =
+                std::chrono::duration<float>(now - m_renderStart).count();
+
         uint32_t imageIndex = 0;
         VkResult r = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
                                            m_renderResources.imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
@@ -1281,6 +1322,7 @@ namespace station {
 
             // Identity model for stars (they're in world space already)
             PushConstantData starPc{};
+            starPc.time = elapsedSec;
             math::Mat4 identity = math::Mat4::identity();
             for (int i = 0; i < 16; ++i) starPc.model[i] = identity.m[i];
             vkCmdPushConstants(cmd, m_pipelineLayout,
@@ -1311,6 +1353,7 @@ namespace station {
                 }
 
                 PushConstantData pc{};
+                pc.time = elapsedSec;
                 if (draw.billboard) {
                     const math::Mat4 billboard = m_camera.billboardMatrix(
                             {draw.center[0], draw.center[1], draw.center[2]},
@@ -1350,6 +1393,7 @@ namespace station {
                 }
 
                 PushConstantData pc{};
+                pc.time = elapsedSec;
                 const math::Mat4 billboard = m_camera.billboardMatrix(
                         {draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
                 std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
@@ -1382,6 +1426,7 @@ namespace station {
                     lastBoundToken = draw.token;
                 }
                 PushConstantData pc{};
+                pc.time = elapsedSec;
                 std::memcpy(pc.model, draw.modelMatrix, sizeof(float) * 16);
                 // E3.1 — propagate material flags (cmd.tint set by
                 // drawTranslucentMesh). Fragment shader reads pc.tint.y/z.
@@ -1411,14 +1456,22 @@ namespace station {
                     lastBoundToken = draw.token;
                 }
                 PushConstantData pc{};
+                pc.time = elapsedSec;
+                // E5.2 — plasma uses non-uniform (scaleH=draw.scale, scaleV).
                 const math::Mat4 billboard = m_camera.billboardMatrix(
-                        {draw.center[0], draw.center[1], draw.center[2]}, draw.scale);
+                        {draw.center[0], draw.center[1], draw.center[2]},
+                        draw.scale, draw.scaleV);
                 std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
                 // E2.1 — flag plasma fragment shader to apply radial soft-fade.
                 // Project's plasma billboards use quad.gltf (corners at ±1 in X-Z).
                 // Fragment shader maps length(vLocalXZ) → alpha so the visible
                 // glow inscribes the quad and corners go transparent.
                 pc.tint[0] = 1.0f;
+                // E5.1 — per-billboard colour tint, multiplied into the heat-ramp
+                // result inside the plasma fragment branch. Default white at the
+                // Kotlin layer preserves the E4 look; non-white tints recolour
+                // individual flash events (cyan ENERGY pickup, orange-red AoE).
+                std::memcpy(pc.plasmaColor, draw.plasmaColor, sizeof(float) * 4);
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
@@ -1472,6 +1525,7 @@ namespace station {
                 vkCmdSetLineWidth(cmd, lw);
 
                 PushConstantData pc{};
+                pc.time = elapsedSec;
                 std::memcpy(pc.model, frame.m, sizeof(float) * 16);
                 std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
                 vkCmdPushConstants(cmd, m_pipelineLayout,

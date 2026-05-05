@@ -47,6 +47,11 @@ class EngineView @JvmOverloads constructor(
     @Volatile
     var translucentObjects: List<SceneObject> = emptyList()
 
+    /** Engine render-loop FPS (sliding 1-sec window, updated by RenderThread). */
+    @Volatile
+    var fps: Float = 0f
+        private set
+
     private var renderThread: RenderThread? = null
     @Volatile
     private var pendingScreenFrames: List<ScreenFrame> = emptyList()
@@ -296,11 +301,25 @@ class EngineView @JvmOverloads constructor(
         @Volatile private var running = true
 
         override fun run() {
+            // FPS sample window — accumulate frames over 1 second of wall clock,
+            // then publish fps = frames/seconds and reset. Diagnostic only.
+            var fpsFrames = 0
+            var fpsWindowStartNs = System.nanoTime()
             while (running) {
                 val currentScene = engineView.scene
                 submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects)
                 engine.renderFrame()
                 engineView.publishScreenFrames(engineView.collectScreenFrames(currentScene))
+
+                fpsFrames++
+                val nowNs = System.nanoTime()
+                val elapsedNs = nowNs - fpsWindowStartNs
+                if (elapsedNs >= 1_000_000_000L) {
+                    engineView.fps = fpsFrames.toFloat() * 1_000_000_000f / elapsedNs.toFloat()
+                    fpsFrames = 0
+                    fpsWindowStartNs = nowNs
+                }
+
                 try {
                     sleep(1)
                 } catch (_: InterruptedException) {
