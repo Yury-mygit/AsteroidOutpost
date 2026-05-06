@@ -4,6 +4,7 @@ layout(location = 0) in vec4 vColor;     // RGBA — A passes through to outColo
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec2 vLocalXZ;   // model-space X/Z — used for radial soft-fade (E2.1)
+layout(location = 4) in vec2 vUV;        // texture coords (E8.1) — sampled by E8.3+ textured branch
 
 layout(location = 0) out vec4 outColor;
 
@@ -14,7 +15,14 @@ layout(push_constant) uniform PushConst {
     layout(offset = 64) vec4 tint;
     layout(offset = 80) vec4 plasmaColor;
     layout(offset = 96) float time;
+    layout(offset = 100) float textureMode;  // E8.3 — sample uTex when ≥0.5
 } pc;
+
+// E8.3 — combined image sampler for textured opaque draws (drawTexturedMesh).
+// Bound at set=1 binding=0; default 1×1 white at frame start, replaced
+// per-draw by the textured render-loop. All seven pipelines share
+// pc layout so this declaration is universally available.
+layout(set = 1, binding = 0) uniform sampler2D uTex;
 
 // E2.1 — radial soft-fade for plasma billboards.
 // Engine sets pc.tint.x = 1.0 when binding the plasma pipeline; all other
@@ -165,6 +173,54 @@ void main() {
         return;
     }
 
+    // E7 — additive 3D mesh (ONE/ONE blend). Engine sets pc.tint.w when
+    // binding the additive pipeline: 1.0 = plain, 2.0 = fire. Mesh authors
+    // put A=1 at glow centres and A=0 at edges for soft falloff;
+    // pc.plasmaColor is the per-draw tint (rgb = colour, a = brightness
+    // scalar). Output is premultiplied — the ONE/ONE blend ignores source
+    // alpha, so the visible contribution is RGB*A. Multiplying alpha into
+    // RGB embeds the falloff into the additive contribution; without it,
+    // the blend would punch a uniformly bright mesh shape into the
+    // framebuffer.
+
+    // E7.1 — fire material (tint.w ≈ 2.0). Designed for spherical fireball
+    // meshes on this project's fixed pitch=π/2 camera (camera looks along
+    // -Y in world space — see Camera::reset). `abs(vNormal.y)` becomes a
+    // Fresnel-like "facing camera" factor: 1 at the apparent disc centre
+    // (normals along ±Y), 0 at the silhouette edge (normals perpendicular
+    // to view). Result: a bright hot core that fades to nothing at the
+    // outline, plus a heat-ramp from white-yellow centre to orange edge,
+    // plus FBM turbulence for shimmer — same vocabulary as the plasma
+    // billboard branch but on real 3D geometry. NOTE: the abs(vNormal.y)
+    // simplification is project-specific; reusing this on a moving camera
+    // would need real view direction via UBO.
+    if (pc.tint.w >= 1.5) {
+        float facing = clamp(abs(vNormal.y), 0.0, 1.0);
+        // Heat ramp: hot core (white-yellow, facing≈1) → cool edge (orange,
+        // facing≈0). `1 - facing` makes ramp parameter 0 at centre, 1 at edge.
+        vec3 hot  = vec3(1.0, 0.95, 0.70);
+        vec3 cool = vec3(1.0, 0.40, 0.08);
+        vec3 fireColor = mix(hot, cool, smoothstep(0.0, 1.0, 1.0 - facing));
+        // FBM turbulence for shimmer (reuse fbm4 from nebula material).
+        // Sample world-space XZ so adjacent fireballs see different slices.
+        // Drift slightly slower than plasma flashes so a longer-lived
+        // fireball reads as continuous fire instead of racing noise.
+        vec2 fireWarp = vec2(pc.time * 1.0, pc.time * 0.7);
+        float n = fbm4(vWorldPos.xz * 6.0 + fireWarp);
+        float fire = 0.55 + n * 0.95;            // ~[0.55, 1.5]
+        // Fresnel falloff embedded into the additive contribution.
+        // smoothstep gives a soft edge instead of a hard cutoff.
+        float edgeFalloff = smoothstep(0.0, 0.55, facing);
+        float a = vColor.a * edgeFalloff * pc.plasmaColor.a;
+        outColor = vec4(fireColor * pc.plasmaColor.rgb * fire * a, a);
+        return;
+    }
+    if (pc.tint.w >= 0.5) {
+        vec3 rgb = vColor.rgb * pc.plasmaColor.rgb * vColor.a * pc.plasmaColor.a;
+        outColor = vec4(rgb, vColor.a);
+        return;
+    }
+
     vec3 N = normalize(vNormal);
 
     // Primary light — top-right, warm white (sun / star)
@@ -183,10 +239,22 @@ void main() {
     float rim = pow(1.0 - max(dot(N, lightDir), 0.0), 3.0) * 0.15;
     vec3 rimColor = vec3(0.2, 0.4, 0.8);
 
+    // E8.3 — albedo source: textured draws sample uTex at vUV and use
+    // pc.plasmaColor.rgb as a multiplicative tint; untextured draws fall
+    // back to vColor.rgb (the per-vertex / load-time tint) which preserves
+    // the original M7-era look.
+    vec3 albedo;
+    if (pc.textureMode >= 0.5) {
+        vec4 sampled = texture(uTex, vUV);
+        albedo = sampled.rgb * pc.plasmaColor.rgb;
+    } else {
+        albedo = vColor.rgb;
+    }
+
     // Combine — RGB lit, alpha passes through from vertex (1.0 for opaque meshes,
     // <1.0 for translucent meshes that use the alpha-blend pipeline).
     vec3 lighting = ambient
-                  + vColor.rgb * (diff + fill)
+                  + albedo * (diff + fill)
                   + rimColor * rim;
 
     outColor = vec4(lighting, alpha);

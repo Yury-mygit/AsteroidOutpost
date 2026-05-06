@@ -57,6 +57,16 @@ namespace station {
                 colors  = accessorPtr<float>(model, colIt->second);
             }
 
+            // TEXCOORD_0 (optional, E8.1). When absent, vertices keep UV at
+            // (0, 0) — only matters for the textured fragment branch (E8.3+),
+            // which is gated on a material flag, so untextured assets render
+            // unchanged. tinygltf gives us VEC2 floats by default.
+            auto uvIt = prim.attributes.find("TEXCOORD_0");
+            const float* uvs = nullptr;
+            if (uvIt != prim.attributes.end()) {
+                uvs = accessorPtr<float>(model, uvIt->second);
+            }
+
             // Fallback colour from material (alpha defaults to 1 — opaque).
             float fallback[4] = {0.6f, 0.6f, 0.7f, 1.0f};
             if (!colors && prim.material >= 0) {
@@ -94,6 +104,14 @@ namespace station {
                     out.vertices[i].normal[0] = 0.0f;
                     out.vertices[i].normal[1] = 0.0f;
                     out.vertices[i].normal[2] = 1.0f;
+                }
+
+                if (uvs) {
+                    out.vertices[i].uv[0] = uvs[i*2+0];
+                    out.vertices[i].uv[1] = uvs[i*2+1];
+                } else {
+                    out.vertices[i].uv[0] = 0.0f;
+                    out.vertices[i].uv[1] = 0.0f;
                 }
             }
 
@@ -160,8 +178,10 @@ namespace station {
                 }
             }
 
-            LOGI("GltfLoader: %zu verts, %zu indices, normals=%s",
-                 vertCount, out.indices.size(), normals ? "file" : "computed");
+            LOGI("GltfLoader: %zu verts, %zu indices, normals=%s, uvs=%s",
+                 vertCount, out.indices.size(),
+                 normals ? "file" : "computed",
+                 uvs ? "file" : "default(0,0)");
             return true;
         }
 

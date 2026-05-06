@@ -36,11 +36,16 @@ namespace station {
         // `time` (E6) is elapsed seconds since first frame; the fragment
         // shader uses it to animate FBM turbulence (plasma fire) and to
         // drift nebulae across the field.
+        // E8.3 — `textureMode` flips the lit branch in the fragment shader
+        // between vColor.rgb (untextured, the original behaviour) and
+        // texture(uTex, vUV) sampled from set 1. Set to 1.0 only by the
+        // textured-mesh render-loop; everywhere else it stays 0.
         struct PushConstantData {
-            float model[16];      // offset 0,  size 64
-            float tint[4];        // offset 64, size 16
-            float plasmaColor[4]; // offset 80, size 16
-            float time;           // offset 96, size 4
+            float model[16];      // offset   0, size 64
+            float tint[4];        // offset  64, size 16
+            float plasmaColor[4]; // offset  80, size 16
+            float time;           // offset  96, size 4
+            float textureMode;    // offset 100, size 4
         };
 
         struct ProjectedPoint {
@@ -567,6 +572,22 @@ namespace station {
         VkResult r = vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_descriptorSetLayout);
         if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorSetLayout: %s", vkRes(r).c_str()); return false; }
 
+        // E8.2 — set 1 layout: single combined image sampler at binding 0,
+        // visible to fragment stage only. All pipelines share this layout
+        // via the unified pipeline layout below; the descriptor *bound* per
+        // draw is what changes (default white at frame start, per-asset
+        // texture for textured draws once E8.3 lands).
+        VkDescriptorSetLayoutBinding texBinding{};
+        texBinding.binding = 0;
+        texBinding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        texBinding.descriptorCount = 1;
+        texBinding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo texDslCI{};
+        texDslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        texDslCI.bindingCount = 1; texDslCI.pBindings = &texBinding;
+        r = vkCreateDescriptorSetLayout(m_device, &texDslCI, nullptr, &m_textureSetLayout);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorSetLayout(texture): %s", vkRes(r).c_str()); return false; }
+
         // Descriptor pool + set
         VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
         VkDescriptorPoolCreateInfo poolCI{};
@@ -574,6 +595,19 @@ namespace station {
         poolCI.poolSizeCount = 1; poolCI.pPoolSizes = &poolSize; poolCI.maxSets = 1;
         r = vkCreateDescriptorPool(m_device, &poolCI, nullptr, &m_descriptorPool);
         if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorPool: %s", vkRes(r).c_str()); return false; }
+
+        // E8.2 — texture pool. Sized for `kMaxTextures` combined image
+        // samplers. FREE_DESCRIPTOR_SET_BIT lets `Texture::destroy` return
+        // a slot back; without it `vkFreeDescriptorSets` would be illegal.
+        constexpr uint32_t kMaxTextures = 64;
+        VkDescriptorPoolSize texPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxTextures };
+        VkDescriptorPoolCreateInfo texPoolCI{};
+        texPoolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        texPoolCI.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        texPoolCI.poolSizeCount = 1; texPoolCI.pPoolSizes = &texPoolSize;
+        texPoolCI.maxSets = kMaxTextures;
+        r = vkCreateDescriptorPool(m_device, &texPoolCI, nullptr, &m_texturePool);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorPool(texture): %s", vkRes(r).c_str()); return false; }
 
         VkDescriptorSetAllocateInfo dsAI{};
         dsAI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -590,6 +624,20 @@ namespace station {
         write.descriptorCount = 1; write.pBufferInfo = &bufInfo;
         vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 
+        // E8.2 — default 1×1 white texture. Bound to set 1 at the start of
+        // every renderFrame so untextured draws (i.e. everything for now)
+        // satisfy the layout requirement without sampling anything visible.
+        // Once textured draws land (E8.3), they rebind set 1 to their own
+        // texture; sets persist within a command buffer until rebound.
+        const uint8_t whitePixel[4] = { 255, 255, 255, 255 };
+        if (!m_defaultWhiteTexture.createFromPixels(
+                m_physicalDevice, m_device, m_graphicsQueue, m_queueFamily,
+                m_texturePool, m_textureSetLayout,
+                whitePixel, 1, 1)) {
+            LOGE("Default white texture creation failed");
+            return false;
+        }
+
         LOGI("Pipeline infra created");
         return true;
     }
@@ -600,10 +648,23 @@ namespace station {
         if (m_systemPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_systemPipeline, nullptr);                 m_systemPipeline = VK_NULL_HANDLE; }
         if (m_plasmaPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_plasmaPipeline, nullptr);                 m_plasmaPipeline = VK_NULL_HANDLE; }
         if (m_translucentPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_translucentPipeline, nullptr);            m_translucentPipeline = VK_NULL_HANDLE; }
+        if (m_additivePipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_additivePipeline, nullptr);               m_additivePipeline = VK_NULL_HANDLE; }
         if (m_framePipeline       != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_framePipeline, nullptr);                  m_framePipeline = VK_NULL_HANDLE; }
         if (m_pipelineLayout      != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);           m_pipelineLayout = VK_NULL_HANDLE; }
         if (m_vertModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_vertModule, nullptr);                  m_vertModule = VK_NULL_HANDLE; }
         if (m_fragModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_fragModule, nullptr);                  m_fragModule = VK_NULL_HANDLE; }
+        // E8.2/E8.3 — destroy textures before their descriptor pool. Free
+        // every used pool slot first, then the engine-owned default white,
+        // then drop the descriptor pool itself.
+        for (uint32_t i = 0; i < kMaxTextures; ++i) {
+            if (m_textureUsed[i]) {
+                m_textureSlots[i].destroy(m_device, m_texturePool);
+                m_textureUsed[i] = false;
+            }
+        }
+        m_defaultWhiteTexture.destroy(m_device, m_texturePool);
+        if (m_texturePool         != VK_NULL_HANDLE) { vkDestroyDescriptorPool(m_device, m_texturePool, nullptr);              m_texturePool = VK_NULL_HANDLE; }
+        if (m_textureSetLayout    != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(m_device, m_textureSetLayout, nullptr);    m_textureSetLayout = VK_NULL_HANDLE; }
         if (m_descriptorPool      != VK_NULL_HANDLE) { vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);           m_descriptorPool = VK_NULL_HANDLE; }
         if (m_descriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr); m_descriptorSetLayout = VK_NULL_HANDLE; }
         if (m_uniformBuffer       != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, m_uniformBuffer, nullptr);                    m_uniformBuffer = VK_NULL_HANDLE; }
@@ -680,9 +741,15 @@ namespace station {
         pcRange.offset     = 0;
         pcRange.size       = sizeof(PushConstantData);
 
+        // E8.2 — pipeline layout takes both descriptor set layouts: set 0
+        // (UBO, vertex stage) and set 1 (combined image sampler, fragment
+        // stage). All seven pipelines share this layout, so existing draws
+        // pick up the texture binding for free and textured draws (E8.3+)
+        // can rebind set 1 without changing pipeline.
+        VkDescriptorSetLayout setLayouts[2] = { m_descriptorSetLayout, m_textureSetLayout };
         VkPipelineLayoutCreateInfo plCI{};
         plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        plCI.setLayoutCount = 1; plCI.pSetLayouts = &m_descriptorSetLayout;
+        plCI.setLayoutCount = 2; plCI.pSetLayouts = setLayouts;
         plCI.pushConstantRangeCount = 1; plCI.pPushConstantRanges = &pcRange;
 
         VkResult r = vkCreatePipelineLayout(m_device, &plCI, nullptr, &m_pipelineLayout);
@@ -743,6 +810,28 @@ namespace station {
         cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
         r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_translucentPipeline);
         if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(translucent): %s", vkRes(r).c_str()); return false; }
+
+        // Additive mesh pipeline (E7): ONE/ONE blend like plasma, but accepts
+        // arbitrary 3D meshes through a model matrix. Depth-test ON read-only
+        // (depthCompareOp = LESS, depthWrite = OFF) so opaque geometry occludes
+        // the additive mesh, but multiple additive layers don't punch each
+        // other out — they accumulate into the framebuffer. Plasma billboards
+        // disable depth-test entirely (they're pure overlay VFX); additive
+        // meshes DO want occlusion so a fireball behind an asteroid is
+        // correctly hidden. Used by drawAdditiveMesh from Kotlin for fireball
+        // explosions, plasma beams, lightning bolts.
+        dsCI.depthTestEnable  = VK_TRUE;
+        dsCI.depthWriteEnable = VK_FALSE;
+        dsCI.depthCompareOp   = VK_COMPARE_OP_LESS;
+        cbAtt.blendEnable         = VK_TRUE;
+        cbAtt.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.colorBlendOp        = VK_BLEND_OP_ADD;
+        cbAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
+        r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_additivePipeline);
+        if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(additive): %s", vkRes(r).c_str()); return false; }
         cbAtt.blendEnable = VK_FALSE;  // reset for subsequent pipelines
 
         // Frame pipeline: LINE_LIST, dynamic line width, no depth test
@@ -833,11 +922,52 @@ namespace station {
         }
     }
 
+    uint32_t VulkanContext::uploadTexture(const uint8_t* pngBytes, uint32_t length) {
+        if (!pngBytes || !length) return 0;
+        for (uint32_t i = 0; i < kMaxTextures; ++i) {
+            if (!m_textureUsed[i]) {
+                if (!m_textureSlots[i].createFromPng(
+                        m_physicalDevice, m_device, m_graphicsQueue, m_queueFamily,
+                        m_texturePool, m_textureSetLayout,
+                        pngBytes, length)) return 0;
+                m_textureUsed[i] = true;
+                return i + 1;
+            }
+        }
+        LOGE("Texture pool full"); return 0;
+    }
+
+    uint32_t VulkanContext::uploadTextureRaw(const uint8_t* rgba8, uint32_t w, uint32_t h) {
+        if (!rgba8 || !w || !h) return 0;
+        for (uint32_t i = 0; i < kMaxTextures; ++i) {
+            if (!m_textureUsed[i]) {
+                if (!m_textureSlots[i].createFromPixels(
+                        m_physicalDevice, m_device, m_graphicsQueue, m_queueFamily,
+                        m_texturePool, m_textureSetLayout,
+                        rgba8, w, h)) return 0;
+                m_textureUsed[i] = true;
+                return i + 1;
+            }
+        }
+        LOGE("Texture pool full"); return 0;
+    }
+
+    void VulkanContext::freeTexture(uint32_t token) {
+        if (!token || token > kMaxTextures) return;
+        uint32_t i = token - 1;
+        if (m_textureUsed[i]) {
+            m_textureSlots[i].destroy(m_device, m_texturePool);
+            m_textureUsed[i] = false;
+        }
+    }
+
     void VulkanContext::beginScene() {
         m_drawList.clear();
         m_systemDrawList.clear();
         m_plasmaDrawList.clear();
         m_translucentDrawList.clear();
+        m_additiveDrawList.clear();
+        m_texturedDrawList.clear();
         m_pickRecords.clear();
         m_sceneOpen = true;
     }
@@ -913,6 +1043,58 @@ namespace station {
         if (material == 1) cmd.tint[1] = 1.0f;  // NEBULA → fragment FBM mode
         if (material == 2) cmd.tint[2] = 1.0f;  // HEX    → fragment hex-grid mode
         m_translucentDrawList.push_back(cmd);
+    }
+
+    // E8.3 — textured opaque mesh. Goes through the same opaque pipeline as
+    // drawMesh (depth-test+write on, no blend), but the render-loop step
+    // binds set 1 to the texture's descriptor set and pushes textureMode=1
+    // so the fragment shader samples vUV. (r,g,b,a) is multiplied into the
+    // sampled colour as a tint (default white = no tint).
+    void VulkanContext::drawTexturedMesh(uint32_t meshToken, uint32_t textureToken,
+                                         const float modelMatrix[16],
+                                         float r, float g, float b, float a) {
+        if (!m_sceneOpen || meshToken == 0 || meshToken > kMaxMeshes) return;
+        if (textureToken == 0 || textureToken > kMaxTextures) return;
+        DrawCommand cmd{};
+        cmd.token        = meshToken;
+        cmd.textureToken = textureToken;
+        cmd.billboard    = false;
+        cmd.objectFrame  = false;
+        std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        cmd.plasmaColor[0] = r;
+        cmd.plasmaColor[1] = g;
+        cmd.plasmaColor[2] = b;
+        cmd.plasmaColor[3] = a;
+        m_texturedDrawList.push_back(cmd);
+    }
+
+    // E7 — additive mesh draw. Same blend mode as plasma billboards (ONE/ONE)
+    // but accepts arbitrary 3D mesh + model matrix instead of camera-facing
+    // billboards. The (r,g,b,a) tint piggybacks on plasmaColor — fragment
+    // shader multiplies it into per-vertex colour as overall colour and
+    // brightness scalar (matches the E5.1 plasmaColor semantics). Per-vertex
+    // alpha (set when the mesh is authored / uploaded) controls glow falloff:
+    // mesh authors put A=1 at glow centres, A=0 at edges for soft fade.
+    // E7.1 — `material` encoded into cmd.tint[3] (1.0f = plain pass-through,
+    // 2.0f = fire material with heat-ramp + FBM in the fragment shader). The
+    // render loop copies cmd.tint → pc.tint so the shader can branch on .w.
+    void VulkanContext::drawAdditiveMesh(uint32_t token, const float modelMatrix[16],
+                                         float r, float g, float b, float a,
+                                         int32_t material) {
+        if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
+        DrawCommand cmd{};
+        cmd.token       = token;
+        cmd.billboard   = false;
+        cmd.objectFrame = false;
+        std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        cmd.plasmaColor[0] = r;
+        cmd.plasmaColor[1] = g;
+        cmd.plasmaColor[2] = b;
+        cmd.plasmaColor[3] = a;
+        // .w = 1.0f for plain additive; 2.0f for fire material. Fragment
+        // shader branches on `pc.tint.w` ranges.
+        cmd.tint[3] = (material == 1) ? 2.0f : 1.0f;
+        m_additiveDrawList.push_back(cmd);
     }
 
     void VulkanContext::drawBillboardMesh(uint32_t token, float x, float y, float z, float scale) {
@@ -1314,6 +1496,19 @@ namespace station {
         rpi.clearValueCount = 2; rpi.pClearValues = cv;
         vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
 
+        // E8.2 — bind set 1 (texture) once with the default white 1×1 texture.
+        // Descriptor set bindings persist within a command buffer until
+        // rebound, so untextured draws downstream inherit this without any
+        // per-pipeline rebind. Textured draws (E8.3+) will rebind set 1
+        // to their own descriptor before drawing, then the next draw that
+        // needs the default can rebind back. All pipelines share
+        // m_pipelineLayout so layout-change invalidation doesn't apply.
+        if (m_defaultWhiteTexture.isReady()) {
+            VkDescriptorSet defaultTexSet = m_defaultWhiteTexture.descriptorSet();
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 1, 1, &defaultTexSet, 0, nullptr);
+        }
+
         // --- Draw star-field first (depth write OFF, drawn behind everything) ---
         if (m_starMesh.isReady() && m_starPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_starPipeline);
@@ -1366,6 +1561,57 @@ namespace station {
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
                 vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
+            }
+        }
+
+        // --- Draw textured opaque meshes (E8.3) ---
+        // Same opaque pipeline as m_drawList; differs only by binding set 1
+        // to the per-draw texture (instead of the frame-default white) and
+        // setting pc.textureMode=1 so the fragment samples vUV. After this
+        // loop we rebind set 1 back to the default white so subsequent
+        // untextured pipelines have a known descriptor (not strictly needed
+        // — they don't sample — but cheap and keeps state predictable for
+        // future shaders).
+        if (!m_texturedDrawList.empty() && m_pipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+            uint32_t lastBoundMesh = 0;
+            uint32_t lastBoundTex  = 0;
+            for (const auto& draw : m_texturedDrawList) {
+                uint32_t mIdx = draw.token - 1;
+                uint32_t tIdx = draw.textureToken - 1;
+                if (!m_meshUsed[mIdx] || !m_meshPool[mIdx].isReady())   continue;
+                if (!m_textureUsed[tIdx] || !m_textureSlots[tIdx].isReady()) continue;
+
+                if (draw.token != lastBoundMesh) {
+                    m_meshPool[mIdx].bind(cmd);
+                    lastBoundMesh = draw.token;
+                }
+                if (draw.textureToken != lastBoundTex) {
+                    VkDescriptorSet texSet = m_textureSlots[tIdx].descriptorSet();
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 1, 1, &texSet, 0, nullptr);
+                    lastBoundTex = draw.textureToken;
+                }
+
+                PushConstantData pc{};
+                pc.time = elapsedSec;
+                pc.textureMode = 1.0f;
+                std::memcpy(pc.model, draw.modelMatrix, sizeof(float) * 16);
+                std::memcpy(pc.plasmaColor, draw.plasmaColor, sizeof(float) * 4);
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[mIdx].indexCount(), 1, 0, 0, 0);
+            }
+
+            // Restore default white set 1 for downstream draws.
+            if (m_defaultWhiteTexture.isReady()) {
+                VkDescriptorSet defaultTexSet = m_defaultWhiteTexture.descriptorSet();
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipelineLayout, 1, 1, &defaultTexSet, 0, nullptr);
             }
         }
 
@@ -1431,6 +1677,44 @@ namespace station {
                 // E3.1 — propagate material flags (cmd.tint set by
                 // drawTranslucentMesh). Fragment shader reads pc.tint.y/z.
                 std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
+                vkCmdPushConstants(cmd, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstantData), &pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
+            }
+        }
+
+        // --- Draw additive 3D meshes (E7) ---
+        // Fireballs, plasma beams, lightning. Same ONE/ONE blend as plasma
+        // billboards but accepts arbitrary mesh + model matrix. Slotted
+        // between translucent and plasma billboards: above translucent so
+        // the additive overlay reads on top of soft alpha-blended layers,
+        // below plasma billboards so pure-overlay billboards (depth-test
+        // off) sit on top of depth-tested additive meshes.
+        if (!m_additiveDrawList.empty() && m_additivePipeline != VK_NULL_HANDLE) {
+            bool pipelineBound = false;
+            uint32_t lastBoundToken = 0;
+            for (const auto& draw : m_additiveDrawList) {
+                uint32_t idx = draw.token - 1;
+                if (!m_meshUsed[idx] || !m_meshPool[idx].isReady()) continue;
+                if (!pipelineBound) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_additivePipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                    pipelineBound = true;
+                }
+                if (draw.token != lastBoundToken) {
+                    m_meshPool[idx].bind(cmd);
+                    lastBoundToken = draw.token;
+                }
+                PushConstantData pc{};
+                pc.time = elapsedSec;
+                std::memcpy(pc.model, draw.modelMatrix, sizeof(float) * 16);
+                // E7 — tint.x/y/z reserved for plasma soft-fade / nebula / hex;
+                // .w distinguishes additive sub-materials (1.0=plain, 2.0=fire,
+                // set by drawAdditiveMesh from the `material` param).
+                std::memcpy(pc.tint, draw.tint, sizeof(float) * 4);
+                std::memcpy(pc.plasmaColor, draw.plasmaColor, sizeof(float) * 4);
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);

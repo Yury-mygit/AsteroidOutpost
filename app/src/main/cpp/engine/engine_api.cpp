@@ -28,6 +28,10 @@ struct StationMesh {
     uint32_t token = 0;
 };
 
+struct StationTexture {
+    uint32_t token = 0;
+};
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -150,6 +154,65 @@ extern "C" StationMesh* station_engine_load_mesh_colored(StationEngine* e,
     return mesh;
 }
 
+extern "C" StationMesh* station_engine_load_mesh_raw_uv(StationEngine* e,
+                                                        const float*    vertices,
+                                                        int32_t         vertexCount,
+                                                        const uint16_t* indices,
+                                                        int32_t         indexCount) {
+    if (!e || !vertices || !indices || vertexCount <= 0 || indexCount <= 0) return nullptr;
+    station::MeshData meshData;
+    meshData.vertices.resize((size_t)vertexCount);
+    // Each input vertex: 12 floats — pos(3) + RGBA(4) + normal(3) + uv(2).
+    // The internal Vertex layout matches one-to-one (E8.1 widened it).
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        const float* src = vertices + (size_t)i * 12;
+        station::Vertex& v = meshData.vertices[i];
+        v.position[0] = src[0];  v.position[1] = src[1];  v.position[2] = src[2];
+        v.color[0]    = src[3];  v.color[1]    = src[4];  v.color[2]    = src[5];  v.color[3] = src[6];
+        v.normal[0]   = src[7];  v.normal[1]   = src[8];  v.normal[2]   = src[9];
+        v.uv[0]       = src[10]; v.uv[1]       = src[11];
+    }
+    meshData.indices.assign(indices, indices + indexCount);
+    uint32_t token = e->vulkan.uploadMesh(meshData);
+    if (!token) { LOGE("load_mesh_raw_uv: uploadMesh failed"); return nullptr; }
+    auto* mesh = new StationMesh();
+    mesh->token = token;
+    LOGI("Mesh loaded (raw uv), token=%u, %d verts, %d idx", token, vertexCount, indexCount);
+    return mesh;
+}
+
+extern "C" StationTexture* station_engine_load_texture(StationEngine* e,
+                                                       const uint8_t* pngBytes,
+                                                       size_t         length) {
+    if (!e || !pngBytes || !length) return nullptr;
+    uint32_t token = e->vulkan.uploadTexture(pngBytes, (uint32_t)length);
+    if (!token) { LOGE("load_texture: uploadTexture failed"); return nullptr; }
+    auto* tex = new StationTexture();
+    tex->token = token;
+    LOGI("Texture loaded, token=%u", token);
+    return tex;
+}
+
+extern "C" void station_engine_unload_texture(StationEngine*  e,
+                                              StationTexture* tex) {
+    if (!e || !tex) return;
+    e->vulkan.freeTexture(tex->token);
+    delete tex;
+}
+
+extern "C" StationTexture* station_engine_load_texture_raw(StationEngine* e,
+                                                           const uint8_t* rgba8,
+                                                           int32_t        width,
+                                                           int32_t        height) {
+    if (!e || !rgba8 || width <= 0 || height <= 0) return nullptr;
+    uint32_t token = e->vulkan.uploadTextureRaw(rgba8, (uint32_t)width, (uint32_t)height);
+    if (!token) { LOGE("load_texture_raw: uploadTextureRaw failed"); return nullptr; }
+    auto* tex = new StationTexture();
+    tex->token = token;
+    LOGI("Texture loaded (raw), token=%u, %dx%d", token, width, height);
+    return tex;
+}
+
 extern "C" StationMesh* station_engine_load_mesh_raw(StationEngine* e,
                                                      const float*    vertices,
                                                      int32_t         vertexCount,
@@ -158,13 +221,21 @@ extern "C" StationMesh* station_engine_load_mesh_raw(StationEngine* e,
     if (!e || !vertices || !indices || vertexCount <= 0 || indexCount <= 0) return nullptr;
     station::MeshData meshData;
     meshData.vertices.resize((size_t)vertexCount);
-    // Each vertex: 10 floats — pos(3) + RGBA(4) + normal(3).
+    // Each input vertex: 10 floats — pos(3) + RGBA(4) + normal(3). The internal
+    // Vertex struct also has uv(2) since E8.1, but procedural callers don't
+    // pass UVs (these are untextured procedural meshes — soft-disk nebulae,
+    // shield dome, fireball sphere). uv is explicitly zeroed so the textured
+    // fragment branch (E8.3+) gets a deterministic (0,0) lookup if the mesh
+    // is ever bound textured (it shouldn't be, but defensively zero).
+    // If procedural meshes ever need UVs, add a parallel `load_mesh_raw_uv`
+    // (12 floats per vertex) rather than overloading this signature.
     for (int32_t i = 0; i < vertexCount; ++i) {
         const float* src = vertices + (size_t)i * 10;
         station::Vertex& v = meshData.vertices[i];
         v.position[0] = src[0]; v.position[1] = src[1]; v.position[2] = src[2];
         v.color[0]    = src[3]; v.color[1]    = src[4]; v.color[2]    = src[5]; v.color[3] = src[6];
         v.normal[0]   = src[7]; v.normal[1]   = src[8]; v.normal[2]   = src[9];
+        v.uv[0]       = 0.0f;   v.uv[1]       = 0.0f;
     }
     meshData.indices.assign(indices, indices + indexCount);
     uint32_t token = e->vulkan.uploadMesh(meshData);
@@ -226,12 +297,30 @@ extern "C" void station_engine_draw_plasma_billboard(StationEngine* e,
     e->vulkan.drawPlasmaBillboard(mesh->token, x, y, z, scaleH, scaleV, r, g, b, a);
 }
 
+extern "C" void station_engine_draw_textured_mesh(StationEngine* e,
+                                                  StationMesh*    mesh,
+                                                  StationTexture* texture,
+                                                  const float     modelMatrix[16],
+                                                  float r, float g, float b, float a) {
+    if (!e || !mesh || !texture) return;
+    e->vulkan.drawTexturedMesh(mesh->token, texture->token, modelMatrix, r, g, b, a);
+}
+
 extern "C" void station_engine_draw_translucent_mesh(StationEngine* e,
                                                      StationMesh*   mesh,
                                                      const float    modelMatrix[16],
                                                      int32_t        material) {
     if (!e || !mesh) return;
     e->vulkan.drawTranslucentMesh(mesh->token, modelMatrix, material);
+}
+
+extern "C" void station_engine_draw_additive_mesh(StationEngine* e,
+                                                  StationMesh*   mesh,
+                                                  const float    modelMatrix[16],
+                                                  float r, float g, float b, float a,
+                                                  int32_t material) {
+    if (!e || !mesh) return;
+    e->vulkan.drawAdditiveMesh(mesh->token, modelMatrix, r, g, b, a, material);
 }
 
 extern "C" void station_engine_draw_object_frame_mesh(StationEngine* e,

@@ -11,6 +11,10 @@ namespace station {
         float position[3];
         float color[4];   // RGBA (alpha = 1 = fully opaque)
         float normal[3];  // world-space normal for lighting
+        float uv[2];      // E8.1 — texture coordinates; (0,0) for meshes without
+                          // a texture (asteroids/turrets/bullets/procedural meshes
+                          // currently). Sampled by the textured fragment branch
+                          // (E8.3+).
 
         static VkVertexInputBindingDescription getBindingDescription();
         static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions();

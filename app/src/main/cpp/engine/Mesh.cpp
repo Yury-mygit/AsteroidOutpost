@@ -32,7 +32,7 @@ namespace station {
     }
 
     std::vector<VkVertexInputAttributeDescription> Vertex::getAttributeDescriptions() {
-        std::vector<VkVertexInputAttributeDescription> attrs(3);
+        std::vector<VkVertexInputAttributeDescription> attrs(4);
 
         // location 0 — position
         attrs[0].binding  = 0;
@@ -51,6 +51,14 @@ namespace station {
         attrs[2].location = 2;
         attrs[2].format   = VK_FORMAT_R32G32B32_SFLOAT;
         attrs[2].offset   = offsetof(Vertex, normal);
+
+        // location 3 — UV (E8.1). Defaults to (0, 0) when the mesh source
+        // doesn't provide TEXCOORD_0; sampled only by the textured fragment
+        // branch (E8.3+), so meshes without UVs render unchanged.
+        attrs[3].binding  = 0;
+        attrs[3].location = 3;
+        attrs[3].format   = VK_FORMAT_R32G32_SFLOAT;
+        attrs[3].offset   = offsetof(Vertex, uv);
 
         return attrs;
     }

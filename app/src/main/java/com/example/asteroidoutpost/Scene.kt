@@ -53,6 +53,21 @@ data class SceneObject(
     // E3.1 — for translucent draws, picks a fragment-shader branch:
     // 0 = plain, 1 = nebula (FBM), 2 = hex grid. Ignored on opaque routes.
     val material: Int = 0,
+    // E7 — for additive draws, RGBA tint passed through pc.plasmaColor
+    // (rgb = colour, a = brightness scalar). Default white = no tint.
+    // Ignored on opaque/translucent routes (they don't read plasmaColor).
+    val tintR: Float = 1f,
+    val tintG: Float = 1f,
+    val tintB: Float = 1f,
+    val tintA: Float = 1f,
+    // E7.1 — additive sub-material (ADDITIVE_PLAIN / ADDITIVE_FIRE in
+    // EngineJni). Picks fragment-shader branch for additive draws only;
+    // ignored on opaque/translucent routes.
+    val additiveMaterial: Int = 0,
+    // E8.4 — texture handle from `loadTexture` / `loadTextureRaw`. Only
+    // consumed by the textured route; ignored elsewhere. 0 = no texture
+    // (default white set 1 covers the binding requirement).
+    val textureHandle: Long = 0L,
 ) {
     fun orbitRadius(): Float =
         gameplayShape.boundingRadius() * scale * orbitRadiusMultiplier + orbitMargin
@@ -133,6 +148,8 @@ fun submitScene(
     billboards: List<BillboardDraw> = emptyList(),
     plasmaBillboards: List<BillboardDraw> = emptyList(),
     translucentObjects: List<SceneObject> = emptyList(),
+    additiveObjects: List<SceneObject> = emptyList(),
+    texturedObjects: List<SceneObject> = emptyList(),
 ) {
     engine.beginScene()
     for (obj in objects) {
@@ -153,6 +170,13 @@ fun submitScene(
     }
     for (t in translucentObjects) {
         engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix(), t.material)
+    }
+    for (a in additiveObjects) {
+        engine.drawAdditiveMesh(a.meshHandle, a.modelMatrix(), a.tintR, a.tintG, a.tintB, a.tintA, a.additiveMaterial)
+    }
+    for (t in texturedObjects) {
+        engine.drawTexturedMesh(t.meshHandle, t.textureHandle, t.modelMatrix(),
+                                t.tintR, t.tintG, t.tintB, t.tintA)
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV, p.r, p.g, p.b, p.a)

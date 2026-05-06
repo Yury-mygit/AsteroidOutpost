@@ -106,6 +106,27 @@ Java_com_example_asteroidoutpost_EngineJni_nativeUnloadMesh(JNIEnv* /*env*/, job
 }
 
 JNIEXPORT jlong JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeLoadTexture(JNIEnv* env, jobject /*thiz*/,
+                                               jlong handle, jbyteArray data) {
+    if (!data) return 0L;
+    jsize  len   = env->GetArrayLength(data);
+    jbyte* bytes = env->GetByteArrayElements(data, nullptr);
+    if (!bytes) return 0L;
+    StationTexture* tex = station_engine_load_texture(
+            reinterpret_cast<StationEngine*>(handle),
+            reinterpret_cast<const uint8_t*>(bytes), (size_t)len);
+    env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
+    return reinterpret_cast<jlong>(tex);
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeUnloadTexture(JNIEnv* /*env*/, jobject /*thiz*/,
+                                                  jlong engineHandle, jlong textureHandle) {
+    station_engine_unload_texture(reinterpret_cast<StationEngine*>(engineHandle),
+                                  reinterpret_cast<StationTexture*>(textureHandle));
+}
+
+JNIEXPORT jlong JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeLoadMeshRaw(JNIEnv* env, jobject /*thiz*/,
                                                   jlong handle,
                                                   jfloatArray vertices,
@@ -131,6 +152,50 @@ Java_com_example_asteroidoutpost_EngineJni_nativeLoadMeshRaw(JNIEnv* env, jobjec
     env->ReleaseFloatArrayElements(vertices, vBytes, JNI_ABORT);
     env->ReleaseShortArrayElements(indices, iBytes, JNI_ABORT);
     return reinterpret_cast<jlong>(mesh);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeLoadMeshRawUV(JNIEnv* env, jobject /*thiz*/,
+                                                  jlong handle,
+                                                  jfloatArray vertices,
+                                                  jshortArray indices) {
+    if (!vertices || !indices) return 0L;
+    jsize vlen = env->GetArrayLength(vertices);
+    jsize ilen = env->GetArrayLength(indices);
+    if (vlen <= 0 || ilen <= 0 || (vlen % 12) != 0) return 0L;  // 12 floats/vertex (pos3+rgba4+normal3+uv2)
+    int32_t vertexCount = vlen / 12;
+
+    jfloat* vBytes = env->GetFloatArrayElements(vertices, nullptr);
+    jshort* iBytes = env->GetShortArrayElements(indices, nullptr);
+    if (!vBytes || !iBytes) {
+        if (vBytes) env->ReleaseFloatArrayElements(vertices, vBytes, JNI_ABORT);
+        if (iBytes) env->ReleaseShortArrayElements(indices, iBytes, JNI_ABORT);
+        return 0L;
+    }
+    StationMesh* mesh = station_engine_load_mesh_raw_uv(
+            reinterpret_cast<StationEngine*>(handle),
+            reinterpret_cast<const float*>(vBytes), vertexCount,
+            reinterpret_cast<const uint16_t*>(iBytes), ilen);
+    env->ReleaseFloatArrayElements(vertices, vBytes, JNI_ABORT);
+    env->ReleaseShortArrayElements(indices, iBytes, JNI_ABORT);
+    return reinterpret_cast<jlong>(mesh);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeLoadTextureRaw(JNIEnv* env, jobject /*thiz*/,
+                                                  jlong handle,
+                                                  jbyteArray data,
+                                                  jint width, jint height) {
+    if (!data || width <= 0 || height <= 0) return 0L;
+    jsize len = env->GetArrayLength(data);
+    if (len != width * height * 4) return 0L;
+    jbyte* bytes = env->GetByteArrayElements(data, nullptr);
+    if (!bytes) return 0L;
+    StationTexture* tex = station_engine_load_texture_raw(
+            reinterpret_cast<StationEngine*>(handle),
+            reinterpret_cast<const uint8_t*>(bytes), width, height);
+    env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
+    return reinterpret_cast<jlong>(tex);
 }
 
 JNIEXPORT void JNICALL
@@ -198,6 +263,24 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*e
 }
 
 JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawTexturedMesh(JNIEnv* env, jobject /*thiz*/,
+                                                     jlong engineHandle, jlong meshHandle,
+                                                     jlong textureHandle,
+                                                     jfloatArray modelMatrix,
+                                                     jfloat r, jfloat g, jfloat b, jfloat a) {
+    if (!modelMatrix) return;
+    jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
+    if (!m) return;
+    station_engine_draw_textured_mesh(
+            reinterpret_cast<StationEngine*>(engineHandle),
+            reinterpret_cast<StationMesh*>(meshHandle),
+            reinterpret_cast<StationTexture*>(textureHandle),
+            reinterpret_cast<const float*>(m),
+            r, g, b, a);
+    env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawTranslucentMesh(JNIEnv* env, jobject /*thiz*/,
                                                         jlong engineHandle, jlong meshHandle,
                                                         jfloatArray modelMatrix, jint material) {
@@ -208,6 +291,25 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawTranslucentMesh(JNIEnv* env
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
             reinterpret_cast<const float*>(m),
+            static_cast<int32_t>(material)
+    );
+    env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawAdditiveMesh(JNIEnv* env, jobject /*thiz*/,
+                                                     jlong engineHandle, jlong meshHandle,
+                                                     jfloatArray modelMatrix,
+                                                     jfloat r, jfloat g, jfloat b, jfloat a,
+                                                     jint material) {
+    if (!modelMatrix) return;
+    jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
+    if (!m) return;
+    station_engine_draw_additive_mesh(
+            reinterpret_cast<StationEngine*>(engineHandle),
+            reinterpret_cast<StationMesh*>(meshHandle),
+            reinterpret_cast<const float*>(m),
+            r, g, b, a,
             static_cast<int32_t>(material)
     );
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);

@@ -14,6 +14,14 @@ class EngineJni {
         const val MATERIAL_PLAIN  = 0
         const val MATERIAL_NEBULA = 1
         const val MATERIAL_HEX    = 2
+
+        // E7.1 — sub-materials for the additive mesh pipeline. Plain = simple
+        // pass-through (vColor.rgb * pc.plasmaColor * vColor.a, premultiplied).
+        // Fire = Fresnel-soft-edge sphere with heat ramp + FBM turbulence,
+        // designed for 3D fireball explosions on this project's fixed
+        // pitch=π/2 camera.
+        const val ADDITIVE_PLAIN = 0
+        const val ADDITIVE_FIRE  = 1
     }
 
     private var engineHandle: Long = 0L
@@ -74,6 +82,33 @@ class EngineJni {
     }
 
     /**
+     * E8.3 — upload a PNG asset as a GPU texture. Returns 0 on failure
+     * (decode error, pool full, GPU upload error — see logcat). Decoded
+     * via stb_image; caller passes raw PNG bytes from Android assets.
+     * Lifetime tied to the engine — `unloadTexture` returns the slot.
+     */
+    fun loadTexture(data: ByteArray): Long {
+        if (engineHandle == 0L || data.isEmpty()) return 0L
+        return nativeLoadTexture(engineHandle, data)
+    }
+
+    /**
+     * E8.4 — upload a texture from raw RGBA8 bytes. `data.size` must equal
+     * `width * height * 4`. Use this for procedurally generated textures
+     * (no PNG round-trip needed). Returns 0 on failure.
+     */
+    fun loadTextureRaw(data: ByteArray, width: Int, height: Int): Long {
+        if (engineHandle == 0L || width <= 0 || height <= 0) return 0L
+        if (data.size != width * height * 4) return 0L
+        return nativeLoadTextureRaw(engineHandle, data, width, height)
+    }
+
+    fun unloadTexture(textureHandle: Long) {
+        if (engineHandle != 0L && textureHandle != 0L)
+            nativeUnloadTexture(engineHandle, textureHandle)
+    }
+
+    /**
      * E1.3 — upload a procedural mesh from raw vertex + index arrays.
      * Each vertex is 10 floats: `pos(3) + RGBA(4) + normal(3)`. Indices are
      * 16-bit (Kotlin Short maps to uint16 in C). Returns 0 on failure.
@@ -82,6 +117,17 @@ class EngineJni {
         if (engineHandle == 0L) return 0L
         if (vertices.isEmpty() || indices.isEmpty() || vertices.size % 10 != 0) return 0L
         return nativeLoadMeshRaw(engineHandle, vertices, indices)
+    }
+
+    /**
+     * E8.4 — same as `loadMeshRaw` but each vertex is 12 floats including
+     * UV at the end: `pos(3) + RGBA(4) + normal(3) + uv(2)`. Use this for
+     * UV-mapped procedural meshes (textured quads, sprite billboards).
+     */
+    fun loadMeshRawUV(vertices: FloatArray, indices: ShortArray): Long {
+        if (engineHandle == 0L) return 0L
+        if (vertices.isEmpty() || indices.isEmpty() || vertices.size % 12 != 0) return 0L
+        return nativeLoadMeshRawUV(engineHandle, vertices, indices)
     }
 
     // ---------------------------------------------------------------------------
@@ -124,6 +170,19 @@ class EngineJni {
     }
 
     /**
+     * E8.3 — draw an opaque mesh with a sampled texture. Mesh must have UVs
+     * (TEXCOORD_0 from glTF, or default (0,0) from procedural meshes — in
+     * which case the texture lookup degenerates to a single texel). Texture
+     * comes from `loadTexture(ByteArray)`. (r,g,b,a) tints the sampled
+     * colour multiplicatively; default white = no tint.
+     */
+    fun drawTexturedMesh(meshHandle: Long, textureHandle: Long, modelMatrix: FloatArray,
+                         r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f) {
+        if (engineHandle != 0L && meshHandle != 0L && textureHandle != 0L)
+            nativeDrawTexturedMesh(engineHandle, meshHandle, textureHandle, modelMatrix, r, g, b, a)
+    }
+
+    /**
      * E1.2 — submit a draw call on the translucent (alpha-blend) pipeline.
      * The mesh's per-vertex alpha controls transparency. Use this for soft
      * nebulae, shield domes, fade-out VFX — anything where the mesh has
@@ -132,6 +191,23 @@ class EngineJni {
     fun drawTranslucentMesh(meshHandle: Long, modelMatrix: FloatArray, material: Int = MATERIAL_PLAIN) {
         if (engineHandle != 0L && meshHandle != 0L)
             nativeDrawTranslucentMesh(engineHandle, meshHandle, modelMatrix, material)
+    }
+
+    /**
+     * E7 — submit a draw call on the additive (ONE/ONE) mesh pipeline.
+     * Per-vertex alpha controls glow falloff; (r,g,b,a) tints the result
+     * (rgb = colour, a = brightness scalar). `material` picks a fragment
+     * shader branch: ADDITIVE_PLAIN passes per-vertex colour through,
+     * ADDITIVE_FIRE renders a fireball-style sphere (heat-ramp + FBM
+     * turbulence + Fresnel-like edge soft-fade). Used for fireballs,
+     * plasma laser beams, electric arcs — anything emissive built from
+     * real geometry.
+     */
+    fun drawAdditiveMesh(meshHandle: Long, modelMatrix: FloatArray,
+                         r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f,
+                         material: Int = ADDITIVE_PLAIN) {
+        if (engineHandle != 0L && meshHandle != 0L)
+            nativeDrawAdditiveMesh(engineHandle, meshHandle, modelMatrix, r, g, b, a, material)
     }
 
     fun drawObjectFrameMesh(
@@ -230,6 +306,10 @@ class EngineJni {
     private external fun nativeLoadMeshColored(handle: Long, data: ByteArray, r: Float, g: Float, b: Float): Long
     private external fun nativeUnloadMesh(engineHandle: Long, meshHandle: Long)
     private external fun nativeLoadMeshRaw(handle: Long, vertices: FloatArray, indices: ShortArray): Long
+    private external fun nativeLoadMeshRawUV(handle: Long, vertices: FloatArray, indices: ShortArray): Long
+    private external fun nativeLoadTexture(handle: Long, data: ByteArray): Long
+    private external fun nativeLoadTextureRaw(handle: Long, data: ByteArray, width: Int, height: Int): Long
+    private external fun nativeUnloadTexture(engineHandle: Long, textureHandle: Long)
     private external fun nativeBeginScene(handle: Long)
     private external fun nativeDrawMesh(engineHandle: Long, meshHandle: Long, modelMatrix: FloatArray)
     private external fun nativeDrawPickableMesh(
@@ -255,6 +335,20 @@ class EngineJni {
         engineHandle: Long,
         meshHandle: Long,
         modelMatrix: FloatArray,
+        material: Int,
+    )
+    private external fun nativeDrawTexturedMesh(
+        engineHandle: Long,
+        meshHandle: Long,
+        textureHandle: Long,
+        modelMatrix: FloatArray,
+        r: Float, g: Float, b: Float, a: Float,
+    )
+    private external fun nativeDrawAdditiveMesh(
+        engineHandle: Long,
+        meshHandle: Long,
+        modelMatrix: FloatArray,
+        r: Float, g: Float, b: Float, a: Float,
         material: Int,
     )
     private external fun nativeDrawObjectFrameMesh(

@@ -128,6 +128,11 @@ class MainActivity : AppCompatActivity() {
     // of a filled blue wash. Interior is fully transparent so the central
     // turret stays visible inside the shield.
     private var domeMembraneHandle: Long = 0L
+    // E7.1 — unit Y-axis-aligned sphere for 3D fireball explosions, drawn
+    // through the additive pipeline with material=ADDITIVE_FIRE. Y-axis
+    // alignment is required: the fragment shader's Fresnel-like fade uses
+    // abs(vNormal.y) under this project's fixed pitch=π/2 camera.
+    private var fireballMeshHandle: Long = 0L
     // Static translucent scene (background nebulae) — captured once in
     // setupBackgroundNebulae so buildScene can compose it with per-frame
     // dynamic translucent objects (currently just the shield dome).
@@ -176,6 +181,31 @@ class MainActivity : AppCompatActivity() {
         val tintR: Float = 1f, val tintG: Float = 1f, val tintB: Float = 1f, val tintA: Float = 1f,
     )
     private val flashes: MutableList<Flash> = mutableListOf()
+
+    /**
+     * E7.1 — 3D fireball explosion. Spawned by AoE-class events (heavy cannon
+     * splash, EXPLOSIVE asteroid death) instead of a flat plasma billboard.
+     * Renders as a Y-axis-aligned UV-sphere through the additive pipeline
+     * with the fire-material shader branch (`abs(vNormal.y)` Fresnel + heat
+     * ramp + FBM turbulence). `baseRadius` matches the AoE damage radius.
+     *
+     * The scene generator drives three curves over life (t = age/maxLife):
+     *  - scale: ease-out quadratic (fast start, asymptotic at end)
+     *  - colour: lerp FIREBALL_TINT_START → FIREBALL_TINT_END
+     *  - brightness: sqrt(1-t) (holds longer initially so the colour shift
+     *    stays visible as the ball cools)
+     *
+     * `intensity` is a per-event volume knob: future callers (smaller pops,
+     * bigger climactic blasts) can pass <1 or >1 to scale the whole curve
+     * without touching the constants.
+     */
+    private data class Fireball(
+        val x: Float, val z: Float,
+        var life: Float, val maxLife: Float,
+        val baseRadius: Float,
+        val intensity: Float = 1f,
+    )
+    private val fireballs: MutableList<Fireball> = mutableListOf()
     private data class Asteroid(
         val xPos: Float,
         var zPos: Float,
@@ -326,6 +356,11 @@ class MainActivity : AppCompatActivity() {
         const val WAVE_BREAK_SEC:    Float = 2.0f
         const val FLASH_LIFE_SEC:    Float = 0.25f
         const val FLASH_HALF:        Float = 0.20f
+        // E7.1 — 3D fireball explosion (AoE hits, EXPLOSIVE asteroid deaths).
+        // Longer than the regular flash because it's a more substantial event
+        // and the additive sphere needs time for the FBM turbulence to read
+        // as fire instead of a static blob.
+        const val FIREBALL_LIFE_SEC: Float = 0.50f
         // M7.1 VFX — turret muzzle, projectile trail, AoE ring.
         const val MUZZLE_FLASH_LIFE: Float = 0.08f
         const val MUZZLE_FLASH_HALF: Float = 0.13f
@@ -341,10 +376,15 @@ class MainActivity : AppCompatActivity() {
         // const FloatArray in companion objects.
         val FLASH_TINT_MUZZLE     = floatArrayOf(1.00f, 0.95f, 0.70f, 1.00f)  // warm white-yellow
         val FLASH_TINT_TRAIL      = floatArrayOf(1.00f, 0.80f, 0.45f, 0.85f)  // warm trail, slightly dimmer
-        val FLASH_TINT_EXPLOSION  = floatArrayOf(1.00f, 0.50f, 0.15f, 1.00f)  // orange-red AoE
         val FLASH_TINT_ENERGY     = floatArrayOf(0.45f, 0.85f, 1.00f, 1.10f)  // cyan electric, slightly brighter
         val FLASH_TINT_DEATH      = floatArrayOf(1.00f, 0.85f, 0.40f, 1.00f)  // warm yellow burst
         val FLASH_TINT_SHIELD     = floatArrayOf(0.35f, 0.75f, 1.00f, 1.00f)  // blue shield deflection
+        // E7.1 polish — fireball colour curve. Lerp start → end over life
+        // gives a "hot fresh blast → cooling embers" read instead of a
+        // single static orange. Brightness is handled separately via the
+        // pc.plasmaColor.a scalar in buildScene.
+        val FIREBALL_TINT_START   = floatArrayOf(1.00f, 0.65f, 0.20f)  // saturated forge-orange
+        val FIREBALL_TINT_END     = floatArrayOf(0.90f, 0.18f, 0.05f)  // deep dying-ember red
         // Reload bar — strip on the lower part of the platform (the upper part
         // is overlapped by the ЩИТ button overlay, which composites on top of
         // the engine surface, so a bar placed there gets hidden). Anchored
@@ -954,6 +994,54 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * E7.1 — procedural UV-sphere for the 3D fireball. Y-axis aligned (poles
+     * at ±Y) so the fragment shader's `abs(vNormal.y)` Fresnel reads as
+     * "facing camera" under this project's pitch=π/2 camera (camera looks
+     * along ±Y, see Camera::reset). Per-vertex colour white and alpha 1 —
+     * tint and overall brightness come from per-draw `pc.plasmaColor`.
+     * Default 12×16 = 384 tris (under 65k uint16 index ceiling, cheap).
+     */
+    private fun buildFireballSphereMesh(stacks: Int = 12, slices: Int = 16): Long {
+        val nVerts = (stacks + 1) * (slices + 1)
+        val vertices = FloatArray(nVerts * 10)
+        var off = 0
+        for (i in 0..stacks) {
+            val theta = i.toDouble() * Math.PI / stacks
+            val sinT = kotlin.math.sin(theta).toFloat()
+            val cosT = kotlin.math.cos(theta).toFloat()
+            for (j in 0..slices) {
+                val phi = j.toDouble() * 2.0 * Math.PI / slices
+                val sinP = kotlin.math.sin(phi).toFloat()
+                val cosP = kotlin.math.cos(phi).toFloat()
+                val x = sinT * cosP
+                val y = cosT
+                val z = sinT * sinP
+                vertices[off + 0] = x
+                vertices[off + 1] = y
+                vertices[off + 2] = z
+                vertices[off + 3] = 1f; vertices[off + 4] = 1f; vertices[off + 5] = 1f
+                vertices[off + 6] = 1f
+                vertices[off + 7] = x; vertices[off + 8] = y; vertices[off + 9] = z
+                off += 10
+            }
+        }
+        val nTris = stacks * slices * 2
+        val indices = ShortArray(nTris * 3)
+        var idx = 0
+        for (i in 0 until stacks) {
+            for (j in 0 until slices) {
+                val a = (i * (slices + 1) + j).toShort()
+                val b = (i * (slices + 1) + j + 1).toShort()
+                val c = ((i + 1) * (slices + 1) + j).toShort()
+                val d = ((i + 1) * (slices + 1) + j + 1).toShort()
+                indices[idx++] = a; indices[idx++] = c; indices[idx++] = b
+                indices[idx++] = b; indices[idx++] = c; indices[idx++] = d
+            }
+        }
+        return engineView.engine.loadMeshRaw(vertices, indices)
+    }
+
+    /**
      * Generate the background nebula meshes once and submit them as
      * translucent scene objects. Set once at engine setup; never touched after,
      * so menu / mission select / game / win-lose all share the same backdrop.
@@ -1006,6 +1094,9 @@ class MainActivity : AppCompatActivity() {
             midR        = 0.80f,
             outerR      = 1.00f,
         )
+        // E7.1 — load the fireball UV-sphere once. Drawn through the additive
+        // pipeline with ADDITIVE_FIRE material in spawnAoeRing.
+        fireballMeshHandle = buildFireballSphereMesh()
         // Initial assignment so menu / mission-select scenes (which don't run
         // buildScene) still show the nebulae backdrop.
         engineView.translucentObjects = nebulaeTranslucent
@@ -1201,6 +1292,44 @@ class MainActivity : AppCompatActivity() {
         }
         engineView.plasmaBillboards   = flashBillboards
         engineView.translucentObjects = nebulaeTranslucent + buildShieldDome()
+
+        // E7.1 — 3D fireball explosions. Y-axis-aligned UV-sphere through the
+        // additive pipeline with the fire-material branch. Three curves on
+        // t = age/maxLife give the explosion a real shape:
+        //   • scale: ease-out quadratic 0.4 → 1.4 × baseRadius (fast initial
+        //     blast, asymptotic settle — shockwaves decelerate as they
+        //     expand, mirrored in the curve `1 - (1-t)²`).
+        //   • colour: lerp FIREBALL_TINT_START → FIREBALL_TINT_END (forge
+        //     orange → dying-ember red) so the ball visibly cools.
+        //   • brightness: sqrt(1-t) — holds longer than linear at the start
+        //     so the colour shift remains readable; pinches off near end.
+        // Depth-test on / write off (E7) means the fireball is occluded by
+        // closer opaque geometry (asteroids, turrets) but multiple
+        // overlapping fireballs accumulate through additive blend.
+        val fireballAdditive = if (fireballs.isEmpty() || fireballMeshHandle == 0L) emptyList()
+        else {
+            val tStart = DraftCombat.FIREBALL_TINT_START
+            val tEnd   = DraftCombat.FIREBALL_TINT_END
+            fireballs.mapIndexed { i, fb ->
+                val t = (1f - fb.life / fb.maxLife).coerceIn(0f, 1f)
+                val u = 1f - t
+                val scaleCurve = 1f - u * u                       // ease-out quad
+                val s = fb.baseRadius * (0.4f + scaleCurve * 1.0f)
+                val tintR = tStart[0] + (tEnd[0] - tStart[0]) * t
+                val tintG = tStart[1] + (tEnd[1] - tStart[1]) * t
+                val tintB = tStart[2] + (tEnd[2] - tStart[2]) * t
+                val brightness = kotlin.math.sqrt(u) * fb.intensity
+                SceneObject(
+                    id               = 800 + i,
+                    meshHandle       = fireballMeshHandle,
+                    x                = fb.x, y = 0f, z = fb.z,
+                    scale            = s,
+                    tintR            = tintR, tintG = tintG, tintB = tintB, tintA = brightness,
+                    additiveMaterial = EngineJni.ADDITIVE_FIRE,
+                )
+            }
+        }
+        engineView.additiveObjects = fireballAdditive
     }
 
     /**
@@ -1252,28 +1381,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Spawn an explosion at (cx, cz) sized to `radius`. Originally (M7.1) this
-     * was a centre-flash plus a ring of perimeter particles to communicate the
-     * AoE radius before the plasma soft-fade existed. After E4 the centre
-     * flash is already a circular soft glow with heat-ramp + FBM turbulence,
-     * so the perimeter ring is redundant — it just additively saturates the
-     * core into a flat orange wash. Now: one big billboard scaled to the AoE
-     * radius. The plasma fragment branch (E4) gives the warm-core/orange-rim
-     * look natively; M7.1's grow-over-life animation (s ≈ 0.6 → 1.4 × halfMax)
-     * already produces an "expanding shockwave" feel from a single billboard.
+     * Spawn an explosion at (cx, cz) sized to `radius`. Was a single plasma
+     * billboard with E4 heat-ramp; now (E7.1) a 3D fireball mesh through the
+     * additive pipeline with the fire-material shader. The Y-axis-aligned
+     * UV-sphere gives a true volumetric look with Fresnel-soft silhouette,
+     * heat ramp from white-hot core to orange edge, and animated FBM
+     * turbulence — closer to a real fire than the flat billboard ever
+     * managed. Scale grows 0.6 → 1.2 over the lifetime (shockwave
+     * expansion); alpha fades to 0 so the ball dissipates instead of
+     * snapping out. Also depth-tests against gameplay geometry, so an
+     * explosion partly behind an asteroid is correctly occluded.
      */
     private fun spawnExplosion(cx: Float, cz: Float, radius: Float) {
-        val t = DraftCombat.FLASH_TINT_EXPLOSION
-        flashes.add(Flash(
+        fireballs.add(Fireball(
             x = cx, z = cz,
-            life = DraftCombat.FLASH_LIFE_SEC,
-            maxLife = DraftCombat.FLASH_LIFE_SEC,
-            // Quad spans ±halfMax * scale (where scale animates 0.6 → 1.4).
-            // halfMax = radius makes the visible glow inscribe the AoE bound
-            // at the start and overshoot it slightly at peak — reads as the
-            // shockwave catching up to the damage radius.
-            halfMax = radius,
-            tintR = t[0], tintG = t[1], tintB = t[2], tintA = t[3],
+            life = DraftCombat.FIREBALL_LIFE_SEC,
+            maxLife = DraftCombat.FIREBALL_LIFE_SEC,
+            baseRadius = radius,
         ))
     }
 
@@ -1696,6 +1820,7 @@ class MainActivity : AppCompatActivity() {
         currentWaveSpawned = 0
         waveBreakTimer     = 0f
         flashes.clear()
+        fireballs.clear()
         // Apply upgrade levels — values frozen for the duration of this run.
         effectiveMainWeaponDamage = UpgradeCatalog.mainWeaponDamageAt(gameProgress.mainWeaponDamageLevel)
         effectiveTurretDamage     = UpgradeCatalog.sideTurretDamageAt(gameProgress.sideTurretDamageLevel)
@@ -2341,6 +2466,13 @@ class MainActivity : AppCompatActivity() {
                 val f = flashIter.next()
                 f.life -= dt
                 if (f.life <= 0f) flashIter.remove()
+            }
+            // E7.1 — same lifecycle for 3D fireballs.
+            val fireballIter = fireballs.iterator()
+            while (fireballIter.hasNext()) {
+                val fb = fireballIter.next()
+                fb.life -= dt
+                if (fb.life <= 0f) fireballIter.remove()
             }
 
             // Move asteroids down at their own speed (mission baseline × type

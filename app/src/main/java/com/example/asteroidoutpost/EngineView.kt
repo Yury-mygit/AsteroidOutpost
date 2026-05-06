@@ -47,6 +47,24 @@ class EngineView @JvmOverloads constructor(
     @Volatile
     var translucentObjects: List<SceneObject> = emptyList()
 
+    /**
+     * E7 — additive SceneObjects rendered through the ONE/ONE additive
+     * pipeline. Per-vertex alpha controls glow falloff; per-object tint
+     * (SceneObject.tintR/G/B/A) recolours and scales brightness. Used for
+     * fireball explosions, plasma laser beams, electric arcs.
+     */
+    @Volatile
+    var additiveObjects: List<SceneObject> = emptyList()
+
+    /**
+     * E8 — textured opaque SceneObjects rendered through drawTexturedMesh.
+     * Each carries a textureHandle from `loadTexture` / `loadTextureRaw`;
+     * the fragment shader samples the texture at vUV. Used for textured
+     * panels, HUD icons, decals, asteroid surfaces.
+     */
+    @Volatile
+    var texturedObjects: List<SceneObject> = emptyList()
+
     /** Engine render-loop FPS (sliding 1-sec window, updated by RenderThread). */
     @Volatile
     var fps: Float = 0f
@@ -261,7 +279,7 @@ class EngineView @JvmOverloads constructor(
     }
 
     fun submitCurrentScene() {
-        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects)
+        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects)
     }
 
     private fun collectScreenFrames(objects: List<SceneObject>): List<ScreenFrame> {
@@ -307,7 +325,7 @@ class EngineView @JvmOverloads constructor(
             var fpsWindowStartNs = System.nanoTime()
             while (running) {
                 val currentScene = engineView.scene
-                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects)
+                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects)
                 engine.renderFrame()
                 engineView.publishScreenFrames(engineView.collectScreenFrames(currentScene))
 

@@ -1,7 +1,7 @@
 # Asteroid Outpost — Концепция и состояние
 
 > Живой документ. Обновляй после каждой значимой сессии.
-> Последнее обновление: **2026-05-05** (after E6 time push-constant; E7-E10 plan rescheduled — Additive Mesh / UV+textures / Particles / Motion blur)
+> Последнее обновление: **2026-05-07** (E8 UV + textures landed: vertex UV attribute + sampler descriptor set + load_texture/load_texture_raw API + drawTexturedMesh route + textured fragment branch — engine wave verified end-to-end via two procedural smoke-test patches, then patches removed for production)
 
 ## Концепция
 
@@ -133,8 +133,9 @@
 | E5.1 | Per-billboard plasma tint (RGBA через push-constant) | engine wave   | ✅ **Готово** (2026-05-05) — `drawPlasmaBillboard(...,r,g,b,a)`, `pc.plasmaColor` в шейдере, 6 per-event тинтов: muzzle/trail/explosion/energy/death/shield |
 | E5.2 | Non-uniform billboard scale + billboardMatrix fix | engine wave   | ✅ **Готово** (2026-05-05) — диагностировали баг матрицы (X-Z квад мапился в горизонтальную плоскость, не на экран); исправили col 1↔2 swap в `Camera::billboardMatrix`; добавили `scaleH, scaleV` в C API. Вспышки теперь true circles, не horizontal stripes — ретроспективно фиксит intended behaviour E2.1 soft-fade и E4 heat-ramp. |
 | E6 | Time push-constant (animated FBM)             | engine wave        | ✅ **Готово** (2026-05-05) — `float time` в `PushConstantData` (100 байт), `m_renderStart` baseline в `VulkanContext`, elapsed seconds пишется в каждый push-constant. Plasma turbulence warpает по времени (огонь шевелится), нéбулы дрейфят медленным потоком. |
-| E7 | Additive Mesh Pipeline (3D огненные шары / лазеры) | engine wave   | 🟡 **Запланировано** — новый pipeline принимает произвольный 3D-меш через ONE/ONE additive blend (как plasma но не biллборд). Разблокирует настоящий 3D огненный шар взрыва, плазменные лучи лазеров, электроразряды, плазменные двигатели для g3. |
-| E8 | UV + textures                                 | engine wave        | 🟡 **Запланировано** — большой лифт: новый vertex attribute UV, sampler descriptor, `load_texture` + `draw_textured_mesh`. Спрайтовые анимированные взрывы, реальные текстуры на астероидах, иконки в HUD, decals. AAA-mobile уровень визуала. |
+| E7 | Additive Mesh Pipeline (3D огненные шары / лазеры) | engine wave   | ✅ **Готово** (2026-05-06) — 7-й Vulkan pipeline (`m_additivePipeline`) с ONE/ONE blend для произвольных 3D мешей, depth-test on read-only / depth-write off. C API/JNI/Kotlin route + Scene `additiveObjects` параллельно `translucentObjects`. Plain-additive ветка во фрагменте под флаг `pc.tint.w`. Разблокирует настоящие 3D fireball'ы, плазменные лучи лазеров, электроразряды. |
+| E7.1 | 3D Fireball (первый consumer E7)            | engine wave        | ✅ **Готово** (2026-05-06) — процедурная UV-сфера через `loadMeshRaw`, fire-material шейдер branch (`abs(vNormal.y)` Fresnel + heat-ramp + animated FBM), runtime `Fireball` data class заменил плоские плазма-биллборды у AoE-взрывов. Polish: ease-out quad scale, лерп цвета orange→red, sqrt brightness fade. |
+| E8 | UV + textures                                 | engine wave        | ✅ **Готово** (2026-05-07) — vertex UV attribute (location 3) + descriptor set 1 (combined image sampler) + `Texture` C++ class + 4 API: `load_texture(png_bytes)`, `load_texture_raw(rgba8, w, h)`, `load_mesh_raw_uv` (12 floats/vertex), `draw_textured_mesh`. Текстурированный fragment branch под `pc.textureMode` флаг. Verified через два procedural smoke-test patches (rock noise + cyan icon disc), затем patches удалены. Разблокирует sprite-атласы, текстуры на астероидах, иконки в HUD, decals. |
 | E9 | Native particle system                        | engine wave        | 🟡 **Запланировано** — native instanced particle buffer + один draw-call на всю систему. Perf-оптимизация под плотные волны (искры от взрывов, дым-шлейфы, обломки). |
 | E10 | Motion blur post-process                     | engine wave        | 🟡 **Запланировано** — full-screen motion blur с velocity-buffer attachment + post-process pass. Решает motion aliasing универсально (быстрые пули перестают мерцать на 60Hz, любое движение становится плавным). После E9 потому что это финальная полировка движущихся эффектов; mobile-perf нужно валидировать. |
 
@@ -487,9 +488,148 @@
 - 🟡 Animated nebula colour shifts (gradient evolves over time).
 - 🟡 Twinkling stars (per-vertex hash + sin(time + hash)).
 
+### E7 — Additive Mesh Pipeline (завершено 2026-05-06)
+
+Триггер: до E7 additive blend (ONE/ONE) был доступен только биллбордам через `m_plasmaPipeline`. Все эмиссивные эффекты — взрывы, муззл-флэш, попадания — рендерились плоскими камерно-выровненными квадами. Для настоящего 3D огненного шара взрыва, плазменного луча лазера (третье оружие из `idea.txt` task 10), электроразрядов, плазменных двигателей g3 нужен additive blend на произвольной геометрии.
+
+Сделано:
+- ✅ **7-й Vulkan pipeline `m_additivePipeline`** в `VulkanContext`. ONE/ONE color blend (`srcColorBlendFactor=ONE / dstColorBlendFactor=ONE / colorBlendOp=ADD`), depth-test ON read-only (`depthCompareOp=LESS, depthWriteEnable=FALSE`). Отличается от plasma-биллбордов которые имеют depth-test OFF (E5.2-followup): plasma-биллборды — pure overlay VFX, additive-меши — настоящая 3D геометрия которая должна корректно скрываться непрозрачными астероидами/турелями впереди. Создание/уничтожение симметрично прописано в `createPipeline`/`destroyPipelineInfra`.
+- ✅ **`m_additiveDrawList`** + чистка в `beginScene`. Render-loop step между translucent и plasma билбордами: `opaque → system billboards → translucent → additive mesh → plasma billboards → frame`. Логика: additive overlay сидит над translucent (т.к. emissive, не должен скрываться альфой нéбул) и под plasma-биллбордами (т.к. depth-tested против depth-test-off билбордов).
+- ✅ **C API `station_engine_draw_additive_mesh(engine, mesh, mat4, r, g, b, a, material)`** + JNI `nativeDrawAdditiveMesh` + Kotlin `EngineJni.drawAdditiveMesh(handle, mat4, r, g, b, a, material)`. Тинт пробрасывается через переиспользованный `pc.plasmaColor` (тот же канал что у E5.1 для plasma-биллбордов — экономим push-constant байты, push-const остался 100 байт). `material` поле encode-ится в `cmd.tint[3]` (1.0f = plain, 2.0f = fire — подробнее в E7.1).
+- ✅ **Шейдер: новая ветка во фрагменте под `pc.tint.w >= 0.5`.** Plain-additive output: `outColor = vec4(vColor.rgb * pc.plasmaColor.rgb * vColor.a * pc.plasmaColor.a, vColor.a)` — premultiplied alpha (ONE/ONE blend игнорирует source alpha, так что видимый contribution = RGB*A; умножение alpha в RGB embed-ит falloff в итог). Меш-авторы кладут `A=1` в центрах свечения и `A=0` на краях для soft fade. Без отдельной material-логики ветка инфраструктурная — даёт чистый pass-through, конкретные эффекты (fire, beam, lightning) — material flags в `pc.tint.w`.
+- ✅ **Scene/EngineView wiring.** `SceneObject` расширен полями `tintR/G/B/A` (forwarded в `pc.plasmaColor` для additive route, ignored на opaque/translucent), `additiveMaterial: Int` (forwarded как material параметр). `EngineView.additiveObjects: List<SceneObject>` Volatile, параллельно `translucentObjects`. `submitScene` принимает `additiveObjects` параметр и итерирует через `engine.drawAdditiveMesh(...)`.
+- ✅ Build assembleDebug — зелёный, обе ABI.
+
+Принятые решения:
+- Reuse `pc.plasmaColor` (уже было выделено для E5.1 plasma-биллбордов), а не ввели отдельный `vec4 additiveColor` в push-const. Семантика того же поля: rgb = colour, a = brightness scalar — единое для всех additive-emissive путей.
+- Depth-test ON read-only — компромисс между "плоский billboard на оверлейном слое" (plasma-биллборды) и "полноценная opaque геометрия". Additive 3D-меш всё ещё emissive (не отбрасывает тени, не пишет в depth), но фрагменты, скрытые ближайшей opaque геометрией, отбрасываются — фаербол за астероидом частично перекрыт, как ожидаем.
+- Не объединили additive-меш и plasma-биллборд пайплайны (хотя оба ONE/ONE) — отличаются depth-test и наличием/отсутствием camera-billboard матрицы; render-loop логика разная.
+
+Что E7 разблокировал на будущее:
+- ✅ E7.1 — 3D fireball на AoE-взрывах (см. ниже).
+- 🟡 Плазменный луч лазера — цилиндр-меш с тинтом по типу события (третье оружие из `idea.txt` task 10).
+- 🟡 Электроразряды — zigzag mesh на `loadMeshRaw`, синий тинт.
+- 🟡 Плазменные двигатели для g3 — cone-mesh за каждым кораблём.
+- 🟡 Lightning bolts при impact'ах — generated zigzag.
+
+### E7.1 — 3D Fireball (завершено 2026-05-06)
+
+Триггер: AoE-взрывы (тяжёлая пушка + EXPLOSIVE-астероид при смерти) рендерились одной плоской плазма-биллбордой через E4 fire shader. Хотелось проверить новую E7-инфру на реальной фиче и заменить плоский диск на полноценный 3D огненный шар.
+
+Сделано:
+- ✅ **Material flag в `drawAdditiveMesh`.** Сигнатура расширена `material: Int = 0` (0 = plain, 1 = fire). Encode: `drawAdditiveMesh` пишет `cmd.tint[3] = 1.0f` для plain, `2.0f` для fire (вместо хардкода `pc.tint[3] = 1.0f` в render-loop). Render-loop теперь `memcpy(pc.tint, draw.tint, 16)` — материал пробрасывается через тот же tint канал. `EngineJni.ADDITIVE_PLAIN`/`ADDITIVE_FIRE` константы, `SceneObject.additiveMaterial: Int`.
+- ✅ **Fire-material шейдер бранч** под флаг `pc.tint.w >= 1.5`:
+  ```glsl
+  float facing = abs(vNormal.y);
+  vec3 hot  = vec3(1.0, 0.95, 0.70);
+  vec3 cool = vec3(1.0, 0.40, 0.08);
+  vec3 fireColor = mix(hot, cool, smoothstep(0.0, 1.0, 1.0 - facing));
+  vec2 fireWarp = vec2(pc.time * 1.0, pc.time * 0.7);
+  float n = fbm4(vWorldPos.xz * 6.0 + fireWarp);
+  float fire = 0.55 + n * 0.95;
+  float edgeFalloff = smoothstep(0.0, 0.55, facing);
+  float a = vColor.a * edgeFalloff * pc.plasmaColor.a;
+  outColor = vec4(fireColor * pc.plasmaColor.rgb * fire * a, a);
+  ```
+  Ключевая идея: `abs(vNormal.y)` под фиксированную камеру проекта (pitch=π/2 → камера смотрит вдоль ±Y) даёт Fresnel-like factor — 1 в видимом центре сферы (нормали вдоль ±Y, лицом к камере), 0 на силуэте (нормали перпендикулярны view). Сфера читается ярким ядром с soft edge, без волюметрик-рейкастинга. Heat ramp перекрашивает от white-yellow в центре к orange к краю, FBM-турбулентность даёт shimmer (медленнее чем у plasma-биллбордов — `*1.0/0.7` против `*1.4/0.9`, потому что fireball дольше живёт). Ограничение: `abs(vNormal.y)` зашит под пэроект — для g3 с подвижной камерой нужно переходить на real view direction через UBO.
+- ✅ **Процедурная UV-sphere** — `MainActivity.buildFireballSphereMesh()`. 12 широт × 16 долгот = 221 верт, 384 трианглей, 1152 индекса (под 65k uint16 limit). Y-axis aligned (полюса на ±Y), per-vertex color white(1,1,1) + alpha=1 (тинт даёт `pc.plasmaColor`), normals = unit position (для unit-радиус сферы). Грузится один раз в `setupBackgroundNebulae()` (там же где остальные процедурные меши).
+- ✅ **Runtime: `Fireball` data class** в MainActivity. Поля: `x, z, life, maxLife, baseRadius, intensity`. Поля цвета убраны после polish-итерации — цвет теперь curve, а не статика. `fireballs: MutableList<Fireball>` параллельно `flashes`. Tick: декремент `life`, cull при `life <= 0`. `startMission` чистит. `FIREBALL_LIFE_SEC = 0.5` (вдвое дольше FLASH_LIFE_SEC потому что событие более substantial и FBM-турбулентности нужно время чтобы прочитаться).
+- ✅ **`spawnExplosion` переписан**: вместо плазма-биллборды добавляет `Fireball` в список. Никаких других изменений в коллизионных коллбеках.
+- ✅ **`buildScene` маппит fireballs в `engineView.additiveObjects`** с тремя curve'ами на `t = age/maxLife`:
+  - **Scale** ease-out quadratic: `0.4 + (1 - (1-t)²) × 1.0` × baseRadius → быстрый старт, асимптотический фронт. Имитирует deceleration shockwave (физически правильнее было бы Sedov-Taylor `t^(2/5)`, но для VFX ease-out читается чище и без бесконечной скорости в нуле).
+  - **Colour** linear lerp `FIREBALL_TINT_START → FIREBALL_TINT_END`: `(1.00, 0.65, 0.20)` (saturated forge-orange) → `(0.90, 0.18, 0.05)` (deep dying-ember red). Шейдер сам каждый кадр перемножает `pc.plasmaColor.rgb` в heat-ramp, цвет shift-ится без шейдер-правок.
+  - **Brightness** sqrt-fade: `√(1-t) × intensity`. Линейный fade был слишком быстрым — к моменту когда цвет дойдёт до тёмно-красного (t≈0.7-0.8), ball уже еле виден и переход не успевает прочитаться. sqrt держит яркость дольше в начале, гасит к концу.
+- ✅ **Удалён `FLASH_TINT_EXPLOSION`** (dead code после E7.1).
+
+Принятые решения:
+- Material flag (1=fire) кодируется в `pc.tint[3]` (1.0f / 2.0f) вместо отдельного push-const поля — экономия байт, плюс симметрия с E3.1 паттерном (material flags через `pc.tint.y/z` для translucent). Если material'ов additive станет >2, можно будет ввести отдельное `additiveMaterial: float` поле в push-const.
+- Y-axis aligned mesh обязателен под текущую `abs(vNormal.y)` логику. На rotation Y mesh'а Fresnel пляшет; задокументировано в комментариях. Альтернатива (real view direction) — отложили до момента когда g3 будет переиспользовать E7.
+- ONE/ONE blend на сфере: cull mode = NONE (engine-wide), обе стороны draw'аются → центр получает 2× contribution бесплатно, плотность ядра растёт без второго шелла.
+- 12×16 — компромисс tris/качество. На быстром глазу разница с 24×32 не видна, но 4× меньше геометрии.
+- Color curve вынесена в Kotlin (per-frame в `buildScene`), не в шейдер. Шейдер не знает age конкретного fireball'а — только pc.time глобально. Раздельные fireball'ы с одинаковым возрастом должны выглядеть одинаково — это даёт Kotlin-side computation естественно.
+
+Что E7.1 разблокировал на будущее:
+- 🟡 Cyan additive sphere для ENERGY-астероида при смерти — переиспользует тот же mesh + другой тинт + другой material (нужен второй material — например ADDITIVE_ENERGY с холодным цветом и быстрее шевелящимся FBM).
+- 🟡 Per-event variable-intensity fireball'ы — `Fireball.intensity` поле уже есть, осталось разные spawner'ы (маленькая пушка → 0.6× intensity, climactic blast → 1.5×).
+- 🟡 Real view direction в Fresnel — открывает использование fire-material в g3.
+
+### E8 — UV + textures (завершено 2026-05-07)
+
+Триггер: до E8 геймплей упирался в потолок tinted-geometry. Все астероиды/пули/турели рендерились одноцветными моделями, иконки апгрейдов были цветными квадратиками, deграция базы (idea.txt task 4) была невозможна без текстур. Текстуры также — обязательная инфра под E9 particles (sprite-атласы) и под современные стандарты mobile-game визуала. Самый большой лифт за всё движковое, разбит на 4 подэтапа с верификацией на каждом.
+
+#### E8.1 — UV vertex attribute (завершено 2026-05-07)
+
+Сделано:
+- ✅ **`Vertex` struct расширен** `float uv[2]` (sizeof 40 → 48 байт). Все опаковые callsite используют `Vertex v{}` value-init, UV автоматически нулится; никаких brace-init с тремя полями.
+- ✅ **`Vertex::getAttributeDescriptions`** возвращает 4 attrs (вместо 3): новый attr 3 = `VK_FORMAT_R32G32_SFLOAT` на `offsetof(Vertex, uv)`.
+- ✅ **`GltfLoader::convertPrimitive`** парсит `TEXCOORD_0` accessor когда он в .glb присутствует, иначе fallback `(0, 0)`. Лог теперь выводит `uvs=file/default(0,0)` для диагностики.
+- ✅ **`station_engine_load_mesh_raw`** API стабилен (10 floats/vertex), внутренне явно нулит `v.uv = (0, 0)` для детерминированности. Все процедурные меши (soft-disk нéбулы, dome, fireball UV-sphere) работают без правок.
+- ✅ **Vertex shader**: новый `inUV` (location 3) → `vUV` (location 4) проброс к фрагменту.
+- ✅ **Fragment shader**: declared `vUV` (location 4), не используется в E8.1 — это backbone под E8.3.
+
+Принятые решения:
+- Backward-compat: оставили `loadMeshRaw(10-float)` как есть, добавили `loadMeshRawUV(12-float)` параллельно (E8.4). Существующие callers не сломались.
+- Vertex stride 48 байт — единый layout для всех пайплайнов, fragment branchится по material flag (а не по vertex layout).
+
+#### E8.2 — Texture infrastructure (завершено 2026-05-07)
+
+Сделано:
+- ✅ **`Texture` C++ класс** (`Texture.h/.cpp`): VkImage + VkDeviceMemory + VkImageView + VkSampler + per-texture VkDescriptorSet (set 1). Два пути создания: `createFromPixels(rgba8, w, h)` для процедурных и engine-default; `createFromPng(png_bytes, len)` через stb_image (`thirdparty/stb_image.h` уже был, активировал `STB_IMAGE_IMPLEMENTATION`). Полный upload cycle: staging buffer (HOST_VISIBLE) → VkImage (DEVICE_LOCAL, OPTIMAL tiling) → одноразовый command buffer выполняет layout transitions UNDEFINED→TRANSFER_DST→SHADER_READ_ONLY + `vkCmdCopyBufferToImage` → image view (RGBA8) → sampler (LINEAR, REPEAT, без anisotropy для mobile) → descriptor set из per-texture pool с заполненным `combinedImageSampler` write.
+- ✅ **CMakeLists**: `Texture.cpp` добавлен в build.
+- ✅ **Descriptor set 1 layout** (`m_textureSetLayout`): один `COMBINED_IMAGE_SAMPLER` binding 0, FRAGMENT_BIT.
+- ✅ **Texture pool** (`m_texturePool` VkDescriptorPool): 64 sampler-slots с `FREE_DESCRIPTOR_SET_BIT` (чтобы `Texture::destroy` мог вернуть set в пул).
+- ✅ **Pipeline layout** теперь принимает оба set layouts (set 0 UBO + set 1 texture). Все 7 pipelines автоматически подхватывают единый layout.
+- ✅ **Default white 1×1 texture** (`m_defaultWhiteTexture`) загружается в `createPipelineInfra` после UBO. Биндится один раз на старте `renderFrame` — descriptor sets персистентны в command buffer'е, untextured draws inheirit без per-pipeline rebind.
+- ✅ **Destroy path** правильный порядок: textures (через их pool) → pool → set 1 layout → UBO pool → set 0 layout → buffers.
+
+Принятые решения:
+- Один shared pipeline layout вместо per-pipeline разных — упрощает binding (`vkCmdBindDescriptorSets` без изменения layout). Cost: каждый pipeline видит set 1, даже если шейдер не семплит — но это бесплатно (просто слот в layout).
+- Per-texture descriptor set (а не bindless с descriptor indexing) — стандартно, work на всех Android Vulkan-устройствах без extension'ов. Bindless оставили в backlog если когда-то понадобится thousands-of-textures сцена.
+
+#### E8.3 — drawTexturedMesh + sampling shader (завершено 2026-05-07)
+
+Сделано:
+- ✅ **Texture pool** в VulkanContext (`m_textureSlots[kMaxTextures]`, `m_textureUsed`, размер совпадает с descriptor pool из E8.2). Методы `uploadTexture(png_bytes, length)` и `uploadTextureRaw(rgba8, w, h)` (E8.4) и `freeTexture(token)`.
+- ✅ **C API**: `station_engine_load_texture(png_bytes, length)` → `StationTexture*` opaque handle (parallel to `StationMesh*`). `station_engine_unload_texture(...)`. Новый `StationTexture` struct в `engine_api.cpp`.
+- ✅ **JNI + Kotlin**: `EngineJni.loadTexture(ByteArray): Long` + `unloadTexture(Long)`.
+- ✅ **`drawTexturedMesh`** полная цепочка C++ → C API → JNI → Kotlin. `DrawCommand.textureToken` поле; render-loop step после opaque draw — биндит set 1 на per-texture descriptor (вместо frame-default white), пушит `pc.textureMode = 1.0`, рисует через тот же `m_pipeline` что и обычный opaque mesh. После цикла re-binds default white set 1 для определённости downstream pipelines.
+- ✅ **Push-constant** расширен `float textureMode` (offset 100, total 104 байт, в пределах 128-байт минимума Vulkan).
+- ✅ **Шейдер** — fragment получил `layout(set=1, binding=0) uniform sampler2D uTex;` и `pc.textureMode`. Lit ветка теперь выбирает albedo: при `textureMode >= 0.5` → `texture(uTex, vUV).rgb * pc.plasmaColor.rgb` (тинт); иначе fallback на `vColor.rgb`. Освещение (diff/fill/rim/ambient) применяется к albedo одинаково.
+
+Принятые решения:
+- Textured draws идут через **тот же** opaque pipeline (`m_pipeline`) — без дублирования pipeline state. Различие только в `pc.textureMode` флаге и `set 1` binding.
+- `pc.plasmaColor` переиспользуется как textured tint (как в additive/plasma routes для тинта). Семантика того же поля: rgb = colour, a = brightness scalar.
+- Lit branch (с освещением) применяется к textured opaque → текстурированные астероиды/декорации получат N·L diffuse, fill, rim — реалистично. Если в будущем понадобится unlit textured (sprite-overlay / UI), добавим отдельный sub-material через `pc.textureMode = 2.0` или новый флаг.
+
+#### E8.4 — Procedural mesh/texture APIs + smoke test (завершено 2026-05-07)
+
+Сделано:
+- ✅ **`station_engine_load_mesh_raw_uv`** API через C/JNI/Kotlin (12 floats/vertex с UV — pos3 + rgba4 + normal3 + uv2). Параллельно существующему 10-float `load_mesh_raw`. JNI валидация `vlen % 12 == 0`.
+- ✅ **`station_engine_load_texture_raw`** API через C/JNI/Kotlin (RGBA8 bytes + width + height). Параллельно `load_texture(PNG)`. JNI проверяет `length == width * height * 4`.
+- ✅ **Procedural smoke-test patches** в `MainActivity.setupBackgroundNebulae`:
+  - `buildTexturedQuadMesh()` — UV-mapped X-Z plane quad (4 верт, 2 трианглей, corner UVs (0,0)→(1,1)).
+  - `generateRockTexture()` — 128×128 RGBA8 grayscale-noise tile, 3-octave value-noise (тот же `hash21` что в шейдере для визуального семейства), серо-теплый диапазон.
+  - `generateIconTexture()` — 64×64 cyan disc с soft rim, прозрачные углы.
+  - Два SceneObject теста: rock-patch на `(-1.5, 0, 6.0)` scale 0.55 (UV asymmetry test), icon-disc на `(1.85, 0, 8.6)` scale 0.30 (UI-position).
+- ✅ **`SceneObject.textureHandle`** field, **`EngineView.texturedObjects`** Volatile list, **`submitScene` route** через `drawTexturedMesh`.
+- ✅ **Verified end-to-end**: оба patches видимы на скриншоте (rock — серо-фиолетовый шум-квад слева в верхней зоне, icon — яркий cyan disc в правом верху). Texture sampling работает, descriptor set 1 ротация работает, UV interpolation работает.
+- ✅ **Patches удалены** после верификации (decoration не нужен в production). Engine-side инфра (loadTexture/loadTextureRaw/loadMeshRawUV/drawTexturedMesh/SceneObject.textureHandle/EngineView.texturedObjects) сохранена для реальных consumers.
+
+Принятые решения:
+- Оба теста — процедурные (никаких real ассетов), потому что .glb с UV-разметкой и PNG-ассеты ещё не готовы. Это даёт чистую E8 инфра-верификацию без ассет-pipeline зависимостей.
+- Test patches на permanent display (не за debug-флагом) — упрощает отладку pipeline'а в любом state. После верификации просто удалили.
+- Lit branch dim'ит rock-patch (N·L diffuse + cool ambient) — это _правильное_ поведение для opaque textured 3D, дает реалистичный look для будущих textured астероидов. Если для UI/sprite понадобится unlit — добавим sub-material позже.
+
+Что E8 разблокировал на будущее:
+- 🟡 Real consumers: textured астероиды (требует UV-разметку .glb в Blender), PNG-ассеты иконок апгрейдов, sprite-атласы для анимированных взрывов (UV-shift по time).
+- 🟡 E9 (particles) sprite-атласы — теперь возможны.
+- 🟡 E10 (motion blur) переиспользует sampler descriptor infra от E8.
+- 🟡 LUT (color grading), envmaps, любой shader lookup table — общий путь открыт.
+- 🟡 Decals на повреждённой базе (idea.txt task 4) — projector-style mesh с прозрачным PNG.
+
 ## Бэклог по движку (после E10)
 
-E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны, E4 — plasma flash polish (огонь вместо квадратов + фикс soft-fade no-op), E5.1 — per-billboard plasma tint, E5.2 — billboard matrix fix + non-uniform scale, E6 — time push-constant. Активные запланированные волны: **E7 (Additive Mesh) → E8 (UV+textures) → E9 (Particles) → E10 (Motion blur)** — детали в milestone-таблице выше. Что НЕ запланировано (подумать когда понадобится):
+E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны, E4 — plasma flash polish (огонь вместо квадратов + фикс soft-fade no-op), E5.1 — per-billboard plasma tint, E5.2 — billboard matrix fix + non-uniform scale, E6 — time push-constant, E7 — additive mesh pipeline (3D ONE/ONE для произвольных мешей), E7.1 — 3D fireball на AoE-взрывах, E8 — UV + textures (vertex UV, sampler descriptor set, load_texture/load_texture_raw/load_mesh_raw_uv/draw_textured_mesh API). Активные запланированные волны: **E9 (Particles) → E10 (Motion blur)** — детали в milestone-таблице выше. Что НЕ запланировано (подумать когда понадобится):
 
 - **Procedural-shader варианты для нéбул.** Текущий нéбул = FBM domain-warped soft-disk (E3.2). Можно ещё богаче: multi-color gradients, nebula-specific noise types. Дешевле всего через E8 (текстуры с запечённым шумом).
 - **Скайбокс / starfield с шириной.** Сейчас звёзды — point-list, без вариаций яркости/цвета. После E8 можно сделать звёзды через текстурированные quads с per-vertex-twinkle.
@@ -508,6 +648,9 @@ E1 закрыл базовую прозрачность и процедурны�
 Закрытые в E5.2: ✅ billboard matrix bug fix + non-uniform scale — `Camera::billboardMatrix` swapped col 1↔2 чтобы model.z (а не model.y) маппился на screen-vertical; X-Z квады теперь screen-aligned, вспышки стали true circles вместо horizontal stripes; добавлен `scaleH, scaleV` через C API → JNI → Kotlin для streak-эффектов.
 Закрытые в E5.2-followup: ✅ plasma depth test off — после E5.2 круглый взрыв на y=0 заслонялся 3D астероидным мешем (model.y∈[-1,+1] → часть астероида ближе к камере чем плоскость flash). Изменили plasma pipeline `depthTestEnable VK_TRUE → VK_FALSE` (`compareOp LESS_OR_EQUAL → ALWAYS`); вся plasma-VFX теперь честно overlay-режим как и должно быть для аддитивных эффектов.
 Закрытые в E6: ✅ time push-constant — `float time` (offset 96) в `PushConstantData`, `std::chrono::steady_clock` baseline в `VulkanContext`, elapsedSec пишется в каждый push в `renderFrame`; шейдер использует `pc.time` для warp-а FBM в plasma branch (огонь живой), и для медленного дрейфа нéбул (космический газ ползёт). Инфраструктура time push-const разблокирует будущие animated procedural effects (импульсация щита, бегущие электроразряды и т.п.).
+Закрытые в E7: ✅ 7-й Vulkan pipeline `m_additivePipeline` для 3D ONE/ONE additive mesh draws (depth-test on read-only); `station_engine_draw_additive_mesh` через C/JNI/Kotlin; `SceneObject.tintR/G/B/A` + `additiveMaterial`; `EngineView.additiveObjects`. Plain-additive шейдер ветка под `pc.tint.w >= 0.5` — разблокирует 3D огненные шары, плазменные лучи, электроразряды.
+Закрытые в E7.1: ✅ Material flag в `drawAdditiveMesh` (закодирован в `cmd.tint[3]`: 1.0=plain, 2.0=fire); fire-material шейдер ветка с `abs(vNormal.y)` Fresnel + heat-ramp + animated FBM; процедурная UV-sphere через `loadMeshRaw`; `Fireball` data class + curve-driven анимация в `buildScene` (ease-out quad scale, color lerp orange→red, sqrt brightness fade).
+Закрытые в E8: ✅ Vertex UV attribute (`Vertex::uv`, location 3, format VK_FORMAT_R32G32_SFLOAT); `Texture` C++ класс (VkImage + sampler + per-texture descriptor set); descriptor set 1 layout (combined image sampler) + shared pipeline layout; default 1×1 white texture loaded at engine init и biнded на старте `renderFrame`; `station_engine_load_texture(png)` + `load_texture_raw(rgba8)` + `load_mesh_raw_uv` + `draw_textured_mesh` API через C/JNI/Kotlin; `pc.textureMode` push-const flag (offset 100, total 104 байт) + textured fragment branch (`texture(uTex, vUV).rgb * pc.plasmaColor.rgb` как albedo вместо `vColor.rgb`); `SceneObject.textureHandle` + `EngineView.texturedObjects` + `submitScene` route. `GltfLoader` парсит `TEXCOORD_0` accessor с fallback `(0, 0)`. Проверено двумя procedural smoke-test patches (rock noise + cyan icon disc), затем patches удалены.
 Закрытые в M7.2: ✅ GltfLoader merge multi-primitive meshes (multi-material .glb теперь грузятся целиком, не кусочком).
 
 ## Старый бэклог (мелкая шерсть)

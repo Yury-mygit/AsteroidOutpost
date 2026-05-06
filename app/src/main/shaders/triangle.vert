@@ -16,16 +16,19 @@ layout(push_constant) uniform PushConst {
     vec4 tint;
     vec4 plasmaColor;
     float time;
+    float textureMode;  // E8.3 — 1.0 ⇒ fragment samples uTex at vUV (lit branch)
 } pc;
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec4 inColor;     // RGBA per-vertex (E1.1)
 layout(location = 2) in vec3 inNormal;
+layout(location = 3) in vec2 inUV;        // texture coords (E8.1) — (0,0) for untextured meshes
 
 layout(location = 0) out vec4 vColor;     // RGB → lit/tinted in fragment, A → output alpha
 layout(location = 1) out vec3 vNormal;    // world-space normal
 layout(location = 2) out vec3 vWorldPos;  // world-space position
 layout(location = 3) out vec2 vLocalXZ;   // model-space X/Z — used for radial soft-fade (E2.1)
+layout(location = 4) out vec2 vUV;        // texture coords passed through to fragment (E8.1)
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
@@ -36,6 +39,7 @@ void main() {
 
     vColor   = inColor;
     vLocalXZ = inPosition.xz;
+    vUV      = inUV;
 
     gl_Position = ubo.proj * ubo.view * worldPos;
 }

@@ -22,6 +22,7 @@ add_library(
     engine/ShipMesh.cpp
     engine/Camera.cpp
     engine/GltfLoader.cpp
+    engine/Texture.cpp
 )
 
 target_include_directories(
