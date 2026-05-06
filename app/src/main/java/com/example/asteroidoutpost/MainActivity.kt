@@ -133,6 +133,14 @@ class MainActivity : AppCompatActivity() {
     // alignment is required: the fragment shader's Fresnel-like fade uses
     // abs(vNormal.y) under this project's fixed pitch=π/2 camera.
     private var fireballMeshHandle: Long = 0L
+    // E9 — particle infrastructure. `particleQuadHandle` is the unit X-Z
+    // quad shared by all instances (the fragment shader produces shape via
+    // soft-fade + heat-ramp). `smokeTextureHandle` and `debrisTextureHandle`
+    // are sampled by the alpha-textured particle pipeline; sparks (additive)
+    // ignore textures entirely.
+    private var particleQuadHandle: Long = 0L
+    private var smokeTextureHandle: Long = 0L
+    private var debrisTextureHandle: Long = 0L
     // Static translucent scene (background nebulae) — captured once in
     // setupBackgroundNebulae so buildScene can compose it with per-frame
     // dynamic translucent objects (currently just the shield dome).
@@ -206,6 +214,38 @@ class MainActivity : AppCompatActivity() {
         val intensity: Float = 1f,
     )
     private val fireballs: MutableList<Fireball> = mutableListOf()
+
+    /**
+     * E9 — particle. Lives in Kotlin (matches "Kotlin owns scene"
+     * architecture); ticked here, packed into a FloatArray once per frame
+     * and shipped to the engine in one batched JNI call. `mode` chooses
+     * pipeline (additive sparks vs alpha-textured smoke/debris) and
+     * picks the texture forwarded to the draw call.
+     *
+     * Shape (rotation, deformation) is procedural in shaders for additive
+     * mode and texture-driven for alpha mode — the runtime only owns
+     * position, velocity, age, size, colour.
+     */
+    private data class Particle(
+        var x: Float, var y: Float, var z: Float,
+        var vx: Float, var vy: Float, var vz: Float,
+        var age: Float, val life: Float,
+        val size: Float,
+        val r: Float, val g: Float, val b: Float, val a: Float,
+        // Optional drag-style velocity damping: vx *= (1 - dragPerSec * dt).
+        // 0 = no damping (sparks fly straight). Used for debris that
+        // settles and smoke that slows.
+        val drag: Float = 0f,
+        // Optional vertical (Z) gravity in screen-space — positive pulls
+        // particles "down" (toward platform). Sparks drift, debris falls.
+        val gravity: Float = 0f,
+    )
+
+    // Two pools, one per pipeline. Capped at engine kMaxParticles (4096)
+    // each; runaway emitters are limited at the engine boundary too.
+    private val sparkParticles:  MutableList<Particle> = mutableListOf()
+    private val smokeParticles:  MutableList<Particle> = mutableListOf()  // alpha-textured smoke
+    private val debrisParticles: MutableList<Particle> = mutableListOf()  // alpha-textured chunks
     private data class Asteroid(
         val xPos: Float,
         var zPos: Float,
@@ -385,6 +425,55 @@ class MainActivity : AppCompatActivity() {
         // pc.plasmaColor.a scalar in buildScene.
         val FIREBALL_TINT_START   = floatArrayOf(1.00f, 0.65f, 0.20f)  // saturated forge-orange
         val FIREBALL_TINT_END     = floatArrayOf(0.90f, 0.18f, 0.05f)  // deep dying-ember red
+
+        // E9 — particle balance. AoE sparks fan out fast and dim quickly;
+        // muzzle micro-sparks are short-lived punctuation; asteroid-death
+        // debris falls under mild gravity and asteroid-death smoke lingers.
+        // Tunable in one place so density/speed feel can be retuned without
+        // hunting through spawn sites.
+        const val SPARK_AOE_COUNT_MIN:    Int   = 50
+        const val SPARK_AOE_COUNT_MAX:    Int   = 70
+        const val SPARK_AOE_SPEED_MIN:    Float = 1.6f
+        const val SPARK_AOE_SPEED_MAX:    Float = 3.4f
+        const val SPARK_AOE_LIFE_MIN:     Float = 0.25f
+        const val SPARK_AOE_LIFE_MAX:     Float = 0.55f
+        const val SPARK_AOE_SIZE_MIN:     Float = 0.04f
+        const val SPARK_AOE_SIZE_MAX:     Float = 0.09f
+        const val SPARK_AOE_DRAG:         Float = 1.5f
+
+        const val SPARK_MUZZLE_COUNT_MIN: Int   = 3
+        const val SPARK_MUZZLE_COUNT_MAX: Int   = 5
+        const val SPARK_MUZZLE_SPEED_MIN: Float = 0.8f
+        const val SPARK_MUZZLE_SPEED_MAX: Float = 1.6f
+        const val SPARK_MUZZLE_LIFE_MIN:  Float = 0.08f
+        const val SPARK_MUZZLE_LIFE_MAX:  Float = 0.16f
+        const val SPARK_MUZZLE_SIZE_MIN:  Float = 0.03f
+        const val SPARK_MUZZLE_SIZE_MAX:  Float = 0.06f
+        const val SPARK_MUZZLE_DRAG:      Float = 2.5f
+        // Cone half-angle around the bullet velocity vector so the muzzle
+        // sparks shoot mostly forward, not omnidirectional.
+        const val SPARK_MUZZLE_CONE_RAD:  Float = 0.7f  // ~40°
+
+        const val DEBRIS_COUNT_MIN:       Int   = 4
+        const val DEBRIS_COUNT_MAX:       Int   = 8
+        const val DEBRIS_SPEED_MIN:       Float = 0.4f
+        const val DEBRIS_SPEED_MAX:       Float = 1.1f
+        const val DEBRIS_LIFE_MIN:        Float = 0.50f
+        const val DEBRIS_LIFE_MAX:        Float = 0.90f
+        const val DEBRIS_SIZE_MIN:        Float = 0.07f
+        const val DEBRIS_SIZE_MAX:        Float = 0.15f
+        const val DEBRIS_GRAVITY:         Float = 1.2f   // -Z accel
+        const val DEBRIS_DRAG:            Float = 0.6f
+
+        const val SMOKE_DEATH_COUNT_MIN:  Int   = 3
+        const val SMOKE_DEATH_COUNT_MAX:  Int   = 5
+        const val SMOKE_DEATH_SPEED_MIN:  Float = 0.15f
+        const val SMOKE_DEATH_SPEED_MAX:  Float = 0.45f
+        const val SMOKE_DEATH_LIFE_MIN:   Float = 0.55f
+        const val SMOKE_DEATH_LIFE_MAX:   Float = 0.95f
+        const val SMOKE_DEATH_SIZE_MIN:   Float = 0.18f
+        const val SMOKE_DEATH_SIZE_MAX:   Float = 0.32f
+        const val SMOKE_DEATH_DRAG:       Float = 0.8f
         // Reload bar — strip on the lower part of the platform (the upper part
         // is overlapped by the ЩИТ button overlay, which composites on top of
         // the engine surface, so a bar placed there gets hidden). Anchored
@@ -753,6 +842,17 @@ class MainActivity : AppCompatActivity() {
         try {
             engineView.engine.setShader("vert", assets.open("shaders/triangle.vert.spv").readBytes())
             engineView.engine.setShader("frag", assets.open("shaders/triangle.frag.spv").readBytes())
+            // E9 — particle shaders are optional from the engine's point
+            // of view; if the asset is missing the engine still works
+            // without particle pipelines. We always upload them here so
+            // particle effects are available everywhere.
+            engineView.engine.setShader("particle.vert", assets.open("shaders/particle.vert.spv").readBytes())
+            engineView.engine.setShader("particle.frag", assets.open("shaders/particle.frag.spv").readBytes())
+            // E10.1 — post-process shaders. If absent the engine falls
+            // back to direct-to-swapchain rendering (won't happen in
+            // practice once E10 is in, but keep the fallback path safe).
+            engineView.engine.setShader("post.vert", assets.open("shaders/post.vert.spv").readBytes())
+            engineView.engine.setShader("post.frag", assets.open("shaders/post.frag.spv").readBytes())
         } catch (e: Exception) {
             showStatus("Shader load failed: ${e.message}")
         }
@@ -1042,6 +1142,120 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * E9 — unit UV-mapped X-Z plane quad for particles. Same primitive as
+     * the E8.4 textured-quad smoke test, regenerated here because it lives
+     * permanently and the smoke-test version was retired. Particle vertex
+     * shader uses inPosition.xz for billboarding + soft-fade radius.
+     */
+    private fun buildParticleQuadMesh(): Long {
+        val verts = floatArrayOf(
+            //  x,   y,    z,    r, g, b, a,    nx, ny, nz,   u,  v
+            -1f, 0f, -1f,  1f, 1f, 1f, 1f,  0f, 1f, 0f,  0f, 0f,
+             1f, 0f, -1f,  1f, 1f, 1f, 1f,  0f, 1f, 0f,  1f, 0f,
+             1f, 0f,  1f,  1f, 1f, 1f, 1f,  0f, 1f, 0f,  1f, 1f,
+            -1f, 0f,  1f,  1f, 1f, 1f, 1f,  0f, 1f, 0f,  0f, 1f,
+        )
+        val indices = shortArrayOf(0, 1, 2, 0, 2, 3)
+        return engineView.engine.loadMeshRawUV(verts, indices)
+    }
+
+    /**
+     * E9 — procedural smoke puff texture (RGBA8, 64×64). Soft Gaussian-ish
+     * radial falloff modulated by 2-octave value noise so the puff has
+     * wispy structure instead of being a flat circle. Light gray RGB with
+     * a subtle cool tint reads as exhaust/dust against the dark space
+     * background. Transparent at the edges so multiple puffs overlap
+     * cleanly through SRC_ALPHA blending.
+     */
+    private fun generateSmokeTexture(): Long {
+        val W = 64; val H = 64
+        val px = ByteArray(W * H * 4)
+        val cx = W * 0.5f; val cy = H * 0.5f
+        val maxR = W * 0.5f
+        fun hash01(ix: Int, iy: Int): Float {
+            val v = kotlin.math.sin(ix * 127.1f + iy * 311.7f) * 43758.547f
+            return v - kotlin.math.floor(v)
+        }
+        fun valueNoise(x: Float, y: Float): Float {
+            val ix = kotlin.math.floor(x).toInt()
+            val iy = kotlin.math.floor(y).toInt()
+            val fx = x - ix; val fy = y - iy
+            val ux = fx * fx * (3f - 2f * fx)
+            val uy = fy * fy * (3f - 2f * fy)
+            val a = hash01(ix,     iy)
+            val b = hash01(ix + 1, iy)
+            val c = hash01(ix,     iy + 1)
+            val d = hash01(ix + 1, iy + 1)
+            return (a * (1 - ux) + b * ux) * (1 - uy) +
+                   (c * (1 - ux) + d * ux) * uy
+        }
+        for (y in 0 until H) for (x in 0 until W) {
+            val dx = (x + 0.5f) - cx
+            val dy = (y + 0.5f) - cy
+            val d = kotlin.math.sqrt(dx * dx + dy * dy) / maxR
+            val falloff = (1f - d * d).coerceAtLeast(0f)
+            val u = x.toFloat() / W * 6f
+            val v = y.toFloat() / H * 6f
+            val n = valueNoise(u, v) * 0.6f + valueNoise(u * 2.1f, v * 2.1f) * 0.4f
+            val alphaF = (falloff * (0.5f + n * 0.7f)).coerceIn(0f, 1f)
+            val gray = (0.55f + n * 0.20f).coerceIn(0f, 1f)
+            val off = (y * W + x) * 4
+            px[off + 0] = (gray * 0.85f * 255f).toInt().toByte()
+            px[off + 1] = (gray * 0.83f * 255f).toInt().toByte()
+            px[off + 2] = (gray * 0.78f * 255f).toInt().toByte()
+            px[off + 3] = (alphaF * 255f).toInt().coerceIn(0, 255).toByte()
+        }
+        return engineView.engine.loadTextureRaw(px, W, H)
+    }
+
+    /**
+     * E9 — procedural asteroid-chunk debris texture (RGBA8, 64×64). An
+     * irregular polygonal silhouette (radius perturbed by two sine
+     * harmonics so it reads as a bumpy rock instead of a circle), warm
+     * gray fill with a top-left light gradient (matches the engine's
+     * primary light direction in `triangle.frag`). Transparent outside
+     * with a 1-pixel AA edge so chunks blend cleanly when overlapping.
+     */
+    private fun generateDebrisTexture(): Long {
+        val W = 64; val H = 64
+        val px = ByteArray(W * H * 4)
+        val cx = W * 0.5f; val cy = H * 0.5f
+        fun radiusAtAngle(theta: Float): Float {
+            val base = W * 0.42f
+            val warp = kotlin.math.sin(theta * 5f) * 0.10f +
+                       kotlin.math.sin(theta * 7f + 1.3f) * 0.07f
+            return base * (1f + warp)
+        }
+        for (y in 0 until H) for (x in 0 until W) {
+            val dx = (x + 0.5f) - cx
+            val dy = (y + 0.5f) - cy
+            val d = kotlin.math.sqrt(dx * dx + dy * dy)
+            val theta = kotlin.math.atan2(dy, dx)
+            val rAtAngle = radiusAtAngle(theta)
+            val off = (y * W + x) * 4
+            // Top-left light: brighter when (dx, dy) is small.
+            val light = (((-dx / rAtAngle) * 0.3f + (-dy / rAtAngle) * 0.3f + 0.6f)).coerceIn(0.35f, 1f)
+            val r = (0.55f * light * 255f).toInt().coerceIn(0, 255).toByte()
+            val g = (0.48f * light * 255f).toInt().coerceIn(0, 255).toByte()
+            val b = (0.43f * light * 255f).toInt().coerceIn(0, 255).toByte()
+            when {
+                d < rAtAngle - 1f -> {
+                    px[off + 0] = r; px[off + 1] = g; px[off + 2] = b; px[off + 3] = 255.toByte()
+                }
+                d < rAtAngle + 1f -> {
+                    val t = ((rAtAngle + 1f - d) * 0.5f).coerceIn(0f, 1f)
+                    px[off + 0] = r; px[off + 1] = g; px[off + 2] = b
+                    px[off + 3] = (t * 255f).toInt().toByte()
+                }
+                else -> {
+                    px[off + 0] = 0; px[off + 1] = 0; px[off + 2] = 0; px[off + 3] = 0
+                }
+            }
+        }
+        return engineView.engine.loadTextureRaw(px, W, H)
+    }
+
+    /**
      * Generate the background nebula meshes once and submit them as
      * translucent scene objects. Set once at engine setup; never touched after,
      * so menu / mission select / game / win-lose all share the same backdrop.
@@ -1097,6 +1311,12 @@ class MainActivity : AppCompatActivity() {
         // E7.1 — load the fireball UV-sphere once. Drawn through the additive
         // pipeline with ADDITIVE_FIRE material in spawnAoeRing.
         fireballMeshHandle = buildFireballSphereMesh()
+        // E9 — particle infrastructure. Single shared unit-quad mesh, plus
+        // two procedural textures (smoke puff for AoE/death, asteroid-chunk
+        // debris for asteroid death). Sparks (additive) ignore textures.
+        particleQuadHandle  = buildParticleQuadMesh()
+        smokeTextureHandle  = generateSmokeTexture()
+        debrisTextureHandle = generateDebrisTexture()
         // Initial assignment so menu / mission-select scenes (which don't run
         // buildScene) still show the nebulae backdrop.
         engineView.translucentObjects = nebulaeTranslucent
@@ -1306,6 +1526,41 @@ class MainActivity : AppCompatActivity() {
         // Depth-test on / write off (E7) means the fireball is occluded by
         // closer opaque geometry (asteroids, turrets) but multiple
         // overlapping fireballs accumulate through additive blend.
+        // E9 — pack each particle pool into the engine's instance-buffer
+        // layout once per frame and ship a single batch per pool. The
+        // engine concatenates batches per pipeline at renderFrame and
+        // does one instanced draw per batch. Skip pools when their
+        // resources aren't loaded so missing assets degrade gracefully.
+        val particleBatches = ArrayList<ParticleBatchKt>(3)
+        if (particleQuadHandle != 0L && sparkParticles.isNotEmpty()) {
+            particleBatches.add(ParticleBatchKt(
+                meshHandle    = particleQuadHandle,
+                textureHandle = 0L,
+                data          = packParticles(sparkParticles),
+                count         = sparkParticles.size,
+                mode          = EngineJni.PARTICLE_ADDITIVE,
+            ))
+        }
+        if (particleQuadHandle != 0L && smokeTextureHandle != 0L && smokeParticles.isNotEmpty()) {
+            particleBatches.add(ParticleBatchKt(
+                meshHandle    = particleQuadHandle,
+                textureHandle = smokeTextureHandle,
+                data          = packParticles(smokeParticles),
+                count         = smokeParticles.size,
+                mode          = EngineJni.PARTICLE_ALPHA_TEXTURED,
+            ))
+        }
+        if (particleQuadHandle != 0L && debrisTextureHandle != 0L && debrisParticles.isNotEmpty()) {
+            particleBatches.add(ParticleBatchKt(
+                meshHandle    = particleQuadHandle,
+                textureHandle = debrisTextureHandle,
+                data          = packParticles(debrisParticles),
+                count         = debrisParticles.size,
+                mode          = EngineJni.PARTICLE_ALPHA_TEXTURED,
+            ))
+        }
+        engineView.particleBatches = particleBatches
+
         val fireballAdditive = if (fireballs.isEmpty() || fireballMeshHandle == 0L) emptyList()
         else {
             val tStart = DraftCombat.FIREBALL_TINT_START
@@ -1381,6 +1636,164 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * E9 — Euler-integrate particles, decay age, cull dead. Drag is applied
+     * frame-rate-independently via 1 - drag*dt (with a clamp so a pathological
+     * dt × drag combo can't reverse velocity). Gravity is constant -Z accel
+     * (positive value = pulls particles toward the platform / "down").
+     */
+    private fun tickParticles(pool: MutableList<Particle>, dt: Float) {
+        if (pool.isEmpty()) return
+        val it = pool.iterator()
+        while (it.hasNext()) {
+            val p = it.next()
+            p.age += dt
+            if (p.age >= p.life) { it.remove(); continue }
+            // Drag (per-second) applied per-frame.
+            val dragMul = (1f - p.drag * dt).coerceAtLeast(0f)
+            p.vx *= dragMul
+            p.vy *= dragMul
+            p.vz *= dragMul
+            // Gravity acts along -Z (pulling toward bottom of screen).
+            p.vz -= p.gravity * dt
+            p.x  += p.vx * dt
+            p.y  += p.vy * dt
+            p.z  += p.vz * dt
+        }
+    }
+
+    /**
+     * E9 — pack a particle pool into the FloatArray layout the engine
+     * expects: 8 floats per particle (pos.xyz, size, rgba). Alpha is the
+     * stored r/g/b/a.a × age-fade so the engine just multiplies it in.
+     * The fade curve is sqrt(1-t) — same shape used for fireball brightness
+     * (E7.1 polish), keeps things in family.
+     */
+    private fun packParticles(pool: List<Particle>): FloatArray {
+        if (pool.isEmpty()) return FloatArray(0)
+        val out = FloatArray(pool.size * 8)
+        var w = 0
+        for (p in pool) {
+            val u    = (1f - p.age / p.life).coerceIn(0f, 1f)
+            val fade = kotlin.math.sqrt(u)
+            out[w++] = p.x; out[w++] = p.y; out[w++] = p.z
+            out[w++] = p.size
+            out[w++] = p.r; out[w++] = p.g; out[w++] = p.b
+            out[w++] = p.a * fade
+        }
+        return out
+    }
+
+    /**
+     * E9 — AoE spark fan. Spawns SPARK_AOE_COUNT_* particles around
+     * (cx, cz) on the gameplay plane (y=0), randomised over the X-Z plane
+     * with no preferred direction. Tinted by `tintRgb` so callers can
+     * recolour per-event (default forge-orange aligns with fireball).
+     */
+    private fun spawnSparkBurst(cx: Float, cz: Float, tintRgb: FloatArray = DraftCombat.FIREBALL_TINT_START) {
+        val n = (DraftCombat.SPARK_AOE_COUNT_MIN..DraftCombat.SPARK_AOE_COUNT_MAX).random()
+        for (i in 0 until n) {
+            val theta = (Math.random() * 2.0 * Math.PI).toFloat()
+            val sp = DraftCombat.SPARK_AOE_SPEED_MIN +
+                     Math.random().toFloat() * (DraftCombat.SPARK_AOE_SPEED_MAX - DraftCombat.SPARK_AOE_SPEED_MIN)
+            val life = DraftCombat.SPARK_AOE_LIFE_MIN +
+                       Math.random().toFloat() * (DraftCombat.SPARK_AOE_LIFE_MAX - DraftCombat.SPARK_AOE_LIFE_MIN)
+            val size = DraftCombat.SPARK_AOE_SIZE_MIN +
+                       Math.random().toFloat() * (DraftCombat.SPARK_AOE_SIZE_MAX - DraftCombat.SPARK_AOE_SIZE_MIN)
+            sparkParticles.add(Particle(
+                x = cx, y = 0f, z = cz,
+                vx = kotlin.math.cos(theta) * sp,
+                vy = 0f,
+                vz = kotlin.math.sin(theta) * sp,
+                age = 0f, life = life, size = size,
+                r = tintRgb[0], g = tintRgb[1], b = tintRgb[2], a = 1.4f,
+                drag = DraftCombat.SPARK_AOE_DRAG,
+            ))
+        }
+    }
+
+    /**
+     * E9 — Muzzle flash micro-sparks fired in a tight cone around the
+     * bullet velocity vector. `(vx, vz)` is the bullet's screen-space
+     * velocity (already normalised inside this helper). 3-5 short sparks
+     * per shot read as gunpowder kick.
+     */
+    private fun spawnMuzzleSparks(cx: Float, cz: Float, vx: Float, vz: Float) {
+        val baseTheta = kotlin.math.atan2(vz, vx)
+        val n = (DraftCombat.SPARK_MUZZLE_COUNT_MIN..DraftCombat.SPARK_MUZZLE_COUNT_MAX).random()
+        val tint = DraftCombat.FLASH_TINT_MUZZLE
+        for (i in 0 until n) {
+            val theta = baseTheta + (Math.random().toFloat() - 0.5f) * 2f * DraftCombat.SPARK_MUZZLE_CONE_RAD
+            val sp = DraftCombat.SPARK_MUZZLE_SPEED_MIN +
+                     Math.random().toFloat() * (DraftCombat.SPARK_MUZZLE_SPEED_MAX - DraftCombat.SPARK_MUZZLE_SPEED_MIN)
+            val life = DraftCombat.SPARK_MUZZLE_LIFE_MIN +
+                       Math.random().toFloat() * (DraftCombat.SPARK_MUZZLE_LIFE_MAX - DraftCombat.SPARK_MUZZLE_LIFE_MIN)
+            val size = DraftCombat.SPARK_MUZZLE_SIZE_MIN +
+                       Math.random().toFloat() * (DraftCombat.SPARK_MUZZLE_SIZE_MAX - DraftCombat.SPARK_MUZZLE_SIZE_MIN)
+            sparkParticles.add(Particle(
+                x = cx, y = 0f, z = cz,
+                vx = kotlin.math.cos(theta) * sp,
+                vy = 0f,
+                vz = kotlin.math.sin(theta) * sp,
+                age = 0f, life = life, size = size,
+                r = tint[0], g = tint[1], b = tint[2], a = 1.6f,
+                drag = DraftCombat.SPARK_MUZZLE_DRAG,
+            ))
+        }
+    }
+
+    /**
+     * E9 — Asteroid death VFX. Spawns:
+     *   • 4-8 textured chunks (alpha pipeline, debris texture) flying
+     *     outward with a touch of -Z gravity → settle visually.
+     *   • 3-5 textured smoke puffs (alpha pipeline, smoke texture) drifting
+     *     slowly outward → linger after debris is gone.
+     * `colorTint` lets callers recolour (e.g., HEAVY death = darker tint,
+     * EXPLOSIVE = warmer); defaults to a neutral asteroid tone.
+     */
+    private fun spawnAsteroidDeathFX(cx: Float, cz: Float,
+                                     colorTint: FloatArray = floatArrayOf(0.95f, 0.92f, 0.88f)) {
+        val nDebris = (DraftCombat.DEBRIS_COUNT_MIN..DraftCombat.DEBRIS_COUNT_MAX).random()
+        for (i in 0 until nDebris) {
+            val theta = (Math.random() * 2.0 * Math.PI).toFloat()
+            val sp = DraftCombat.DEBRIS_SPEED_MIN +
+                     Math.random().toFloat() * (DraftCombat.DEBRIS_SPEED_MAX - DraftCombat.DEBRIS_SPEED_MIN)
+            val life = DraftCombat.DEBRIS_LIFE_MIN +
+                       Math.random().toFloat() * (DraftCombat.DEBRIS_LIFE_MAX - DraftCombat.DEBRIS_LIFE_MIN)
+            val size = DraftCombat.DEBRIS_SIZE_MIN +
+                       Math.random().toFloat() * (DraftCombat.DEBRIS_SIZE_MAX - DraftCombat.DEBRIS_SIZE_MIN)
+            debrisParticles.add(Particle(
+                x = cx, y = 0f, z = cz,
+                vx = kotlin.math.cos(theta) * sp,
+                vy = 0f,
+                vz = kotlin.math.sin(theta) * sp,
+                age = 0f, life = life, size = size,
+                r = colorTint[0], g = colorTint[1], b = colorTint[2], a = 1.0f,
+                drag = DraftCombat.DEBRIS_DRAG,
+                gravity = DraftCombat.DEBRIS_GRAVITY,
+            ))
+        }
+        val nSmoke = (DraftCombat.SMOKE_DEATH_COUNT_MIN..DraftCombat.SMOKE_DEATH_COUNT_MAX).random()
+        for (i in 0 until nSmoke) {
+            val theta = (Math.random() * 2.0 * Math.PI).toFloat()
+            val sp = DraftCombat.SMOKE_DEATH_SPEED_MIN +
+                     Math.random().toFloat() * (DraftCombat.SMOKE_DEATH_SPEED_MAX - DraftCombat.SMOKE_DEATH_SPEED_MIN)
+            val life = DraftCombat.SMOKE_DEATH_LIFE_MIN +
+                       Math.random().toFloat() * (DraftCombat.SMOKE_DEATH_LIFE_MAX - DraftCombat.SMOKE_DEATH_LIFE_MIN)
+            val size = DraftCombat.SMOKE_DEATH_SIZE_MIN +
+                       Math.random().toFloat() * (DraftCombat.SMOKE_DEATH_SIZE_MAX - DraftCombat.SMOKE_DEATH_SIZE_MIN)
+            smokeParticles.add(Particle(
+                x = cx, y = 0f, z = cz,
+                vx = kotlin.math.cos(theta) * sp,
+                vy = 0f,
+                vz = kotlin.math.sin(theta) * sp,
+                age = 0f, life = life, size = size,
+                r = 0.85f, g = 0.82f, b = 0.78f, a = 0.65f,
+                drag = DraftCombat.SMOKE_DEATH_DRAG,
+            ))
+        }
+    }
+
+    /**
      * Spawn an explosion at (cx, cz) sized to `radius`. Was a single plasma
      * billboard with E4 heat-ramp; now (E7.1) a 3D fireball mesh through the
      * additive pipeline with the fire-material shader. The Y-axis-aligned
@@ -1399,6 +1812,10 @@ class MainActivity : AppCompatActivity() {
             maxLife = DraftCombat.FIREBALL_LIFE_SEC,
             baseRadius = radius,
         ))
+        // E9 — radial spark fan complementing the 3D fireball. Reads as
+        // ejecta flying out of the blast core; sparks fade fast (≤0.55s)
+        // so they punctuate the moment without obscuring the fireball.
+        spawnSparkBurst(cx, cz)
     }
 
     private fun sceneAdapter(worldObjects: List<WorldObject> = simWorld.worldObjectSnapshot()): SceneAdapter =
@@ -1821,6 +2238,9 @@ class MainActivity : AppCompatActivity() {
         waveBreakTimer     = 0f
         flashes.clear()
         fireballs.clear()
+        sparkParticles.clear()
+        smokeParticles.clear()
+        debrisParticles.clear()
         // Apply upgrade levels — values frozen for the duration of this run.
         effectiveMainWeaponDamage = UpgradeCatalog.mainWeaponDamageAt(gameProgress.mainWeaponDamageLevel)
         effectiveTurretDamage     = UpgradeCatalog.sideTurretDamageAt(gameProgress.sideTurretDamageLevel)
@@ -2297,6 +2717,12 @@ class MainActivity : AppCompatActivity() {
                     halfMax = DraftCombat.MUZZLE_FLASH_HALF,
                     tintR = mt[0], tintG = mt[1], tintB = mt[2], tintA = mt[3],
                 ))
+                // E9 — micro-sparks fanning out of the barrel along the
+                // bullet velocity. Brief (~0.1s) so they punctuate the
+                // shot without trailing into the bullet's own trail VFX.
+                spawnMuzzleSparks(muzzleX, muzzleZ,
+                                  sinA * weapon.projectileSpeed,
+                                  cosA * weapon.projectileSpeed)
             }
             // Turrets fire at the nearest asteroid (if any).
             for (i in turretXs.indices) {
@@ -2331,6 +2757,12 @@ class MainActivity : AppCompatActivity() {
                         halfMax = DraftCombat.MUZZLE_FLASH_HALF * 0.7f,
                         tintR = st[0], tintG = st[1], tintB = st[2], tintA = st[3],
                     ))
+                    // E9 — side turrets get the same micro-spark fan, kept
+                    // lighter (no count override here — same SPARK_MUZZLE_COUNT
+                    // range) so player still reads side-turret as support.
+                    spawnMuzzleSparks(muzzleX, muzzleZ,
+                                      nx * DraftCombat.BULLET_SPEED,
+                                      nz * DraftCombat.BULLET_SPEED)
                 }
             }
             // Move bullets along their velocity; cull off-screen, apply damage on hit.
@@ -2443,6 +2875,15 @@ class MainActivity : AppCompatActivity() {
                                 maxLife = DraftCombat.FLASH_LIFE_SEC,
                                 tintR = dt2[0], tintG = dt2[1], tintB = dt2[2], tintA = dt2[3],
                             ))
+                            // E9 — debris + smoke. HEAVY gets a darker/redder
+                            // tint matching its dark-red mesh; NORMAL/FAST are
+                            // neutral warm gray. Sized by asteroid half so
+                            // small fast asteroids don't drop boulder chunks.
+                            val tint = when (a.type) {
+                                AsteroidType.HEAVY -> floatArrayOf(0.85f, 0.55f, 0.50f)
+                                else               -> floatArrayOf(0.95f, 0.92f, 0.88f)
+                            }
+                            spawnAsteroidDeathFX(a.xPos, a.zPos, tint)
                         }
                     }
                 }
@@ -2474,6 +2915,11 @@ class MainActivity : AppCompatActivity() {
                 fb.life -= dt
                 if (fb.life <= 0f) fireballIter.remove()
             }
+            // E9 — particle pools. Same physics across pools (Euler step
+            // + drag + gravity), only the pipeline binding differs.
+            tickParticles(sparkParticles,  dt)
+            tickParticles(smokeParticles,  dt)
+            tickParticles(debrisParticles, dt)
 
             // Move asteroids down at their own speed (mission baseline × type
             // multiplier, captured at spawn); spin around their own axis.

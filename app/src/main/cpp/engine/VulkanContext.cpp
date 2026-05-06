@@ -513,25 +513,55 @@ namespace station {
     }
 
     bool VulkanContext::createDepthAndFramebuffers() {
+        // E10.1 — scene pass renders into the offscreen colour image with
+        // finalLayout=SHADER_READ_ONLY_OPTIMAL so the post pass can sample
+        // the result. Format = swapchain format for trivial passthrough
+        // (the post pipeline currently just samples + writes; in E10.4
+        // it'll do motion blur on top).
+        const VkFormat offscreenFormat = m_sel.format.format;
         if (!RenderResourcesBuilder::createRenderPass(
-                m_device, m_sel.format.format, m_depthFormat, m_renderResources.renderPass)) return false;
+                m_device, offscreenFormat, m_depthFormat,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                m_renderResources.renderPass)) return false;
         if (!RenderResourcesBuilder::createDepthResources(
                 m_physicalDevice, m_device, m_sel.extent, m_depthFormat,
                 m_renderResources.depthImage, m_renderResources.depthMemory,
                 m_renderResources.depthImageView)) return false;
-        if (!RenderResourcesBuilder::createFramebuffers(
+        if (!RenderResourcesBuilder::createOffscreenColorResources(
+                m_physicalDevice, m_device, m_sel.extent, offscreenFormat,
+                m_renderResources.offscreenColorImage,
+                m_renderResources.offscreenColorMemory,
+                m_renderResources.offscreenColorView,
+                m_renderResources.offscreenColorSampler)) return false;
+        // Single scene framebuffer wrapped in the existing vector for
+        // indexing parity with the rest of the codebase.
+        VkFramebuffer sceneFb = VK_NULL_HANDLE;
+        if (!RenderResourcesBuilder::createSceneFramebuffer(
                 m_device, m_renderResources.renderPass, m_sel.extent,
-                m_swapViews, m_renderResources.depthImageView,
-                m_renderResources.framebuffers)) return false;
+                m_renderResources.offscreenColorView,
+                m_renderResources.depthImageView,
+                sceneFb)) return false;
+        m_renderResources.framebuffers = { sceneFb };
+
+        // Post-process pass: one fb per swapchain image, single colour
+        // attachment, layout transitions UNDEFINED → PRESENT_SRC_KHR.
+        if (!RenderResourcesBuilder::createPostRenderPass(
+                m_device, m_sel.format.format, m_renderResources.postRenderPass)) return false;
+        if (!RenderResourcesBuilder::createPostFramebuffers(
+                m_device, m_renderResources.postRenderPass, m_sel.extent,
+                m_swapViews, m_renderResources.postFramebuffers)) return false;
         return true;
     }
 
     bool VulkanContext::createCommandInfra() {
         if (!RenderResourcesBuilder::createCommandPool(
                 m_device, m_queueFamily, m_renderResources.commandPool)) return false;
+        // E10.1 — command buffers are per-swapchain-image (matches the
+        // post framebuffers, since each renders to a different swapchain
+        // colour view).
         if (!RenderResourcesBuilder::createCommandBuffers(
                 m_device, m_renderResources.commandPool,
-                (uint32_t)m_renderResources.framebuffers.size(),
+                (uint32_t)m_renderResources.postFramebuffers.size(),
                 m_renderResources.commandBuffers)) return false;
         return true;
     }
@@ -638,6 +668,33 @@ namespace station {
             return false;
         }
 
+        // E9 — particle instance buffers. Persistent-mapped HOST_VISIBLE
+        // so renderFrame can memcpy staging arrays straight in. Sized for
+        // kMaxParticles (4096) per pipeline; per-instance stride is 8
+        // floats (pos3 + size1 + rgba4). Two buffers (additive vs alpha)
+        // because the two pipelines may render different particle counts
+        // and the simplest layout is one batch buffer per pipeline.
+        const VkDeviceSize particleBufBytes =
+                (VkDeviceSize)kMaxParticles * kParticleFloatStride * sizeof(float);
+        auto allocInstance = [&](VkBuffer& buf, VkDeviceMemory& mem, void*& mapped) -> bool {
+            if (!createBuffer(m_physicalDevice, m_device, particleBufBytes,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              buf, mem)) return false;
+            return vkMapMemory(m_device, mem, 0, particleBufBytes, 0, &mapped) == VK_SUCCESS;
+        };
+        if (!allocInstance(m_particleAdditiveInstanceBuffer,
+                           m_particleAdditiveInstanceMemory,
+                           m_particleAdditiveInstanceMapped)) {
+            LOGE("Particle additive instance buffer alloc failed"); return false;
+        }
+        if (!allocInstance(m_particleAlphaInstanceBuffer,
+                           m_particleAlphaInstanceMemory,
+                           m_particleAlphaInstanceMapped)) {
+            LOGE("Particle alpha instance buffer alloc failed"); return false;
+        }
+
         LOGI("Pipeline infra created");
         return true;
     }
@@ -650,9 +707,21 @@ namespace station {
         if (m_translucentPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_translucentPipeline, nullptr);            m_translucentPipeline = VK_NULL_HANDLE; }
         if (m_additivePipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_additivePipeline, nullptr);               m_additivePipeline = VK_NULL_HANDLE; }
         if (m_framePipeline       != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_framePipeline, nullptr);                  m_framePipeline = VK_NULL_HANDLE; }
+        if (m_particleAdditivePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_particleAdditivePipeline, nullptr); m_particleAdditivePipeline = VK_NULL_HANDLE; }
+        if (m_particleAlphaPipeline    != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_particleAlphaPipeline, nullptr);    m_particleAlphaPipeline = VK_NULL_HANDLE; }
         if (m_pipelineLayout      != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);           m_pipelineLayout = VK_NULL_HANDLE; }
         if (m_vertModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_vertModule, nullptr);                  m_vertModule = VK_NULL_HANDLE; }
         if (m_fragModule          != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_fragModule, nullptr);                  m_fragModule = VK_NULL_HANDLE; }
+        if (m_particleVertModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_particleVertModule, nullptr);          m_particleVertModule = VK_NULL_HANDLE; }
+        if (m_particleFragModule  != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_particleFragModule, nullptr);          m_particleFragModule = VK_NULL_HANDLE; }
+        // E10.1 — post pipeline / layout / descriptor / shader cleanup.
+        if (m_postPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_postPipeline, nullptr);                    m_postPipeline = VK_NULL_HANDLE; }
+        if (m_postPipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_postPipelineLayout, nullptr);        m_postPipelineLayout = VK_NULL_HANDLE; }
+        if (m_postDescriptorPool  != VK_NULL_HANDLE) { vkDestroyDescriptorPool(m_device, m_postDescriptorPool, nullptr);        m_postDescriptorPool = VK_NULL_HANDLE; }
+        if (m_postSetLayout       != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(m_device, m_postSetLayout, nullptr);        m_postSetLayout = VK_NULL_HANDLE; }
+        if (m_postVertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_postVertModule, nullptr);              m_postVertModule = VK_NULL_HANDLE; }
+        if (m_postFragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_postFragModule, nullptr);              m_postFragModule = VK_NULL_HANDLE; }
+        m_postDescriptorSet = VK_NULL_HANDLE;
         // E8.2/E8.3 — destroy textures before their descriptor pool. Free
         // every used pool slot first, then the engine-owned default white,
         // then drop the descriptor pool itself.
@@ -669,6 +738,35 @@ namespace station {
         if (m_descriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr); m_descriptorSetLayout = VK_NULL_HANDLE; }
         if (m_uniformBuffer       != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, m_uniformBuffer, nullptr);                    m_uniformBuffer = VK_NULL_HANDLE; }
         if (m_uniformMemory       != VK_NULL_HANDLE) { vkFreeMemory(m_device, m_uniformMemory, nullptr);                       m_uniformMemory = VK_NULL_HANDLE; }
+        // E9 — unmap + free particle instance buffers.
+        if (m_particleAdditiveInstanceMemory != VK_NULL_HANDLE) {
+            if (m_particleAdditiveInstanceMapped) {
+                vkUnmapMemory(m_device, m_particleAdditiveInstanceMemory);
+                m_particleAdditiveInstanceMapped = nullptr;
+            }
+        }
+        if (m_particleAdditiveInstanceBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(m_device, m_particleAdditiveInstanceBuffer, nullptr);
+            m_particleAdditiveInstanceBuffer = VK_NULL_HANDLE;
+        }
+        if (m_particleAdditiveInstanceMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_particleAdditiveInstanceMemory, nullptr);
+            m_particleAdditiveInstanceMemory = VK_NULL_HANDLE;
+        }
+        if (m_particleAlphaInstanceMemory != VK_NULL_HANDLE) {
+            if (m_particleAlphaInstanceMapped) {
+                vkUnmapMemory(m_device, m_particleAlphaInstanceMemory);
+                m_particleAlphaInstanceMapped = nullptr;
+            }
+        }
+        if (m_particleAlphaInstanceBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(m_device, m_particleAlphaInstanceBuffer, nullptr);
+            m_particleAlphaInstanceBuffer = VK_NULL_HANDLE;
+        }
+        if (m_particleAlphaInstanceMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_particleAlphaInstanceMemory, nullptr);
+            m_particleAlphaInstanceMemory = VK_NULL_HANDLE;
+        }
         m_descriptorSet = VK_NULL_HANDLE;
     }
 
@@ -676,7 +774,11 @@ namespace station {
     // createPipeline
     // -----------------------------------------------------------------------
     bool VulkanContext::createPipeline(const std::vector<uint32_t>& vertSpv,
-                                       const std::vector<uint32_t>& fragSpv) {
+                                       const std::vector<uint32_t>& fragSpv,
+                                       const std::vector<uint32_t>& particleVertSpv,
+                                       const std::vector<uint32_t>& particleFragSpv,
+                                       const std::vector<uint32_t>& postVertSpv,
+                                       const std::vector<uint32_t>& postFragSpv) {
         auto makeModule = [&](const std::vector<uint32_t>& code, VkShaderModule& mod) -> bool {
             VkShaderModuleCreateInfo ci{};
             ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -856,7 +958,213 @@ namespace station {
         r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_starPipeline);
         if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(stars): %s", vkRes(r).c_str()); return false; }
 
-        LOGI("Pipelines created (mesh + system + stars)");
+        // E9 — Particle pipelines. Two pipelines share particle.vert /
+        // particle.frag and the same per-instance binding 1; they differ
+        // only in blend state (additive ONE/ONE for sparks vs. SRC_ALPHA
+        // alpha-blend for textured smoke/debris) and depth-test behaviour.
+        // Both reuse the unit-quad mesh from binding 0 and read 8 floats
+        // per instance (pos3 + size1 + rgba4) from binding 1. Skip the
+        // whole block if particle shaders weren't uploaded — the rest of
+        // the engine still works.
+        if (!particleVertSpv.empty() && !particleFragSpv.empty()) {
+            if (!makeModule(particleVertSpv, m_particleVertModule)) return false;
+            if (!makeModule(particleFragSpv, m_particleFragModule)) return false;
+
+            VkPipelineShaderStageCreateInfo pStages[2]{};
+            pStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            pStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            pStages[0].module = m_particleVertModule; pStages[0].pName = "main";
+            pStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            pStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            pStages[1].module = m_particleFragModule; pStages[1].pName = "main";
+
+            // Two vertex bindings: 0 = standard Vertex (unit quad mesh),
+            // 1 = per-instance (rate INSTANCE) with 8 floats — pos3 + size1
+            // + rgba4.
+            VkVertexInputBindingDescription pBindings[2]{};
+            pBindings[0] = Vertex::getBindingDescription();   // binding 0
+            pBindings[1].binding   = 1;
+            pBindings[1].stride    = sizeof(float) * kParticleFloatStride;
+            pBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+            auto baseAttrs = Vertex::getAttributeDescriptions();
+            std::vector<VkVertexInputAttributeDescription> pAttrs(baseAttrs.begin(), baseAttrs.end());
+            // Per-instance attribute 4: vec4 (pos.xyz + size.w packed
+            // together — single 16-byte fetch, friendlier to GPU than two
+            // separate attributes).
+            VkVertexInputAttributeDescription a4{};
+            a4.binding  = 1;
+            a4.location = 4;
+            a4.format   = VK_FORMAT_R32G32B32A32_SFLOAT;
+            a4.offset   = 0;
+            // Per-instance attribute 5: vec4 RGBA colour.
+            VkVertexInputAttributeDescription a5{};
+            a5.binding  = 1;
+            a5.location = 5;
+            a5.format   = VK_FORMAT_R32G32B32A32_SFLOAT;
+            a5.offset   = sizeof(float) * 4;
+            pAttrs.push_back(a4);
+            pAttrs.push_back(a5);
+
+            VkPipelineVertexInputStateCreateInfo pViCI{};
+            pViCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            pViCI.vertexBindingDescriptionCount = 2;
+            pViCI.pVertexBindingDescriptions = pBindings;
+            pViCI.vertexAttributeDescriptionCount = (uint32_t)pAttrs.size();
+            pViCI.pVertexAttributeDescriptions = pAttrs.data();
+
+            // Reset the bits of state we mutated for frame/star pipelines.
+            iaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            rastCI.lineWidth = 1.0f;
+            gpCI.pStages             = pStages;
+            gpCI.pVertexInputState   = &pViCI;
+            gpCI.pInputAssemblyState = &iaCI;
+            gpCI.pDynamicState       = nullptr;
+
+            // Particle additive: ONE/ONE, depth-test off (overlay VFX —
+            // matches plasma billboards' semantic).
+            dsCI.depthTestEnable  = VK_FALSE;
+            dsCI.depthWriteEnable = VK_FALSE;
+            dsCI.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
+            cbAtt.blendEnable         = VK_TRUE;
+            cbAtt.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cbAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cbAtt.colorBlendOp        = VK_BLEND_OP_ADD;
+            cbAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cbAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
+            r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_particleAdditivePipeline);
+            if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(particle additive): %s", vkRes(r).c_str()); return false; }
+
+            // Particle alpha-textured: SRC_ALPHA / ONE_MINUS_SRC_ALPHA,
+            // depth-test on read-only (smoke/debris IS 3D — should hide
+            // behind closer opaque geometry, but multiple smoke layers
+            // don't punch each other out).
+            dsCI.depthTestEnable  = VK_TRUE;
+            dsCI.depthWriteEnable = VK_FALSE;
+            dsCI.depthCompareOp   = VK_COMPARE_OP_LESS;
+            cbAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            cbAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cbAtt.colorBlendOp        = VK_BLEND_OP_ADD;
+            cbAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cbAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cbAtt.alphaBlendOp        = VK_BLEND_OP_ADD;
+            r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_particleAlphaPipeline);
+            if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(particle alpha): %s", vkRes(r).c_str()); return false; }
+            cbAtt.blendEnable = VK_FALSE;
+
+            LOGI("Particle pipelines created (additive + alpha-textured)");
+        }
+
+        // E10.1 — post-process pipeline. Fullscreen triangle (no vertex
+        // input bindings — gl_VertexIndex generates positions in vert),
+        // single descriptor set with the offscreen colour sampler, no
+        // depth, no blend. Renders to the swapchain via m_postRenderPass.
+        if (!postVertSpv.empty() && !postFragSpv.empty() &&
+            m_renderResources.postRenderPass != VK_NULL_HANDLE) {
+            if (!makeModule(postVertSpv, m_postVertModule)) return false;
+            if (!makeModule(postFragSpv, m_postFragModule)) return false;
+
+            // Set 0: combined image sampler for the offscreen scene colour.
+            VkDescriptorSetLayoutBinding sceneColorBinding{};
+            sceneColorBinding.binding         = 0;
+            sceneColorBinding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            sceneColorBinding.descriptorCount = 1;
+            sceneColorBinding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkDescriptorSetLayoutCreateInfo dslCI{};
+            dslCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            dslCI.bindingCount = 1;
+            dslCI.pBindings    = &sceneColorBinding;
+            r = vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_postSetLayout);
+            if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorSetLayout(post): %s", vkRes(r).c_str()); return false; }
+
+            VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+            VkDescriptorPoolCreateInfo poolCI{};
+            poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolCI.poolSizeCount = 1;
+            poolCI.pPoolSizes    = &poolSize;
+            poolCI.maxSets       = 1;
+            r = vkCreateDescriptorPool(m_device, &poolCI, nullptr, &m_postDescriptorPool);
+            if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorPool(post): %s", vkRes(r).c_str()); return false; }
+
+            VkDescriptorSetAllocateInfo dsAI{};
+            dsAI.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            dsAI.descriptorPool     = m_postDescriptorPool;
+            dsAI.descriptorSetCount = 1;
+            dsAI.pSetLayouts        = &m_postSetLayout;
+            r = vkAllocateDescriptorSets(m_device, &dsAI, &m_postDescriptorSet);
+            if (r != VK_SUCCESS) { LOGE("vkAllocateDescriptorSets(post): %s", vkRes(r).c_str()); return false; }
+
+            VkDescriptorImageInfo dii{};
+            dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            dii.imageView   = m_renderResources.offscreenColorView;
+            dii.sampler     = m_renderResources.offscreenColorSampler;
+            VkWriteDescriptorSet write{};
+            write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet           = m_postDescriptorSet;
+            write.dstBinding       = 0;
+            write.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.descriptorCount  = 1;
+            write.pImageInfo       = &dii;
+            vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+            // Pipeline layout — own minimal layout (1 set, no PCs).
+            VkPipelineLayoutCreateInfo plCI{};
+            plCI.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            plCI.setLayoutCount = 1;
+            plCI.pSetLayouts    = &m_postSetLayout;
+            r = vkCreatePipelineLayout(m_device, &plCI, nullptr, &m_postPipelineLayout);
+            if (r != VK_SUCCESS) { LOGE("vkCreatePipelineLayout(post): %s", vkRes(r).c_str()); return false; }
+
+            VkPipelineShaderStageCreateInfo postStages[2]{};
+            postStages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            postStages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            postStages[0].module = m_postVertModule; postStages[0].pName = "main";
+            postStages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            postStages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+            postStages[1].module = m_postFragModule; postStages[1].pName = "main";
+
+            VkPipelineVertexInputStateCreateInfo postViCI{};
+            postViCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            // No vertex bindings — vertex shader uses gl_VertexIndex.
+
+            VkPipelineInputAssemblyStateCreateInfo postIaCI{};
+            postIaCI.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            postIaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineDepthStencilStateCreateInfo postDsCI{};
+            postDsCI.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            postDsCI.depthTestEnable  = VK_FALSE;
+            postDsCI.depthWriteEnable = VK_FALSE;
+            postDsCI.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
+
+            VkPipelineColorBlendAttachmentState postCb{};
+            postCb.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            postCb.blendEnable = VK_FALSE;
+            VkPipelineColorBlendStateCreateInfo postCbCI{};
+            postCbCI.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            postCbCI.attachmentCount = 1;
+            postCbCI.pAttachments    = &postCb;
+
+            VkGraphicsPipelineCreateInfo postGpCI = gpCI;  // copy basic state
+            postGpCI.stageCount          = 2;
+            postGpCI.pStages             = postStages;
+            postGpCI.pVertexInputState   = &postViCI;
+            postGpCI.pInputAssemblyState = &postIaCI;
+            postGpCI.pDepthStencilState  = &postDsCI;
+            postGpCI.pColorBlendState    = &postCbCI;
+            postGpCI.pDynamicState       = nullptr;
+            postGpCI.layout              = m_postPipelineLayout;
+            postGpCI.renderPass          = m_renderResources.postRenderPass;
+            postGpCI.subpass             = 0;
+
+            r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &postGpCI, nullptr, &m_postPipeline);
+            if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(post): %s", vkRes(r).c_str()); return false; }
+            LOGI("Post-process pipeline created");
+        }
+
+        LOGI("Pipelines created (mesh + system + stars + particles + post)");
         return true;
     }
 
@@ -961,6 +1269,39 @@ namespace station {
         }
     }
 
+    // E9 — accept a particle batch from Kotlin. Per-instance data is
+    // appended to the appropriate staging vector (additive vs alpha)
+    // and a ParticleBatch entry records meshToken/textureToken/offset/count
+    // so renderFrame can issue one instanced draw per batch sharing
+    // pipeline state. Bounds-check against kMaxParticles per pipeline so
+    // a runaway emitter can't blow up the GPU buffer.
+    void VulkanContext::drawParticles(uint32_t meshToken, uint32_t textureToken,
+                                      const float* instanceFloats, uint32_t count,
+                                      int32_t mode) {
+        if (!m_sceneOpen || meshToken == 0 || meshToken > kMaxMeshes) return;
+        if (!instanceFloats || count == 0) return;
+        std::vector<float>& staging = (mode == 1) ? m_particleAlphaStaging
+                                                  : m_particleAdditiveStaging;
+        // Cap at kMaxParticles total per pipeline. Prefer the older particles
+        // (already in the buffer) over the new burst — drop the tail.
+        const uint32_t haveFloats   = (uint32_t)staging.size();
+        const uint32_t haveCount    = haveFloats / kParticleFloatStride;
+        if (haveCount >= kMaxParticles) return;
+        const uint32_t spaceLeft    = kMaxParticles - haveCount;
+        const uint32_t addCount     = std::min(count, spaceLeft);
+        const uint32_t addFloats    = addCount * kParticleFloatStride;
+
+        ParticleBatch batch{};
+        batch.meshToken          = meshToken;
+        batch.textureToken       = textureToken;
+        batch.bufferOffsetFloats = haveFloats;
+        batch.count              = addCount;
+        batch.mode               = mode;
+
+        staging.insert(staging.end(), instanceFloats, instanceFloats + addFloats);
+        m_particleBatches.push_back(batch);
+    }
+
     void VulkanContext::beginScene() {
         m_drawList.clear();
         m_systemDrawList.clear();
@@ -968,6 +1309,9 @@ namespace station {
         m_translucentDrawList.clear();
         m_additiveDrawList.clear();
         m_texturedDrawList.clear();
+        m_particleBatches.clear();
+        m_particleAdditiveStaging.clear();
+        m_particleAlphaStaging.clear();
         m_pickRecords.clear();
         m_sceneOpen = true;
     }
@@ -1488,10 +1832,13 @@ namespace station {
         cv[0].color        = {{0.01f, 0.01f, 0.04f, 1.0f}}; // very dark blue-black
         cv[1].depthStencil = {1.0f, 0};
 
+        // E10.1 — scene pass renders into the offscreen colour image.
+        // framebuffers[0] is shared (single offscreen colour + depth);
+        // imageIndex is only used for the post pass below.
         VkRenderPassBeginInfo rpi{};
         rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rpi.renderPass = m_renderResources.renderPass;
-        rpi.framebuffer = m_renderResources.framebuffers[imageIndex];
+        rpi.framebuffer = m_renderResources.framebuffers[0];
         rpi.renderArea.extent = m_sel.extent;
         rpi.clearValueCount = 2; rpi.pClearValues = cv;
         vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
@@ -1763,6 +2110,112 @@ namespace station {
             }
         }
 
+        // --- Draw particle batches (E9) ---
+        // Two passes: additive batches first, then alpha-textured. Each
+        // pass uploads its concatenated staging array to its instance
+        // buffer in one memcpy, binds the matching pipeline once, then
+        // walks the batches issuing per-batch instanced draws (one mesh
+        // bind per token change, one descriptor-set bind per texture
+        // change). Particles render between plasma billboards and
+        // selection frames so they overlay translucent + additive but sit
+        // beneath UI frames.
+        if ((!m_particleAdditiveStaging.empty() || !m_particleAlphaStaging.empty())
+            && (m_particleAdditivePipeline != VK_NULL_HANDLE || m_particleAlphaPipeline != VK_NULL_HANDLE)) {
+            // Upload staging → mapped instance buffers.
+            if (!m_particleAdditiveStaging.empty() && m_particleAdditiveInstanceMapped) {
+                std::memcpy(m_particleAdditiveInstanceMapped,
+                            m_particleAdditiveStaging.data(),
+                            m_particleAdditiveStaging.size() * sizeof(float));
+            }
+            if (!m_particleAlphaStaging.empty() && m_particleAlphaInstanceMapped) {
+                std::memcpy(m_particleAlphaInstanceMapped,
+                            m_particleAlphaStaging.data(),
+                            m_particleAlphaStaging.size() * sizeof(float));
+            }
+
+            auto runPass = [&](int32_t mode, VkPipeline pipeline,
+                               VkBuffer instanceBuffer) {
+                if (pipeline == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) return;
+                bool pipelineBound = false;
+                uint32_t lastBoundMesh = 0;
+                uint32_t lastBoundTex  = 0;
+                for (const auto& batch : m_particleBatches) {
+                    if (batch.mode != mode) continue;
+                    if (batch.count == 0) continue;
+                    uint32_t mIdx = batch.meshToken - 1;
+                    if (!m_meshUsed[mIdx] || !m_meshPool[mIdx].isReady()) continue;
+
+                    if (!pipelineBound) {
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                        pipelineBound = true;
+                    }
+
+                    if (batch.meshToken != lastBoundMesh) {
+                        m_meshPool[mIdx].bind(cmd);
+                        lastBoundMesh = batch.meshToken;
+                    }
+
+                    // Texture: alpha pipeline samples uTex; additive uses
+                    // the engine's default white at set 1 (already bound
+                    // at frame start) when textureToken == 0.
+                    VkDescriptorSet wantTexSet = VK_NULL_HANDLE;
+                    if (batch.textureToken != 0 && batch.textureToken <= kMaxTextures) {
+                        uint32_t tIdx = batch.textureToken - 1;
+                        if (m_textureUsed[tIdx] && m_textureSlots[tIdx].isReady()) {
+                            wantTexSet = m_textureSlots[tIdx].descriptorSet();
+                        }
+                    }
+                    if (wantTexSet == VK_NULL_HANDLE && m_defaultWhiteTexture.isReady()) {
+                        wantTexSet = m_defaultWhiteTexture.descriptorSet();
+                    }
+                    if (wantTexSet != VK_NULL_HANDLE && batch.textureToken != lastBoundTex) {
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                m_pipelineLayout, 1, 1, &wantTexSet, 0, nullptr);
+                        lastBoundTex = batch.textureToken;
+                    }
+
+                    // Bind the instance buffer at binding 1 with the
+                    // batch's float offset converted to bytes.
+                    VkDeviceSize byteOffset = batch.bufferOffsetFloats * sizeof(float);
+                    VkBuffer     instBuf    = instanceBuffer;
+                    vkCmdBindVertexBuffers(cmd, 1, 1, &instBuf, &byteOffset);
+
+                    PushConstantData pc{};
+                    pc.time        = elapsedSec;
+                    // Identity model — vertex shader builds world position
+                    // from instance pos + camera right/up directly.
+                    pc.model[0]  = 1.0f; pc.model[5]  = 1.0f;
+                    pc.model[10] = 1.0f; pc.model[15] = 1.0f;
+                    // textureMode = 1 for alpha-textured branch (sample
+                    // uTex), 0 for additive (heat-ramp).
+                    pc.textureMode = (mode == 1) ? 1.0f : 0.0f;
+                    pc.plasmaColor[0] = 1.0f; pc.plasmaColor[1] = 1.0f;
+                    pc.plasmaColor[2] = 1.0f; pc.plasmaColor[3] = 1.0f;
+                    vkCmdPushConstants(cmd, m_pipelineLayout,
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(PushConstantData), &pc);
+
+                    vkCmdDrawIndexed(cmd, m_meshPool[mIdx].indexCount(),
+                                     batch.count, 0, 0, 0);
+                }
+
+                // Restore the engine's default white texture set 1 and
+                // re-bind binding 1 to the additive instance buffer so
+                // downstream pipelines (frame draws) start from a known
+                // state. Both are cheap and keep the command-buffer
+                // post-conditions predictable.
+                if (pipelineBound && m_defaultWhiteTexture.isReady() && lastBoundTex != 0) {
+                    VkDescriptorSet defaultTexSet = m_defaultWhiteTexture.descriptorSet();
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_pipelineLayout, 1, 1, &defaultTexSet, 0, nullptr);
+                }
+            };
+            runPass(0, m_particleAdditivePipeline, m_particleAdditiveInstanceBuffer);
+            runPass(1, m_particleAlphaPipeline,    m_particleAlphaInstanceBuffer);
+        }
+
         // --- Draw selection frames with constant-width line pipeline ---
         if (!m_systemDrawList.empty() &&
             m_framePipeline != VK_NULL_HANDLE &&
@@ -1820,6 +2273,34 @@ namespace station {
         }
 
         vkCmdEndRenderPass(cmd);
+
+        // E10.1 — post-process pass. Begins after scene pass ended; the
+        // scene pass's finalLayout transition (UNDEFINED →
+        // SHADER_READ_ONLY_OPTIMAL) is implicit, so the offscreen colour
+        // is ready to be sampled. Fullscreen triangle (3 vertices, no
+        // vertex bindings) reads scene colour and writes to swapchain.
+        // After E10.4 this becomes the motion-blur step.
+        if (m_postPipeline != VK_NULL_HANDLE &&
+            m_renderResources.postRenderPass != VK_NULL_HANDLE &&
+            imageIndex < m_renderResources.postFramebuffers.size() &&
+            m_renderResources.postFramebuffers[imageIndex] != VK_NULL_HANDLE) {
+            VkClearValue postClear{};
+            postClear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkRenderPassBeginInfo postRpi{};
+            postRpi.sType            = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            postRpi.renderPass       = m_renderResources.postRenderPass;
+            postRpi.framebuffer      = m_renderResources.postFramebuffers[imageIndex];
+            postRpi.renderArea.extent= m_sel.extent;
+            postRpi.clearValueCount  = 1;
+            postRpi.pClearValues     = &postClear;
+            vkCmdBeginRenderPass(cmd, &postRpi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_postPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_postPipelineLayout, 0, 1, &m_postDescriptorSet, 0, nullptr);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+        }
+
         vkEndCommandBuffer(cmd);
 
         VkPipelineStageFlags ws = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;

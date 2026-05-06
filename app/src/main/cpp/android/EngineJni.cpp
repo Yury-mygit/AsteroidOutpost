@@ -316,6 +316,25 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawAdditiveMesh(JNIEnv* env, j
 }
 
 JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawParticles(JNIEnv* env, jobject /*thiz*/,
+                                                  jlong engineHandle,
+                                                  jlong meshHandle,
+                                                  jlong textureHandle,
+                                                  jfloatArray instanceFloats,
+                                                  jint count, jint mode) {
+    if (!instanceFloats || count <= 0) return;
+    jfloat* data = env->GetFloatArrayElements(instanceFloats, nullptr);
+    if (!data) return;
+    station_engine_draw_particles(
+            reinterpret_cast<StationEngine*>(engineHandle),
+            reinterpret_cast<StationMesh*>(meshHandle),
+            reinterpret_cast<StationTexture*>(textureHandle),
+            reinterpret_cast<const float*>(data),
+            count, mode);
+    env->ReleaseFloatArrayElements(instanceFloats, data, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawObjectFrameMesh(JNIEnv* env, jobject /*thiz*/,
                                                         jlong engineHandle, jlong frameMeshHandle,
                                                         jlong targetMeshHandle,

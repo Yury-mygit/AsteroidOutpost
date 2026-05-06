@@ -150,6 +150,21 @@ void station_engine_draw_textured_mesh(StationEngine*  engine,
                                        float           b,
                                        float           a);
 
+// E9 — instanced particle batch draw. `mesh` is the unit-quad mesh shared
+// by every particle (vertex-shader billboards it via per-instance pos).
+// `texture` is sampled by the alpha-textured pipeline (smoke/debris) and
+// ignored by the additive pipeline (sparks); pass nullptr for additive.
+// `instanceFloats` is `count * 8` floats laid out as `pos.xyz, size, rgba`
+// per instance. `mode`: 0 = additive (ONE/ONE), 1 = alpha-textured
+// (SRC_ALPHA / ONE_MINUS_SRC_ALPHA). Engine drops the tail if `count`
+// exceeds the per-pipeline particle budget.
+void station_engine_draw_particles(StationEngine*  engine,
+                                   StationMesh*    mesh,
+                                   StationTexture* texture,
+                                   const float*    instanceFloats,
+                                   int32_t         count,
+                                   int32_t         mode);
+
 // E1.2 — alpha-blended mesh draw. Pipeline uses SRC_ALPHA / ONE_MINUS_SRC_ALPHA
 // blending and depth-test on / depth-write off. Mesh's per-vertex alpha
 // controls transparency.

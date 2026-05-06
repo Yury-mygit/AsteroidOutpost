@@ -90,6 +90,7 @@ namespace station {
             VkDevice device,
             VkFormat colorFormat,
             VkFormat depthFormat,
+            VkImageLayout finalLayout,
             VkRenderPass& outRenderPass
     ) {
         // Attachment 0: color
@@ -101,7 +102,7 @@ namespace station {
         colorAttachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         colorAttachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        colorAttachment.finalLayout    = finalLayout;
 
         // Attachment 1: depth
         VkAttachmentDescription depthAttachment{};
@@ -166,6 +167,176 @@ namespace station {
         }
 
         log_info("Render pass created (color + depth)");
+        return true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // createPostRenderPass — E10.1 post-process pass (swapchain output)
+    // ---------------------------------------------------------------------------
+    bool RenderResourcesBuilder::createPostRenderPass(
+            VkDevice device,
+            VkFormat colorFormat,
+            VkRenderPass& outRenderPass
+    ) {
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format         = colorFormat;
+        colorAttachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+        // CLEAR to be safe — the fullscreen draw covers everything but a
+        // black clear protects against driver corner cases on the first
+        // frame after acquire when the swapchain image content is
+        // undefined.
+        colorAttachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorRef{};
+        colorRef.attachment = 0;
+        colorRef.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments    = &colorRef;
+
+        // Wait for the scene pass to finish writing the offscreen colour
+        // before sampling it from the post fragment shader. The scene
+        // pass's finalLayout transition handles the image-layout side; the
+        // dependency below handles the cache-flush / pipeline barrier.
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask = 0;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments    = &colorAttachment;
+        renderPassInfo.subpassCount    = 1;
+        renderPassInfo.pSubpasses      = &subpass;
+        renderPassInfo.dependencyCount = 2;
+        renderPassInfo.pDependencies   = deps;
+
+        const VkResult result = vkCreateRenderPass(device, &renderPassInfo, nullptr, &outRenderPass);
+        if (result != VK_SUCCESS) {
+            log_error("vkCreateRenderPass(post) failed: " + vkResultToString(result));
+            return false;
+        }
+        log_info("Post-process render pass created");
+        return true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // createOffscreenColorResources — E10.1 sampled colour target
+    // ---------------------------------------------------------------------------
+    bool RenderResourcesBuilder::createOffscreenColorResources(
+            VkPhysicalDevice physicalDevice,
+            VkDevice device,
+            VkExtent2D extent,
+            VkFormat format,
+            VkImage& outImage,
+            VkDeviceMemory& outMemory,
+            VkImageView& outImageView,
+            VkSampler& outSampler
+    ) {
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType     = VK_IMAGE_TYPE_2D;
+        imageInfo.format        = format;
+        imageInfo.extent        = { extent.width, extent.height, 1 };
+        imageInfo.mipLevels     = 1;
+        imageInfo.arrayLayers   = 1;
+        imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkResult result = vkCreateImage(device, &imageInfo, nullptr, &outImage);
+        if (result != VK_SUCCESS) {
+            log_error("vkCreateImage (offscreen colour) failed: " + vkResultToString(result));
+            return false;
+        }
+        VkMemoryRequirements memReqs{};
+        vkGetImageMemoryRequirements(device, outImage, &memReqs);
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize  = memReqs.size;
+        allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReqs.memoryTypeBits,
+                                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (allocInfo.memoryTypeIndex == UINT32_MAX) {
+            log_error("findMemoryType failed for offscreen colour");
+            vkDestroyImage(device, outImage, nullptr); outImage = VK_NULL_HANDLE;
+            return false;
+        }
+        result = vkAllocateMemory(device, &allocInfo, nullptr, &outMemory);
+        if (result != VK_SUCCESS) {
+            log_error("vkAllocateMemory (offscreen colour) failed: " + vkResultToString(result));
+            vkDestroyImage(device, outImage, nullptr); outImage = VK_NULL_HANDLE;
+            return false;
+        }
+        result = vkBindImageMemory(device, outImage, outMemory, 0);
+        if (result != VK_SUCCESS) {
+            log_error("vkBindImageMemory (offscreen colour) failed");
+            vkFreeMemory(device, outMemory, nullptr); outMemory = VK_NULL_HANDLE;
+            vkDestroyImage(device, outImage, nullptr); outImage = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image                           = outImage;
+        viewInfo.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format                          = format;
+        viewInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel   = 0;
+        viewInfo.subresourceRange.levelCount     = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount     = 1;
+        result = vkCreateImageView(device, &viewInfo, nullptr, &outImageView);
+        if (result != VK_SUCCESS) {
+            log_error("vkCreateImageView (offscreen colour) failed");
+            return false;
+        }
+
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter    = VK_FILTER_LINEAR;
+        samplerInfo.minFilter    = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.maxAnisotropy    = 1.0f;
+        samplerInfo.borderColor   = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.compareOp     = VK_COMPARE_OP_ALWAYS;
+        samplerInfo.minLod        = 0.0f;
+        samplerInfo.maxLod        = 0.0f;
+        result = vkCreateSampler(device, &samplerInfo, nullptr, &outSampler);
+        if (result != VK_SUCCESS) {
+            log_error("vkCreateSampler (offscreen colour) failed");
+            return false;
+        }
+
+        log_info("Offscreen colour resources created");
         return true;
     }
 
@@ -320,6 +491,69 @@ namespace station {
         }
 
         log_info("Framebuffers created: " + std::to_string(outFramebuffers.size()));
+        return true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // createSceneFramebuffer — E10.1 single shared framebuffer for the scene
+    // pass (offscreen colour + depth).
+    // ---------------------------------------------------------------------------
+    bool RenderResourcesBuilder::createSceneFramebuffer(
+            VkDevice device,
+            VkRenderPass sceneRenderPass,
+            VkExtent2D extent,
+            VkImageView offscreenColorView,
+            VkImageView depthImageView,
+            VkFramebuffer& outFramebuffer
+    ) {
+        VkImageView attachments[] = { offscreenColorView, depthImageView };
+        VkFramebufferCreateInfo info{};
+        info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        info.renderPass      = sceneRenderPass;
+        info.attachmentCount = 2;
+        info.pAttachments    = attachments;
+        info.width           = extent.width;
+        info.height          = extent.height;
+        info.layers          = 1;
+        const VkResult r = vkCreateFramebuffer(device, &info, nullptr, &outFramebuffer);
+        if (r != VK_SUCCESS) {
+            log_error("vkCreateFramebuffer(scene) failed: " + vkResultToString(r));
+            return false;
+        }
+        log_info("Scene framebuffer created");
+        return true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // createPostFramebuffers — E10.1 per-swapchain-image fbs for post pass.
+    // ---------------------------------------------------------------------------
+    bool RenderResourcesBuilder::createPostFramebuffers(
+            VkDevice device,
+            VkRenderPass postRenderPass,
+            VkExtent2D extent,
+            const std::vector<VkImageView>& swapchainViews,
+            std::vector<VkFramebuffer>& outFramebuffers
+    ) {
+        outFramebuffers.clear();
+        outFramebuffers.reserve(swapchainViews.size());
+        for (size_t i = 0; i < swapchainViews.size(); ++i) {
+            VkFramebufferCreateInfo info{};
+            info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            info.renderPass      = postRenderPass;
+            info.attachmentCount = 1;
+            info.pAttachments    = &swapchainViews[i];
+            info.width           = extent.width;
+            info.height          = extent.height;
+            info.layers          = 1;
+            VkFramebuffer fb = VK_NULL_HANDLE;
+            const VkResult r = vkCreateFramebuffer(device, &info, nullptr, &fb);
+            if (r != VK_SUCCESS) {
+                log_error("vkCreateFramebuffer(post) failed: " + vkResultToString(r));
+                return false;
+            }
+            outFramebuffers.push_back(fb);
+        }
+        log_info("Post framebuffers created: " + std::to_string(outFramebuffers.size()));
         return true;
     }
 
@@ -484,6 +718,32 @@ namespace station {
         }
         resources.framebuffers.clear();
 
+        for (VkFramebuffer framebuffer : resources.postFramebuffers) {
+            if (framebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device, framebuffer, nullptr);
+            }
+        }
+        resources.postFramebuffers.clear();
+
+        // E10.1 — destroy offscreen colour resources before the scene pass
+        // (sampler/view depend on the image which depends on the memory).
+        if (resources.offscreenColorSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, resources.offscreenColorSampler, nullptr);
+            resources.offscreenColorSampler = VK_NULL_HANDLE;
+        }
+        if (resources.offscreenColorView != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, resources.offscreenColorView, nullptr);
+            resources.offscreenColorView = VK_NULL_HANDLE;
+        }
+        if (resources.offscreenColorImage != VK_NULL_HANDLE) {
+            vkDestroyImage(device, resources.offscreenColorImage, nullptr);
+            resources.offscreenColorImage = VK_NULL_HANDLE;
+        }
+        if (resources.offscreenColorMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, resources.offscreenColorMemory, nullptr);
+            resources.offscreenColorMemory = VK_NULL_HANDLE;
+        }
+
         if (resources.depthImageView != VK_NULL_HANDLE) {
             vkDestroyImageView(device, resources.depthImageView, nullptr);
             resources.depthImageView = VK_NULL_HANDLE;
@@ -502,6 +762,10 @@ namespace station {
         if (resources.renderPass != VK_NULL_HANDLE) {
             vkDestroyRenderPass(device, resources.renderPass, nullptr);
             resources.renderPass = VK_NULL_HANDLE;
+        }
+        if (resources.postRenderPass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device, resources.postRenderPass, nullptr);
+            resources.postRenderPass = VK_NULL_HANDLE;
         }
 
         if (!resources.commandBuffers.empty() && resources.commandPool != VK_NULL_HANDLE) {

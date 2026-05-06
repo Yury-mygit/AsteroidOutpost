@@ -26,7 +26,11 @@ namespace station {
         void destroySurface();
         void destroy();
         bool createPipeline(const std::vector<uint32_t>& vertSpv,
-                            const std::vector<uint32_t>& fragSpv);
+                            const std::vector<uint32_t>& fragSpv,
+                            const std::vector<uint32_t>& particleVertSpv = {},
+                            const std::vector<uint32_t>& particleFragSpv = {},
+                            const std::vector<uint32_t>& postVertSpv = {},
+                            const std::vector<uint32_t>& postFragSpv = {});
 
         void setFocused(bool focused);
         [[nodiscard]] bool isFocused()      const { return m_focused; }
@@ -45,6 +49,17 @@ namespace station {
         // skipping the PNG decode. `length` must be width*height*4.
         uint32_t uploadTextureRaw(const uint8_t* rgba8, uint32_t width, uint32_t height);
         void     freeTexture(uint32_t token);
+
+        // E9 — submit a particle batch. `instanceFloats` is an interleaved
+        // array of `count * kParticleFloatStride` floats (per-instance pos3
+        // + size1 + color4). `mode` picks pipeline: 0 = additive (sparks),
+        // 1 = alpha-textured (smoke/debris). `textureToken` is only used
+        // by the alpha-textured pipeline; pass 0 for additive (default
+        // white texture covers the binding).
+        void drawParticles(uint32_t meshToken, uint32_t textureToken,
+                           const float* instanceFloats, uint32_t count,
+                           int32_t mode);
+        static constexpr uint32_t kParticleFloatStride = 8; // pos3 + size1 + rgba4
 
         // Scene API — called each frame from engine_api
         void beginScene();
@@ -167,6 +182,26 @@ namespace station {
         std::vector<DrawCommand> m_translucentDrawList;  // E1.2 — alpha-blend mesh draws
         std::vector<DrawCommand> m_additiveDrawList;     // E7   — ONE/ONE additive mesh draws
         std::vector<DrawCommand> m_texturedDrawList;     // E8.3 — textured opaque mesh draws
+
+        // E9 — particle batches. One ParticleBatch per drawParticles call;
+        // the engine uploads its float data into the right shared instance
+        // VkBuffer at the start of renderFrame and draws each batch as a
+        // single instanced draw call.
+        struct ParticleBatch {
+            uint32_t meshToken;
+            uint32_t textureToken;
+            uint32_t bufferOffsetFloats;  // offset into m_particle{Add,Alpha}InstanceMapped
+            uint32_t count;
+            int32_t  mode;                // 0 = additive, 1 = alpha-textured
+        };
+        std::vector<ParticleBatch> m_particleBatches;
+        // Pending uploads accumulated by drawParticles between begin/endScene.
+        // Engine concatenates all additive batches into the additive
+        // instance buffer and all alpha batches into the alpha instance
+        // buffer at renderFrame start so the GPU sees a single mapped
+        // memory write per pipeline.
+        std::vector<float> m_particleAdditiveStaging;
+        std::vector<float> m_particleAlphaStaging;
         bool m_sceneOpen = false;
 
         struct PickRecord {
@@ -196,6 +231,18 @@ namespace station {
         // doesn't bind its own texture. Always present once
         // createPipelineInfra succeeds; lifetime tied to the engine.
         Texture               m_defaultWhiteTexture;
+
+        // E9 — instance buffers for the two particle pipelines. HOST_VISIBLE
+        // and persistently mapped so renderFrame can memcpy the staging
+        // arrays straight into them with no map/unmap churn. Sized for
+        // kMaxParticles (4096) per pipeline, well beyond expected peak.
+        static constexpr uint32_t kMaxParticles = 4096;
+        VkBuffer       m_particleAdditiveInstanceBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory m_particleAdditiveInstanceMemory = VK_NULL_HANDLE;
+        void*          m_particleAdditiveInstanceMapped = nullptr;
+        VkBuffer       m_particleAlphaInstanceBuffer    = VK_NULL_HANDLE;
+        VkDeviceMemory m_particleAlphaInstanceMemory    = VK_NULL_HANDLE;
+        void*          m_particleAlphaInstanceMapped    = nullptr;
         VkPipelineLayout      m_pipelineLayout       = VK_NULL_HANDLE;
         VkPipeline            m_pipeline             = VK_NULL_HANDLE;  // mesh pipeline
         VkPipeline            m_starPipeline         = VK_NULL_HANDLE;  // star point pipeline
@@ -204,8 +251,25 @@ namespace station {
         VkPipeline            m_translucentPipeline  = VK_NULL_HANDLE;  // SRC_ALPHA / ONE_MINUS_SRC_ALPHA mesh pipeline (E1.2)
         VkPipeline            m_additivePipeline     = VK_NULL_HANDLE;  // ONE/ONE additive mesh pipeline (E7)
         VkPipeline            m_framePipeline        = VK_NULL_HANDLE;  // LINE_LIST frame pipeline
+        // E9 — particle pipelines. Same per-instance binding 1 layout
+        // (pos+size, color), differ only in blend state.
+        VkPipeline            m_particleAdditivePipeline = VK_NULL_HANDLE;  // ONE/ONE
+        VkPipeline            m_particleAlphaPipeline    = VK_NULL_HANDLE;  // SRC_ALPHA / ONE_MINUS_SRC_ALPHA
         VkShaderModule        m_vertModule           = VK_NULL_HANDLE;
         VkShaderModule        m_fragModule           = VK_NULL_HANDLE;
+        VkShaderModule        m_particleVertModule   = VK_NULL_HANDLE;
+        VkShaderModule        m_particleFragModule   = VK_NULL_HANDLE;
+        // E10.1 — post-process pipeline (fullscreen-triangle, samples
+        // offscreen colour and writes to swapchain). Own pipeline layout
+        // because it doesn't need the scene UBO/push-constants — just
+        // one descriptor set with the offscreen sampler.
+        VkPipeline            m_postPipeline         = VK_NULL_HANDLE;
+        VkPipelineLayout      m_postPipelineLayout   = VK_NULL_HANDLE;
+        VkDescriptorSetLayout m_postSetLayout        = VK_NULL_HANDLE;
+        VkDescriptorPool      m_postDescriptorPool   = VK_NULL_HANDLE;
+        VkDescriptorSet       m_postDescriptorSet    = VK_NULL_HANDLE;
+        VkShaderModule        m_postVertModule       = VK_NULL_HANDLE;
+        VkShaderModule        m_postFragModule       = VK_NULL_HANDLE;
         MeshGpu               m_frameLineMesh{};
         MeshGpu               m_frameLineMeshEnemy{};
         bool                  m_wideLines            = false;

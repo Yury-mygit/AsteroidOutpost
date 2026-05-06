@@ -135,6 +135,21 @@ data class BillboardDraw(
 )
 
 /**
+ * E9 — packed particle batch ready for the engine. `data` is `count * 8`
+ * floats per particle (pos.xyz, size, rgba), `mesh` is the unit-quad mesh,
+ * `texture` is the sampler-bound texture (0 for additive sparks). `mode`
+ * picks pipeline (PARTICLE_ADDITIVE or PARTICLE_ALPHA_TEXTURED on
+ * EngineJni). One batch per logical particle pool per frame.
+ */
+data class ParticleBatchKt(
+    val meshHandle:    Long,
+    val textureHandle: Long,
+    val data:          FloatArray,
+    val count:         Int,
+    val mode:          Int,
+)
+
+/**
  * Submit the scene to the engine for rendering.
  * Call once per frame from the render loop.
  */
@@ -150,6 +165,7 @@ fun submitScene(
     translucentObjects: List<SceneObject> = emptyList(),
     additiveObjects: List<SceneObject> = emptyList(),
     texturedObjects: List<SceneObject> = emptyList(),
+    particleBatches: List<ParticleBatchKt> = emptyList(),
 ) {
     engine.beginScene()
     for (obj in objects) {
@@ -180,6 +196,9 @@ fun submitScene(
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV, p.r, p.g, p.b, p.a)
+    }
+    for (pb in particleBatches) {
+        engine.drawParticles(pb.meshHandle, pb.textureHandle, pb.data, pb.count, pb.mode)
     }
     engine.endScene()
 }

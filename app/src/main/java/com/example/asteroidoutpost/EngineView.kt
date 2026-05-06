@@ -65,6 +65,14 @@ class EngineView @JvmOverloads constructor(
     @Volatile
     var texturedObjects: List<SceneObject> = emptyList()
 
+    /**
+     * E9 — packed particle batches. One ParticleBatchKt per logical pool
+     * per frame; engine submits each as a single instanced draw. Built
+     * by `MainActivity.buildScene` from CPU-tickedParticle pools.
+     */
+    @Volatile
+    var particleBatches: List<ParticleBatchKt> = emptyList()
+
     /** Engine render-loop FPS (sliding 1-sec window, updated by RenderThread). */
     @Volatile
     var fps: Float = 0f
@@ -279,7 +287,7 @@ class EngineView @JvmOverloads constructor(
     }
 
     fun submitCurrentScene() {
-        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects)
+        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects, particleBatches)
     }
 
     private fun collectScreenFrames(objects: List<SceneObject>): List<ScreenFrame> {
@@ -325,7 +333,7 @@ class EngineView @JvmOverloads constructor(
             var fpsWindowStartNs = System.nanoTime()
             while (running) {
                 val currentScene = engineView.scene
-                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects)
+                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects, engineView.particleBatches)
                 engine.renderFrame()
                 engineView.publishScreenFrames(engineView.collectScreenFrames(currentScene))
 

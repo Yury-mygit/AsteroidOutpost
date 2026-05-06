@@ -21,6 +21,17 @@ struct StationEngine {
     // SPV shader bytes — stored until pipeline creation
     std::vector<uint32_t> vertSpv;
     std::vector<uint32_t> fragSpv;
+    // E9 — separate particle shaders (different vertex attribute layout
+    // because of per-instance binding 1). Shared with the main pair until
+    // the pipeline is built.
+    std::vector<uint32_t> particleVertSpv;
+    std::vector<uint32_t> particleFragSpv;
+    // E10.1 — post-process shaders (fullscreen triangle + texture sample).
+    // Optional from the engine's POV — if not uploaded, motion blur path
+    // is skipped and the render flow falls back to scene-direct (handled
+    // by VulkanContext::createPipeline detecting empty SPV).
+    std::vector<uint32_t> postVertSpv;
+    std::vector<uint32_t> postFragSpv;
     bool pipelineCreated = false;
 };
 
@@ -71,6 +82,18 @@ extern "C" void station_engine_set_shader(StationEngine* e,
     } else if (std::string(name) == "frag") {
         e->fragSpv = std::move(words);
         LOGI("Fragment shader set (%zu bytes)", length);
+    } else if (std::string(name) == "particle.vert") {
+        e->particleVertSpv = std::move(words);
+        LOGI("Particle vertex shader set (%zu bytes)", length);
+    } else if (std::string(name) == "particle.frag") {
+        e->particleFragSpv = std::move(words);
+        LOGI("Particle fragment shader set (%zu bytes)", length);
+    } else if (std::string(name) == "post.vert") {
+        e->postVertSpv = std::move(words);
+        LOGI("Post vertex shader set (%zu bytes)", length);
+    } else if (std::string(name) == "post.frag") {
+        e->postFragSpv = std::move(words);
+        LOGI("Post fragment shader set (%zu bytes)", length);
     } else {
         LOGE("set_shader: unknown name '%s'", name);
     }
@@ -86,13 +109,17 @@ extern "C" void station_engine_surface_created(StationEngine* e,
     if (!e->vulkan.createSurface(surface, width, height)) {
         LOGE("createSurface failed"); return;
     }
-    // Create pipeline once — requires both shaders to be set
+    // Create pipeline once — requires main shader pair plus, optionally,
+    // particle shader pair (E9). Particle pipelines are skipped if their
+    // shaders weren't uploaded — the rest of the engine still works.
     if (!e->pipelineCreated) {
         if (e->vertSpv.empty() || e->fragSpv.empty()) {
             LOGE("Cannot create pipeline: shaders not set yet");
             return;
         }
-        if (e->vulkan.createPipeline(e->vertSpv, e->fragSpv)) {
+        if (e->vulkan.createPipeline(e->vertSpv, e->fragSpv,
+                                     e->particleVertSpv, e->particleFragSpv,
+                                     e->postVertSpv, e->postFragSpv)) {
             e->pipelineCreated = true;
         } else {
             LOGE("createPipeline failed");
@@ -304,6 +331,18 @@ extern "C" void station_engine_draw_textured_mesh(StationEngine* e,
                                                   float r, float g, float b, float a) {
     if (!e || !mesh || !texture) return;
     e->vulkan.drawTexturedMesh(mesh->token, texture->token, modelMatrix, r, g, b, a);
+}
+
+extern "C" void station_engine_draw_particles(StationEngine*  e,
+                                              StationMesh*    mesh,
+                                              StationTexture* texture,
+                                              const float*    instanceFloats,
+                                              int32_t         count,
+                                              int32_t         mode) {
+    if (!e || !mesh || !instanceFloats || count <= 0) return;
+    uint32_t texToken = texture ? texture->token : 0;
+    e->vulkan.drawParticles(mesh->token, texToken, instanceFloats,
+                            (uint32_t)count, mode);
 }
 
 extern "C" void station_engine_draw_translucent_mesh(StationEngine* e,

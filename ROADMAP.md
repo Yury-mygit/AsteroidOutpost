@@ -1,7 +1,7 @@
 # Asteroid Outpost — Концепция и состояние
 
 > Живой документ. Обновляй после каждой значимой сессии.
-> Последнее обновление: **2026-05-07** (E8 UV + textures landed: vertex UV attribute + sampler descriptor set + load_texture/load_texture_raw API + drawTexturedMesh route + textured fragment branch — engine wave verified end-to-end via two procedural smoke-test patches, then patches removed for production)
+> Последнее обновление: **2026-05-07** (E9 native particle system landed — 2 pipelines additive+alpha-textured, instanced drawParticles API, 3 consumers: AoE sparks, asteroid death debris+smoke, muzzle micro-sparks. E10.1 offscreen render target + post-process passthrough also landed — render flow restructured to scene→offscreen→post→swapchain, ready for velocity/motion-blur in E10.2-E10.4)
 
 ## Концепция
 
@@ -136,8 +136,9 @@
 | E7 | Additive Mesh Pipeline (3D огненные шары / лазеры) | engine wave   | ✅ **Готово** (2026-05-06) — 7-й Vulkan pipeline (`m_additivePipeline`) с ONE/ONE blend для произвольных 3D мешей, depth-test on read-only / depth-write off. C API/JNI/Kotlin route + Scene `additiveObjects` параллельно `translucentObjects`. Plain-additive ветка во фрагменте под флаг `pc.tint.w`. Разблокирует настоящие 3D fireball'ы, плазменные лучи лазеров, электроразряды. |
 | E7.1 | 3D Fireball (первый consumer E7)            | engine wave        | ✅ **Готово** (2026-05-06) — процедурная UV-сфера через `loadMeshRaw`, fire-material шейдер branch (`abs(vNormal.y)` Fresnel + heat-ramp + animated FBM), runtime `Fireball` data class заменил плоские плазма-биллборды у AoE-взрывов. Polish: ease-out quad scale, лерп цвета orange→red, sqrt brightness fade. |
 | E8 | UV + textures                                 | engine wave        | ✅ **Готово** (2026-05-07) — vertex UV attribute (location 3) + descriptor set 1 (combined image sampler) + `Texture` C++ class + 4 API: `load_texture(png_bytes)`, `load_texture_raw(rgba8, w, h)`, `load_mesh_raw_uv` (12 floats/vertex), `draw_textured_mesh`. Текстурированный fragment branch под `pc.textureMode` флаг. Verified через два procedural smoke-test patches (rock noise + cyan icon disc), затем patches удалены. Разблокирует sprite-атласы, текстуры на астероидах, иконки в HUD, decals. |
-| E9 | Native particle system                        | engine wave        | 🟡 **Запланировано** — native instanced particle buffer + один draw-call на всю систему. Perf-оптимизация под плотные волны (искры от взрывов, дым-шлейфы, обломки). |
-| E10 | Motion blur post-process                     | engine wave        | 🟡 **Запланировано** — full-screen motion blur с velocity-buffer attachment + post-process pass. Решает motion aliasing универсально (быстрые пули перестают мерцать на 60Hz, любое движение становится плавным). После E9 потому что это финальная полировка движущихся эффектов; mobile-perf нужно валидировать. |
+| E9 | Native particle system                        | engine wave        | ✅ **Готово** (2026-05-07) — 2 pipelines (additive ONE/ONE для sparks/embers + alpha-textured SRC_ALPHA для smoke/debris); particle.vert/.frag с per-instance binding 1 (8 floats: pos3+size1+rgba4); 2 instance VkBuffer (4096 particles each, persistent-mapped); `drawParticles` API через C/JNI/Kotlin одним batched вызовом per pool; Kotlin Particle pool + tick + spawn helpers; 3 consumers: AoE sparks (50-70 на event), asteroid death debris+smoke (4-8 chunks с gravity + 3-5 puffs), muzzle micro-sparks (3-5 на каждый выстрел в 40°-конусе). |
+| E10.1 | Motion blur: offscreen render + post pass  | engine wave        | ✅ **Готово** (2026-05-07) — render flow перестроен с direct-to-swapchain на scene→offscreen→post→swapchain. `RenderResources` расширен offscreen colour image + sampler + post pass + post framebuffers. Один shared scene framebuffer, post fbs per swapchain image. Post pipeline = fullscreen-triangle через `gl_VertexIndex`, samples offscreen, текущий fragment passthrough (motion blur — E10.4). Visually идентично pre-E10. |
+| E10.2-E10.6 | Motion blur: velocity, prev-frame, blur shader, particle prev-pos, verify | engine wave | 🟡 **Запланировано** — velocity attachment (RG16F) во scene pass, vertex shader пишет screen-space velocity = curr - prev positions; UBO + push-const расширены `prev*` matrices; particle layout 8→14 floats с prevPos; 8-tap motion-blur shader с length-clamp в NDC. Решит motion aliasing — пули перестают мерцать на 60Hz. |
 
 Зависимости: M1 → {M2, M3, M5}; M2 → M4; {M2, M3, M5} → M6; всё → M7. E1 параллельно (затрагивает только нативку). E2.2 зависит от E1 (`load_mesh_raw` + translucent pipeline). E3.2/E3.3 зависят от E3.1 (material flags). E7 независим (переиспользует E4 шейдер-ветку). E8 независим. E9 → нужен E8 (sprite-атласы для частиц). E10 → нужны G-buffer attachment infra и render-to-texture pass; делать после E9 чтобы тестировать на плотных сценах.
 
@@ -627,9 +628,67 @@
 - 🟡 LUT (color grading), envmaps, любой shader lookup table — общий путь открыт.
 - 🟡 Decals на повреждённой базе (idea.txt task 4) — projector-style mesh с прозрачным PNG.
 
+### E9 — Native particle system (завершено 2026-05-07)
+
+Триггер: до E9 каждый VFX-эффект — отдельный draw call (50 plasma billboards для AoE = 50 draws). Под плотные эффекты (искры, дым, обломки) нужен один draw call на всю систему. Также E9 — последний инфраструктурный шаг перед AAA-mobile уровнем; smoke/debris требуют sprite-атласы (E8 sampler infra) + instanced rendering (новое в E9).
+
+Архитектурный выбор: **CPU simulation + GPU instancing.** Kotlin владеет state (matches "Kotlin owns scene"), тикает particles, раз в кадр пакует state в FloatArray и шлёт одним JNI-вызовом. Engine аплоадит в persistent-mapped instance buffer (HOST_VISIBLE), рисует один `vkCmdDrawIndexed` с `instanceCount = N`. Реалистично 1000-4000 particles на mobile (CPU work тривиален, GPU — fillrate-limited через ONE/ONE overlap). Альтернатива — GPU compute simulation (storage buffer + dispatch) — отброшена как переусложнение для этих counts.
+
+Сделано:
+- ✅ **2 новых Vulkan pipelines.** `m_particleAdditivePipeline` (ONE/ONE blend, depth-test off) для sparks/embers; `m_particleAlphaPipeline` (SRC_ALPHA / ONE_MINUS_SRC_ALPHA, depth read-only) для smoke/debris. Оба используют unit-quad mesh из binding 0 + per-instance binding 1 (rate INSTANCE, 8 floats per instance: pos3 + size1 + rgba4).
+- ✅ **Новые шейдеры.** `particle.vert` — instanced billboarding через camera right/up из `ubo.view`; outputs `vColor=instColor`, `vUV=quad-mapped (0..1)`, `vLocalXZ` для soft-fade. `particle.frag` — две ветки: additive (heat-ramp warm-white→orange + soft-fade × per-instance vColor) и textured (sample uTex × vColor.rgb, vColor.a × fade × sampled.a) под флагом `pc.textureMode`.
+- ✅ **2 persistent-mapped instance buffer'а** (`m_particleAdditiveInstanceBuffer`, `m_particleAlphaInstanceBuffer`), HOST_VISIBLE+HOST_COHERENT, 4096 particles × 32 bytes = 128KB each. `vkMapMemory` один раз на старте; renderFrame делает `memcpy` staging → mapped, `vkCmdDrawIndexed` с `instanceCount`.
+- ✅ **`drawParticles` API** через C → JNI → Kotlin. Один JNI вызов на pool за кадр (а не 1000+ отдельных draw'ов). `setShader` принимает `particle.vert`/`particle.frag`; `createPipeline` строит particle pipelines если SPV переданы.
+- ✅ **Render-loop**: два pass'а (additive затем alpha), внутри каждого — bind pipeline once, loop batches с `vkCmdBindVertexBuffers(binding=1, instance buffer, byteOffset)`, descriptor set 1 binds к per-batch текстуре (default white для additive). После цикла restore default white set 1.
+- ✅ **Kotlin particle layer**: `Particle` data class (pos, vel, age, life, size, rgba, drag, gravity); 3 пула (`sparkParticles`, `smokeParticles`, `debrisParticles`). `tickParticles` per-pool: Euler + drag + gravity + cull. `packParticles`: count×8 floats, alpha=`sqrt(1-t)*tintA` для smooth fade.
+- ✅ **Procedural textures** (без real ассетов): `generateSmokeTexture` (64×64 soft Gaussian + 2-octave noise wisps, light-gray cool tint, transparent edges), `generateDebrisTexture` (64×64 irregular polygonal asteroid-chunk silhouette, warm gray, top-left light gradient, 1-pixel AA edge).
+- ✅ **3 consumers** в gameplay:
+  1. **AoE sparks** в `spawnExplosion`: 50-70 искр fan'ом за каждый AoE-взрыв, оранжевые, drag 1.5, life 0.25-0.55s.
+  2. **Asteroid death debris+smoke**: NORMAL/FAST/HEAVY смерть → 4-8 textured chunks (с gravity 1.2, drag 0.6) + 3-5 smoke puffs (drift, drag 0.8). HEAVY получает тёмно-красный тинт debris.
+  3. **Muzzle flash sparks**: каждый выстрел (центральная + боковые турели) → 3-5 micro-искр в 40°-конусе по vector velocity, drag 2.5, life 0.08-0.16s.
+
+Принятые решения:
+- Per-instance stride 8 floats — компромисс между gpu фетч-стоимостью и расширяемостью. Для атласных UV offsets можно расширить до 12 floats отдельной волной если понадобится.
+- Particle vertex shader отдельный от triangle.vert: per-instance binding 1 нужен только particle pipelines, не загромождаем основной шейдер.
+- Particle fragment shader тоже отдельный (хотя мог бы reuse triangle.frag) — две branched logics частей не пересекаются с основной lit/plasma логикой, чище отдельный файл.
+- Procedural textures хранятся в Kotlin, генерятся на старте через `loadTextureRaw` (E8.4). Когда появятся real PNG-ассеты — drop-in replacement через `loadTexture(pngBytes)`.
+- Spawn API в Kotlin (`spawnSparkBurst`, `spawnMuzzleSparks`, `spawnAsteroidDeathFX`) использует `Math.random()` без seeded RNG — ок для VFX где детерминизм не нужен.
+
+Что E9 разблокировал на будущее:
+- 🟡 Sprite-атласные particles: per-instance UV offset поле, кадровая анимация по age (fire trail, electric arcs).
+- 🟡 Particle types через атласы — реальные PNG-textures для smoke/debris вместо процедурных.
+- 🟡 Performance scaling: если 4096 окажется тесно, можно расширить kMaxParticles или GPU compute simulation отдельной волной.
+- 🟡 Energy-asteroid death cyan particles — отдельный sub-burst со своим тинтом + faster FBM.
+- 🟡 Bullet impact sparks — мелкий burst при попадании bullet → asteroid hit.
+
+### E10.1 — Motion blur: offscreen render target + post-process pass (завершено 2026-05-07)
+
+Триггер: первый шаг перед motion blur shader. До E10 scene рисовалась прямо в swapchain image — нет места куда вставить post-process. Restructure: scene в offscreen image, который post-pass семплит и пишет в swapchain. После E10.4 fragment станет motion blur shader; E10.1 — пока passthrough, чтобы verify restructure не сломал визуал.
+
+Сделано:
+- ✅ **`RenderResources` расширен**: `postRenderPass`, `postFramebuffers[]` (per-swapchain-image), `offscreenColorImage/Memory/View/Sampler` (single shared, B8G8R8A8_UNORM, COLOR_ATTACHMENT+SAMPLED). Existing `renderPass` теперь scene-pass с finalLayout=SHADER_READ_ONLY_OPTIMAL; `framebuffers` теперь содержит ровно один scene fb (offscreen colour + depth).
+- ✅ **Builder**: 4 новых метода — `createPostRenderPass` (single colour attachment, finalLayout=PRESENT_SRC_KHR), `createOffscreenColorResources` (image+memory+view+sampler через стандартный VkImage path), `createSceneFramebuffer` (одиночный shared), `createPostFramebuffers` (per-swapchain-image). `createRenderPass` принял `finalLayout` параметр для разделения scene/post.
+- ✅ **`VulkanContext`**: `m_postPipeline`, `m_postPipelineLayout` (отдельный, минимальный — 1 set, no PCs), `m_postSetLayout` (1 binding = COMBINED_IMAGE_SAMPLER), `m_postDescriptorPool` + `m_postDescriptorSet`, `m_postVertModule/m_postFragModule`. Post pipeline создаётся в конце `createPipeline` если SPV переданы. Descriptor set биндится один раз на offscreen colour image+sampler.
+- ✅ **`createDepthAndFramebuffers` перестроена**: scene pass + offscreen colour + scene fb + post pass + post fbs. `createCommandInfra` теперь sizes по `postFramebuffers.size()` (= swapchain images count).
+- ✅ **`renderFrame`**: scene pass на shared scene-fb (`framebuffers[0]`), все scene draws (mesh, billboards, particles, fireballs, etc.). После `vkCmdEndRenderPass` сцены — отдельный post pass на per-imageIndex post-fb, биндит post pipeline + descriptor (offscreen sampler), один `vkCmdDraw(3, 1, 0, 0)` (fullscreen triangle через gl_VertexIndex).
+- ✅ **Шейдеры**: `post.vert` — fullscreen triangle через `gl_VertexIndex` без vertex bindings (стандартный трюк: `(idx<<1)&2, idx&2` → UV (0,0)/(2,0)/(0,2), UV*2-1 → NDC покрывая весь экран в одном trianлге). `post.frag` — пока passthrough `texture(sceneColor, vUV)`. После E10.4 заменим на motion-blur с 8 samples вдоль velocity.
+- ✅ **Layout transitions** через render pass attachment finalLayout — implicit, ничего не делать руками. Scene pass: UNDEFINED → SHADER_READ_ONLY_OPTIMAL. Post pass: UNDEFINED → PRESENT_SRC_KHR. Post pass deps[0] обеспечивает COLOR_ATTACHMENT_OUTPUT → FRAGMENT_SHADER_READ синхронизацию между passes.
+
+Принятые решения:
+- Один offscreen image (а не per-swapchain-image): `inFlightFence` гарантирует не больше одного frame в pipeline, можно безопасно реиспользовать. Экономит memory.
+- Post pipeline layout отдельный (не reuse main `m_pipelineLayout`): post не нуждается в UBO set 0 или push-constants, минимизируем cost binding'а.
+- Format = swapchain format (B8G8R8A8_UNORM): trivially compatible blit, никаких conversions. Для HDR в будущем — отдельный путь.
+- Post render pass использует CLEAR loadOp защищающим от UB на первом frame после acquireNextImage (хотя fullscreen triangle покрывает весь экран). Bandwidth penalty минимальный (1× clear на ~6MB).
+
+Что E10.1 разблокировал на будущее:
+- ✅ E10.2 (velocity attachment) — добавим 2-й color attachment в scene pass.
+- ✅ E10.4 (motion blur shader) — fragment shader заменяется без structural changes.
+- 🟡 Любой post-process effect (bloom, chromatic aberration, vignette, color grading) — общий путь открыт.
+- 🟡 Render-to-texture для других целей (reflection, shadow maps если когда-то нужны) — pattern доказан.
+
 ## Бэклог по движку (после E10)
 
-E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны, E4 — plasma flash polish (огонь вместо квадратов + фикс soft-fade no-op), E5.1 — per-billboard plasma tint, E5.2 — billboard matrix fix + non-uniform scale, E6 — time push-constant, E7 — additive mesh pipeline (3D ONE/ONE для произвольных мешей), E7.1 — 3D fireball на AoE-взрывах, E8 — UV + textures (vertex UV, sampler descriptor set, load_texture/load_texture_raw/load_mesh_raw_uv/draw_textured_mesh API). Активные запланированные волны: **E9 (Particles) → E10 (Motion blur)** — детали в milestone-таблице выше. Что НЕ запланировано (подумать когда понадобится):
+E1 закрыл базовую прозрачность и процедурные меши, E2.1 — soft-fade на plasma-вспышках, E2.2 — annular-membrane для купола, E3 — material plumbing + procedural FBM/hex паттерны, E4 — plasma flash polish (огонь вместо квадратов + фикс soft-fade no-op), E5.1 — per-billboard plasma tint, E5.2 — billboard matrix fix + non-uniform scale, E6 — time push-constant, E7 — additive mesh pipeline (3D ONE/ONE для произвольных мешей), E7.1 — 3D fireball на AoE-взрывах, E8 — UV + textures (vertex UV, sampler descriptor set, load_texture/load_texture_raw/load_mesh_raw_uv/draw_textured_mesh API), E9 — native particle system (2 pipelines + drawParticles instanced API + 3 consumers), E10.1 — offscreen render + post-process passthrough. Активная запланированная волна: **E10.2-E10.6 (Motion blur — velocity, prev-matrices, blur shader)** — детали в milestone-таблице выше. Что НЕ запланировано (подумать когда понадобится):
 
 - **Procedural-shader варианты для нéбул.** Текущий нéбул = FBM domain-warped soft-disk (E3.2). Можно ещё богаче: multi-color gradients, nebula-specific noise types. Дешевле всего через E8 (текстуры с запечённым шумом).
 - **Скайбокс / starfield с шириной.** Сейчас звёзды — point-list, без вариаций яркости/цвета. После E8 можно сделать звёзды через текстурированные quads с per-vertex-twinkle.
@@ -651,6 +710,8 @@ E1 закрыл базовую прозрачность и процедурны�
 Закрытые в E7: ✅ 7-й Vulkan pipeline `m_additivePipeline` для 3D ONE/ONE additive mesh draws (depth-test on read-only); `station_engine_draw_additive_mesh` через C/JNI/Kotlin; `SceneObject.tintR/G/B/A` + `additiveMaterial`; `EngineView.additiveObjects`. Plain-additive шейдер ветка под `pc.tint.w >= 0.5` — разблокирует 3D огненные шары, плазменные лучи, электроразряды.
 Закрытые в E7.1: ✅ Material flag в `drawAdditiveMesh` (закодирован в `cmd.tint[3]`: 1.0=plain, 2.0=fire); fire-material шейдер ветка с `abs(vNormal.y)` Fresnel + heat-ramp + animated FBM; процедурная UV-sphere через `loadMeshRaw`; `Fireball` data class + curve-driven анимация в `buildScene` (ease-out quad scale, color lerp orange→red, sqrt brightness fade).
 Закрытые в E8: ✅ Vertex UV attribute (`Vertex::uv`, location 3, format VK_FORMAT_R32G32_SFLOAT); `Texture` C++ класс (VkImage + sampler + per-texture descriptor set); descriptor set 1 layout (combined image sampler) + shared pipeline layout; default 1×1 white texture loaded at engine init и biнded на старте `renderFrame`; `station_engine_load_texture(png)` + `load_texture_raw(rgba8)` + `load_mesh_raw_uv` + `draw_textured_mesh` API через C/JNI/Kotlin; `pc.textureMode` push-const flag (offset 100, total 104 байт) + textured fragment branch (`texture(uTex, vUV).rgb * pc.plasmaColor.rgb` как albedo вместо `vColor.rgb`); `SceneObject.textureHandle` + `EngineView.texturedObjects` + `submitScene` route. `GltfLoader` парсит `TEXCOORD_0` accessor с fallback `(0, 0)`. Проверено двумя procedural smoke-test patches (rock noise + cyan icon disc), затем patches удалены.
+Закрытые в E9: ✅ 2 particle pipelines (`m_particleAdditivePipeline` ONE/ONE depth-off + `m_particleAlphaPipeline` SRC_ALPHA depth read-only); `particle.vert/.frag` шейдеры с per-instance binding 1 (8 floats stride: pos3+size1+rgba4); 2 persistent-mapped instance VkBuffer (4096 particles each); `drawParticles` API через C/JNI/Kotlin (single batched call per pool); render-loop two-pass (additive + alpha) с per-batch mesh+texture binds и `vkCmdDrawIndexed(instanceCount=N)`; Kotlin `Particle` data class + 3 пула (sparkParticles/smokeParticles/debrisParticles) + tick (Euler+drag+gravity) + pack (alpha=`sqrt(1-t)*tintA`); procedural smoke (64×64 Gaussian+noise) + debris (64×64 polygonal silhouette) textures через `loadTextureRaw`; 3 consumers (AoE sparks, asteroid death debris+smoke, muzzle micro-sparks); HEAVY смерть получает тёмно-красный debris тинт.
+Закрытые в E10.1: ✅ Render flow restructured scene→offscreen→post→swapchain. `RenderResources.offscreenColorImage/Memory/View/Sampler` (B8G8R8A8_UNORM, COLOR_ATTACHMENT+SAMPLED, single shared); `postRenderPass` + `postFramebuffers[]` (per-swapchain-image). Existing scene `renderPass` теперь finalLayout=SHADER_READ_ONLY_OPTIMAL; `framebuffers` содержит один shared scene fb. `m_postPipeline` + own minimal layout (1 set, no PCs) + dedicated descriptor set bound to offscreen sampler. `post.vert` (fullscreen-triangle через gl_VertexIndex без vertex bindings) + `post.frag` (passthrough sample, motion blur — E10.4). `renderFrame` two-pass: scene draws everything as before, then post pass draws 3 verts. Visually идентично pre-E10.
 Закрытые в M7.2: ✅ GltfLoader merge multi-primitive meshes (multi-material .glb теперь грузятся целиком, не кусочком).
 
 ## Старый бэклог (мелкая шерсть)
@@ -662,6 +723,7 @@ E1 закрыл базовую прозрачность и процедурны�
 - **Тех. долг:** g3-инфраструктура (`SimulationWorld`, `StationAI`, `MissionController`, `SceneAdapter`, `FleetRegistry`, `voice/`, `sound/`, `ml/`) лежит в исходниках, но не используется — можно вычистить либо оставить как реликт. Тесты (g3 имел юнит-тесты в src/test) не перенесены — потребуется обновить package декларации.
 - **Релиз:** иконка приложения сейчас зелёная g3-шная — заменить.
 - **Мета:** разблокировка миссий по прогрессу (миссия N открывается после прохождения N−1); daily missions; экран настроек.
+- **Debug-toolset для скриншотов VFX (2026-05-07):** короткие VFX-события (~0.1-0.5 сек) сложно поймать вручную для скрина. Нужен pause-toggle (debug-кнопка / системный жест), который шорт-сёркитит tick-loop (`if (paused) { buildScene(); return }`), но оставляет рендеринг живым. Сцена застывает в текущем состоянии, делается скрин, тап → продолжение. Вариант: автопауза на AoE-события под debug-флагом. ~30 строк Kotlin, движок не трогается. Альтернатива без кода — `adb shell screenrecord` + scrub видео.
 
 ## Технические заметки
 

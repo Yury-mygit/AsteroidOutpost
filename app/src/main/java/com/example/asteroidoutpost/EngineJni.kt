@@ -22,6 +22,16 @@ class EngineJni {
         // pitch=π/2 camera.
         const val ADDITIVE_PLAIN = 0
         const val ADDITIVE_FIRE  = 1
+
+        // E9 — particle render modes. ADDITIVE = ONE/ONE blend, depth-test
+        // off, fragment shader paints a heat-ramp + soft-fade per particle
+        // (sparks/embers). ALPHA_TEXTURED = SRC_ALPHA blend, depth-test
+        // read-only, fragment samples uTex modulated by per-instance
+        // colour (smoke/debris). Per-instance stride is fixed at 8 floats:
+        // pos.x, pos.y, pos.z, size, r, g, b, a.
+        const val PARTICLE_ADDITIVE       = 0
+        const val PARTICLE_ALPHA_TEXTURED = 1
+        const val PARTICLE_FLOAT_STRIDE   = 8
     }
 
     private var engineHandle: Long = 0L
@@ -170,6 +180,22 @@ class EngineJni {
     }
 
     /**
+     * E9 — submit a batch of particles. `instanceData` is `count * 8` floats
+     * laid out per particle as `pos.x, pos.y, pos.z, size, r, g, b, a`.
+     * `mode` is `PARTICLE_ADDITIVE` (sparks/embers — texture optional, used
+     * for set 1 layout only) or `PARTICLE_ALPHA_TEXTURED` (smoke/debris —
+     * texture required and sampled). Engine drops particles past
+     * kMaxParticles (4096) per pipeline.
+     */
+    fun drawParticles(meshHandle: Long, textureHandle: Long,
+                      instanceData: FloatArray, count: Int, mode: Int) {
+        if (engineHandle == 0L || meshHandle == 0L || count <= 0) return
+        if (instanceData.size < count * PARTICLE_FLOAT_STRIDE) return
+        nativeDrawParticles(engineHandle, meshHandle, textureHandle,
+                            instanceData, count, mode)
+    }
+
+    /**
      * E8.3 — draw an opaque mesh with a sampled texture. Mesh must have UVs
      * (TEXCOORD_0 from glTF, or default (0,0) from procedural meshes — in
      * which case the texture lookup degenerates to a single texel). Texture
@@ -310,6 +336,13 @@ class EngineJni {
     private external fun nativeLoadTexture(handle: Long, data: ByteArray): Long
     private external fun nativeLoadTextureRaw(handle: Long, data: ByteArray, width: Int, height: Int): Long
     private external fun nativeUnloadTexture(engineHandle: Long, textureHandle: Long)
+    private external fun nativeDrawParticles(
+        engineHandle: Long,
+        meshHandle: Long,
+        textureHandle: Long,
+        instanceData: FloatArray,
+        count: Int, mode: Int,
+    )
     private external fun nativeBeginScene(handle: Long)
     private external fun nativeDrawMesh(engineHandle: Long, meshHandle: Long, modelMatrix: FloatArray)
     private external fun nativeDrawPickableMesh(
