@@ -145,19 +145,27 @@ class EngineJni {
     // ---------------------------------------------------------------------------
     fun beginScene() { if (engineHandle != 0L) nativeBeginScene(engineHandle) }
 
-    fun drawMesh(meshHandle: Long, modelMatrix: FloatArray) {
+    /**
+     * E10.3 — `prevModelMatrix` is the matrix this mesh was drawn with on
+     * the previous frame, used by the vertex shader to compute screen-space
+     * velocity for motion blur (E10.4 reads the velocity attachment).
+     * Pass null when no prev tracking exists; engine treats prev = current
+     * → zero velocity (correct fallback for static geometry or first frame).
+     */
+    fun drawMesh(meshHandle: Long, modelMatrix: FloatArray, prevModelMatrix: FloatArray? = null) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawMesh(engineHandle, meshHandle, modelMatrix)
+            nativeDrawMesh(engineHandle, meshHandle, modelMatrix, prevModelMatrix)
     }
 
     fun drawPickableMesh(
         meshHandle: Long,
         objectId: Int,
         modelMatrix: FloatArray,
-        pickRadius: Float
+        pickRadius: Float,
+        prevModelMatrix: FloatArray? = null
     ) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawPickableMesh(engineHandle, meshHandle, objectId, modelMatrix, pickRadius)
+            nativeDrawPickableMesh(engineHandle, meshHandle, objectId, modelMatrix, pickRadius, prevModelMatrix)
     }
 
     fun drawBillboardMesh(meshHandle: Long, x: Float, y: Float, z: Float, scale: Float) {
@@ -203,9 +211,10 @@ class EngineJni {
      * colour multiplicatively; default white = no tint.
      */
     fun drawTexturedMesh(meshHandle: Long, textureHandle: Long, modelMatrix: FloatArray,
-                         r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f) {
+                         r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f,
+                         prevModelMatrix: FloatArray? = null) {
         if (engineHandle != 0L && meshHandle != 0L && textureHandle != 0L)
-            nativeDrawTexturedMesh(engineHandle, meshHandle, textureHandle, modelMatrix, r, g, b, a)
+            nativeDrawTexturedMesh(engineHandle, meshHandle, textureHandle, modelMatrix, r, g, b, a, prevModelMatrix)
     }
 
     /**
@@ -213,10 +222,13 @@ class EngineJni {
      * The mesh's per-vertex alpha controls transparency. Use this for soft
      * nebulae, shield domes, fade-out VFX — anything where the mesh has
      * varying alpha across its vertices.
+     * E10.3 — `prevModelMatrix` is per-draw motion vector input; null = static.
      */
-    fun drawTranslucentMesh(meshHandle: Long, modelMatrix: FloatArray, material: Int = MATERIAL_PLAIN) {
+    fun drawTranslucentMesh(meshHandle: Long, modelMatrix: FloatArray,
+                            material: Int = MATERIAL_PLAIN,
+                            prevModelMatrix: FloatArray? = null) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawTranslucentMesh(engineHandle, meshHandle, modelMatrix, material)
+            nativeDrawTranslucentMesh(engineHandle, meshHandle, modelMatrix, material, prevModelMatrix)
     }
 
     /**
@@ -228,12 +240,14 @@ class EngineJni {
      * turbulence + Fresnel-like edge soft-fade). Used for fireballs,
      * plasma laser beams, electric arcs — anything emissive built from
      * real geometry.
+     * E10.3 — `prevModelMatrix` is per-draw motion vector input; null = static.
      */
     fun drawAdditiveMesh(meshHandle: Long, modelMatrix: FloatArray,
                          r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f,
-                         material: Int = ADDITIVE_PLAIN) {
+                         material: Int = ADDITIVE_PLAIN,
+                         prevModelMatrix: FloatArray? = null) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawAdditiveMesh(engineHandle, meshHandle, modelMatrix, r, g, b, a, material)
+            nativeDrawAdditiveMesh(engineHandle, meshHandle, modelMatrix, r, g, b, a, material, prevModelMatrix)
     }
 
     fun drawObjectFrameMesh(
@@ -344,13 +358,16 @@ class EngineJni {
         count: Int, mode: Int,
     )
     private external fun nativeBeginScene(handle: Long)
-    private external fun nativeDrawMesh(engineHandle: Long, meshHandle: Long, modelMatrix: FloatArray)
+    private external fun nativeDrawMesh(engineHandle: Long, meshHandle: Long,
+                                        modelMatrix: FloatArray,
+                                        prevModelMatrix: FloatArray?)
     private external fun nativeDrawPickableMesh(
         engineHandle: Long,
         meshHandle: Long,
         objectId: Int,
         modelMatrix: FloatArray,
-        pickRadius: Float
+        pickRadius: Float,
+        prevModelMatrix: FloatArray?
     )
     private external fun nativeDrawBillboardMesh(
         engineHandle: Long,
@@ -369,6 +386,7 @@ class EngineJni {
         meshHandle: Long,
         modelMatrix: FloatArray,
         material: Int,
+        prevModelMatrix: FloatArray?,
     )
     private external fun nativeDrawTexturedMesh(
         engineHandle: Long,
@@ -376,6 +394,7 @@ class EngineJni {
         textureHandle: Long,
         modelMatrix: FloatArray,
         r: Float, g: Float, b: Float, a: Float,
+        prevModelMatrix: FloatArray?,
     )
     private external fun nativeDrawAdditiveMesh(
         engineHandle: Long,
@@ -383,6 +402,7 @@ class EngineJni {
         modelMatrix: FloatArray,
         r: Float, g: Float, b: Float, a: Float,
         material: Int,
+        prevModelMatrix: FloatArray?,
     )
     private external fun nativeDrawObjectFrameMesh(
         engineHandle: Long,

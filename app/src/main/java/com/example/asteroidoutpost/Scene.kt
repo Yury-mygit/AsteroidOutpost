@@ -68,6 +68,14 @@ data class SceneObject(
     // consumed by the textured route; ignored elsewhere. 0 = no texture
     // (default white set 1 covers the binding requirement).
     val textureHandle: Long = 0L,
+    // E10.3 — previous frame's model matrix for this object, used by the
+    // vertex shader to compute screen-space velocity for motion blur.
+    // null = static / no prev tracking — engine treats prev = current,
+    // producing zero velocity (correct for stationary geometry, first
+    // frame, and any draw whose gameplay caller hasn't been wired up
+    // for tracking yet). Moving gameplay objects (asteroids, bullets,
+    // fireballs) populate this from their cached prev-frame state.
+    val prevModelMatrix: FloatArray? = null,
 ) {
     fun orbitRadius(): Float =
         gameplayShape.boundingRadius() * scale * orbitRadiusMultiplier + orbitMargin
@@ -170,7 +178,8 @@ fun submitScene(
     engine.beginScene()
     for (obj in objects) {
         val modelMatrix = obj.modelMatrix()
-        engine.drawPickableMesh(obj.meshHandle, obj.id, modelMatrix, obj.pickRadius * obj.scale)
+        engine.drawPickableMesh(obj.meshHandle, obj.id, modelMatrix, obj.pickRadius * obj.scale,
+                                obj.prevModelMatrix)
 
         val frameHandle = highlightMeshes.handleFor(obj.highlightStyle, obj.isEnemy)
         if (frameHandle != 0L) {
@@ -185,14 +194,17 @@ fun submitScene(
         engine.drawBillboardMesh(b.meshHandle, b.x, b.y, b.z, b.scale)
     }
     for (t in translucentObjects) {
-        engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix(), t.material)
+        engine.drawTranslucentMesh(t.meshHandle, t.modelMatrix(), t.material, t.prevModelMatrix)
     }
     for (a in additiveObjects) {
-        engine.drawAdditiveMesh(a.meshHandle, a.modelMatrix(), a.tintR, a.tintG, a.tintB, a.tintA, a.additiveMaterial)
+        engine.drawAdditiveMesh(a.meshHandle, a.modelMatrix(),
+                                a.tintR, a.tintG, a.tintB, a.tintA,
+                                a.additiveMaterial, a.prevModelMatrix)
     }
     for (t in texturedObjects) {
         engine.drawTexturedMesh(t.meshHandle, t.textureHandle, t.modelMatrix(),
-                                t.tintR, t.tintG, t.tintB, t.tintA)
+                                t.tintR, t.tintG, t.tintB, t.tintA,
+                                t.prevModelMatrix)
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV, p.r, p.g, p.b, p.a)

@@ -21,10 +21,17 @@
 
 namespace station {
     namespace {
-        // UBO now holds view + proj separately so the shader can do world-space lighting
+        // UBO holds the camera matrices used by the vertex shader. E10.3
+        // added prev_view + prev_proj so the shader can compute screen-space
+        // velocity = (currClip - prevClip) for motion blur. For Outpost the
+        // camera is static so prev_view = view always; in g3 the orbit
+        // camera moves and the prev matrices give camera-velocity that the
+        // motion-blur shader (E10.4) reads from the velocity attachment.
         struct UniformBufferObject {
-            float view[16];
-            float proj[16];
+            float view[16];      // offset   0
+            float proj[16];      // offset  64
+            float prev_view[16]; // offset 128 — last frame's view (E10.3)
+            float prev_proj[16]; // offset 192 — last frame's proj (E10.3)
         };
 
         // Push constant: model matrix + tint flags + plasma color + time
@@ -711,6 +718,93 @@ namespace station {
             LOGE("Particle alpha instance buffer alloc failed"); return false;
         }
 
+        // E10.3 — per-draw dynamic UBO. Holds prev_model per scene draw call;
+        // descriptor set 2 is bound per-draw with a dynamic offset that
+        // advances by `m_perDrawUboStride` each mesh draw. We pad each slot
+        // to `minUniformBufferOffsetAlignment` (typically 64 on Adreno, up
+        // to 256 elsewhere) so the dynamic-offset bind is always aligned.
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+        const uint32_t minAlign =
+                (uint32_t)std::max<VkDeviceSize>(1, props.limits.minUniformBufferOffsetAlignment);
+        const uint32_t mat4Size = sizeof(float) * 16;
+        m_perDrawUboStride = ((mat4Size + minAlign - 1) / minAlign) * minAlign;
+        const VkDeviceSize perDrawBytes = (VkDeviceSize)kMaxDrawsPerFrame * m_perDrawUboStride;
+        if (!createBuffer(m_physicalDevice, m_device, perDrawBytes,
+                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          m_perDrawUboBuffer, m_perDrawUboMemory)) {
+            LOGE("Per-draw UBO buffer alloc failed"); return false;
+        }
+        if (vkMapMemory(m_device, m_perDrawUboMemory, 0, perDrawBytes, 0,
+                        &m_perDrawUboMapped) != VK_SUCCESS) {
+            LOGE("Per-draw UBO vkMapMemory failed"); return false;
+        }
+        // Slot 0 is the sentinel "identity prev_model" entry, used by
+        // billboard / particle / frame draws whose vertex shaders don't
+        // consume a meaningful prev_model. Initialised once here; never
+        // overwritten because beginScene starts the cursor at slot 1.
+        const float identity4x4[16] = {
+                1.0f, 0.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, 1.0f, 0.0f,
+                0.0f, 0.0f, 0.0f, 1.0f,
+        };
+        std::memcpy(m_perDrawUboMapped, identity4x4, sizeof(identity4x4));
+
+        // Descriptor set layout — set 2: single dynamic UBO at binding 0,
+        // visible to vertex stage only (the prev_model is consumed in
+        // triangle.vert's velocity calculation).
+        VkDescriptorSetLayoutBinding perDrawBinding{};
+        perDrawBinding.binding         = 0;
+        perDrawBinding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        perDrawBinding.descriptorCount = 1;
+        perDrawBinding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        VkDescriptorSetLayoutCreateInfo perDrawDslCI{};
+        perDrawDslCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        perDrawDslCI.bindingCount = 1;
+        perDrawDslCI.pBindings    = &perDrawBinding;
+        r = vkCreateDescriptorSetLayout(m_device, &perDrawDslCI, nullptr, &m_perDrawSetLayout);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorSetLayout(perDraw): %s", vkRes(r).c_str()); return false; }
+
+        VkDescriptorPoolSize perDrawPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1 };
+        VkDescriptorPoolCreateInfo perDrawPoolCI{};
+        perDrawPoolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        perDrawPoolCI.poolSizeCount = 1;
+        perDrawPoolCI.pPoolSizes    = &perDrawPoolSize;
+        perDrawPoolCI.maxSets       = 1;
+        r = vkCreateDescriptorPool(m_device, &perDrawPoolCI, nullptr, &m_perDrawDescriptorPool);
+        if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorPool(perDraw): %s", vkRes(r).c_str()); return false; }
+
+        VkDescriptorSetAllocateInfo perDrawDsAI{};
+        perDrawDsAI.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        perDrawDsAI.descriptorPool     = m_perDrawDescriptorPool;
+        perDrawDsAI.descriptorSetCount = 1;
+        perDrawDsAI.pSetLayouts        = &m_perDrawSetLayout;
+        r = vkAllocateDescriptorSets(m_device, &perDrawDsAI, &m_perDrawDescriptorSet);
+        if (r != VK_SUCCESS) { LOGE("vkAllocateDescriptorSets(perDraw): %s", vkRes(r).c_str()); return false; }
+
+        // Bound range = one slot's worth (a single mat4). Dynamic offset
+        // selects which slot at draw time — vkCmdBindDescriptorSets's
+        // pDynamicOffsets parameter shifts from the buffer's base.
+        VkDescriptorBufferInfo perDrawBufInfo{};
+        perDrawBufInfo.buffer = m_perDrawUboBuffer;
+        perDrawBufInfo.offset = 0;
+        perDrawBufInfo.range  = sizeof(float) * 16;  // one mat4 per slot
+        VkWriteDescriptorSet perDrawWrite{};
+        perDrawWrite.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        perDrawWrite.dstSet          = m_perDrawDescriptorSet;
+        perDrawWrite.dstBinding      = 0;
+        perDrawWrite.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        perDrawWrite.descriptorCount = 1;
+        perDrawWrite.pBufferInfo     = &perDrawBufInfo;
+        vkUpdateDescriptorSets(m_device, 1, &perDrawWrite, 0, nullptr);
+
+        LOGI("Per-draw UBO: stride=%u, slots=%u, total=%llu bytes",
+             m_perDrawUboStride, kMaxDrawsPerFrame,
+             (unsigned long long)perDrawBytes);
+
         LOGI("Pipeline infra created");
         return true;
     }
@@ -783,6 +877,31 @@ namespace station {
             vkFreeMemory(m_device, m_particleAlphaInstanceMemory, nullptr);
             m_particleAlphaInstanceMemory = VK_NULL_HANDLE;
         }
+        // E10.3 — per-draw UBO + descriptor set 2 cleanup.
+        if (m_perDrawUboMemory != VK_NULL_HANDLE && m_perDrawUboMapped) {
+            vkUnmapMemory(m_device, m_perDrawUboMemory);
+            m_perDrawUboMapped = nullptr;
+        }
+        if (m_perDrawUboBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(m_device, m_perDrawUboBuffer, nullptr);
+            m_perDrawUboBuffer = VK_NULL_HANDLE;
+        }
+        if (m_perDrawUboMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_perDrawUboMemory, nullptr);
+            m_perDrawUboMemory = VK_NULL_HANDLE;
+        }
+        if (m_perDrawDescriptorPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(m_device, m_perDrawDescriptorPool, nullptr);
+            m_perDrawDescriptorPool = VK_NULL_HANDLE;
+        }
+        if (m_perDrawSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_perDrawSetLayout, nullptr);
+            m_perDrawSetLayout = VK_NULL_HANDLE;
+        }
+        m_perDrawDescriptorSet = VK_NULL_HANDLE;
+        m_perDrawUboCursor = 0;
+        m_perDrawUboStride = 0;
+
         m_descriptorSet = VK_NULL_HANDLE;
     }
 
@@ -869,13 +988,20 @@ namespace station {
 
         // E8.2 — pipeline layout takes both descriptor set layouts: set 0
         // (UBO, vertex stage) and set 1 (combined image sampler, fragment
-        // stage). All seven pipelines share this layout, so existing draws
-        // pick up the texture binding for free and textured draws (E8.3+)
-        // can rebind set 1 without changing pipeline.
-        VkDescriptorSetLayout setLayouts[2] = { m_descriptorSetLayout, m_textureSetLayout };
+        // stage). E10.3 added set 2 (per-draw dynamic UBO carrying
+        // prev_model, vertex stage). All scene pipelines share this
+        // layout: existing untextured draws pick up the texture binding
+        // for free, textured draws (E8.3+) rebind set 1 without changing
+        // pipeline, and motion-tracked draws (E10.3+) rebind set 2 with
+        // their own dynamic offset. Particle/billboard/frame draws don't
+        // read prev_model in their shader but the layout still requires
+        // set 2 to be bound — they reuse the engine-init sentinel slot at
+        // offset 0 (identity), so binding once at frame start suffices.
+        VkDescriptorSetLayout setLayouts[3] = {
+                m_descriptorSetLayout, m_textureSetLayout, m_perDrawSetLayout };
         VkPipelineLayoutCreateInfo plCI{};
         plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        plCI.setLayoutCount = 2; plCI.pSetLayouts = setLayouts;
+        plCI.setLayoutCount = 3; plCI.pSetLayouts = setLayouts;
         plCI.pushConstantRangeCount = 1; plCI.pPushConstantRanges = &pcRange;
 
         VkResult r = vkCreatePipelineLayout(m_device, &plCI, nullptr, &m_pipelineLayout);
@@ -1355,22 +1481,63 @@ namespace station {
         m_particleAdditiveStaging.clear();
         m_particleAlphaStaging.clear();
         m_pickRecords.clear();
+        // E10.3 — reset per-draw UBO cursor to slot 1. Slot 0 is the
+        // sentinel "identity prev_model" entry (filled once at engine init
+        // in createPipelineInfra) used by draws whose vertex shader
+        // doesn't consume prev_model — particles, plasma billboards, frame
+        // meshes — all of which write outVelocity = vec2(0) in their
+        // fragment branch anyway. Mesh draws (drawMesh, drawTranslucent,
+        // drawAdditive, drawTextured, drawPickable) allocate their own
+        // slot here and write either the caller's prev_model or, if the
+        // caller passed nullptr, mirror the current model so prev_clip ==
+        // curr_clip → zero velocity for un-tracked static geometry.
+        m_perDrawUboCursor = 1;
         m_sceneOpen = true;
     }
 
-    void VulkanContext::drawMesh(uint32_t token, const float modelMatrix[16]) {
+    namespace {
+        // E10.3 — write a prev_model matrix into the per-draw UBO at the
+        // current cursor and return the byte offset for the dynamic-offset
+        // descriptor bind. `prevModel` may be nullptr; in that case the
+        // caller's current model matrix is used (zero-velocity fallback).
+        // Hardware caps the cursor at kMaxDrawsPerFrame; on overflow we
+        // reuse the last valid slot rather than allocating beyond the
+        // mapped range. Static helper so it can be unit-tested without
+        // touching member state directly.
+    }
+
+    static uint32_t allocPerDrawSlotImpl(void* mapped, uint32_t stride,
+                                         uint32_t& cursor, uint32_t maxSlots,
+                                         const float prevModel[16],
+                                         const float currModel[16]) {
+        if (mapped == nullptr || stride == 0 || maxSlots == 0) return 0;
+        const uint32_t slot   = (cursor < maxSlots) ? cursor : (maxSlots - 1);
+        const uint32_t offset = slot * stride;
+        const float* src = prevModel ? prevModel : currModel;
+        std::memcpy(static_cast<uint8_t*>(mapped) + offset, src, sizeof(float) * 16);
+        if (cursor < maxSlots) ++cursor;
+        return offset;
+    }
+
+    void VulkanContext::drawMesh(uint32_t token, const float modelMatrix[16],
+                                 const float prevModelMatrix[16]) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token = token;
         cmd.billboard = false;
         cmd.objectFrame = false;
         std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
+        cmd.perDrawUboOffset = allocPerDrawSlotImpl(
+                m_perDrawUboMapped, m_perDrawUboStride,
+                m_perDrawUboCursor, kMaxDrawsPerFrame,
+                prevModelMatrix, modelMatrix);
         m_drawList.push_back(cmd);
     }
 
     void VulkanContext::drawPickableMesh(uint32_t token, int32_t objectId,
-                                         const float modelMatrix[16], float pickRadius) {
-        drawMesh(token, modelMatrix);
+                                         const float modelMatrix[16], float pickRadius,
+                                         const float prevModelMatrix[16]) {
+        drawMesh(token, modelMatrix, prevModelMatrix);
         if (!m_sceneOpen || objectId < 0 || pickRadius <= 0.0f) return;
         if (token == 0 || token > kMaxMeshes) return;
 
@@ -1419,7 +1586,9 @@ namespace station {
     // mesh's per-vertex alpha controls how much it occludes what's behind.
     // E3.1 — material flags packed into tint slots so the fragment shader can
     // branch on them: pc.tint.y = NEBULA, pc.tint.z = HEX. plain = no flags.
-    void VulkanContext::drawTranslucentMesh(uint32_t token, const float modelMatrix[16], int32_t material) {
+    void VulkanContext::drawTranslucentMesh(uint32_t token, const float modelMatrix[16],
+                                            int32_t material,
+                                            const float prevModelMatrix[16]) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token       = token;
@@ -1428,6 +1597,10 @@ namespace station {
         std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
         if (material == 1) cmd.tint[1] = 1.0f;  // NEBULA → fragment FBM mode
         if (material == 2) cmd.tint[2] = 1.0f;  // HEX    → fragment hex-grid mode
+        cmd.perDrawUboOffset = allocPerDrawSlotImpl(
+                m_perDrawUboMapped, m_perDrawUboStride,
+                m_perDrawUboCursor, kMaxDrawsPerFrame,
+                prevModelMatrix, modelMatrix);
         m_translucentDrawList.push_back(cmd);
     }
 
@@ -1438,7 +1611,8 @@ namespace station {
     // sampled colour as a tint (default white = no tint).
     void VulkanContext::drawTexturedMesh(uint32_t meshToken, uint32_t textureToken,
                                          const float modelMatrix[16],
-                                         float r, float g, float b, float a) {
+                                         float r, float g, float b, float a,
+                                         const float prevModelMatrix[16]) {
         if (!m_sceneOpen || meshToken == 0 || meshToken > kMaxMeshes) return;
         if (textureToken == 0 || textureToken > kMaxTextures) return;
         DrawCommand cmd{};
@@ -1451,6 +1625,10 @@ namespace station {
         cmd.plasmaColor[1] = g;
         cmd.plasmaColor[2] = b;
         cmd.plasmaColor[3] = a;
+        cmd.perDrawUboOffset = allocPerDrawSlotImpl(
+                m_perDrawUboMapped, m_perDrawUboStride,
+                m_perDrawUboCursor, kMaxDrawsPerFrame,
+                prevModelMatrix, modelMatrix);
         m_texturedDrawList.push_back(cmd);
     }
 
@@ -1466,7 +1644,8 @@ namespace station {
     // render loop copies cmd.tint → pc.tint so the shader can branch on .w.
     void VulkanContext::drawAdditiveMesh(uint32_t token, const float modelMatrix[16],
                                          float r, float g, float b, float a,
-                                         int32_t material) {
+                                         int32_t material,
+                                         const float prevModelMatrix[16]) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token       = token;
@@ -1480,6 +1659,10 @@ namespace station {
         // .w = 1.0f for plain additive; 2.0f for fire material. Fragment
         // shader branches on `pc.tint.w` ranges.
         cmd.tint[3] = (material == 1) ? 2.0f : 1.0f;
+        cmd.perDrawUboOffset = allocPerDrawSlotImpl(
+                m_perDrawUboMapped, m_perDrawUboStride,
+                m_perDrawUboCursor, kMaxDrawsPerFrame,
+                prevModelMatrix, modelMatrix);
         m_additiveDrawList.push_back(cmd);
     }
 
@@ -1827,13 +2010,34 @@ namespace station {
         const Mat4 proj = m_camera.projMatrix(computeSceneFarClip());
 
         UniformBufferObject ubo{};
-        for (int i = 0; i < 16; ++i) { ubo.view[i] = view.m[i]; ubo.proj[i] = proj.m[i]; }
+        for (int i = 0; i < 16; ++i) {
+            ubo.view[i] = view.m[i];
+            ubo.proj[i] = proj.m[i];
+        }
+        // E10.3 — prev_view / prev_proj. First frame uses current matrices
+        // (zero camera-velocity baseline). Subsequent frames pull from the
+        // cache populated at the bottom of this function on the previous
+        // call. With Outpost's fixed camera, view never changes so prev ==
+        // current always; in g3 the orbit camera moves and the prev pair
+        // gives the screen-space camera-velocity component that the
+        // motion-blur shader (E10.4) reads from the velocity attachment.
+        const float* prevViewSrc = m_prevCameraInitialised ? m_prevView : view.m;
+        const float* prevProjSrc = m_prevCameraInitialised ? m_prevProj : proj.m;
+        for (int i = 0; i < 16; ++i) {
+            ubo.prev_view[i] = prevViewSrc[i];
+            ubo.prev_proj[i] = prevProjSrc[i];
+        }
 
         void* mapped = nullptr;
         if (vkMapMemory(m_device, m_uniformMemory, 0, sizeof(ubo), 0, &mapped) == VK_SUCCESS) {
             memcpy(mapped, &ubo, sizeof(ubo));
             vkUnmapMemory(m_device, m_uniformMemory);
         }
+
+        // Cache today's matrices as tomorrow's prev.
+        std::memcpy(m_prevView, view.m, sizeof(float) * 16);
+        std::memcpy(m_prevProj, proj.m, sizeof(float) * 16);
+        m_prevCameraInitialised = true;
     }
 
     // -----------------------------------------------------------------------
@@ -1902,6 +2106,18 @@ namespace station {
                                     m_pipelineLayout, 1, 1, &defaultTexSet, 0, nullptr);
         }
 
+        // E10.3 — bind set 2 (per-draw dynamic UBO) once at frame start with
+        // dynamic offset 0 (sentinel slot pre-filled with identity at engine
+        // init). Particle / plasma / system / frame draws inherit this; the
+        // mesh/translucent/additive/textured loops below rebind set 2 with
+        // their own per-draw offset before each vkCmdDrawIndexed.
+        if (m_perDrawDescriptorSet != VK_NULL_HANDLE) {
+            uint32_t zeroOffset = 0;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 2, 1, &m_perDrawDescriptorSet,
+                                    1, &zeroOffset);
+        }
+
         // --- Draw star-field first (depth write OFF, drawn behind everything) ---
         if (m_starMesh.isReady() && m_starPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_starPipeline);
@@ -1953,6 +2169,13 @@ namespace station {
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
+                // E10.3 — pick this draw's prev_model slot. allocPerDrawSlot
+                // wrote it at draw* time; we just hand the offset to the
+                // dynamic-offset descriptor bind so the vertex shader reads
+                // the right mat4 for its velocity calc.
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipelineLayout, 2, 1, &m_perDrawDescriptorSet,
+                                        1, &draw.perDrawUboOffset);
                 vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
             }
         }
@@ -1997,6 +2220,9 @@ namespace station {
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipelineLayout, 2, 1, &m_perDrawDescriptorSet,
+                                        1, &draw.perDrawUboOffset);
                 vkCmdDrawIndexed(cmd, m_meshPool[mIdx].indexCount(), 1, 0, 0, 0);
             }
 
@@ -2073,6 +2299,9 @@ namespace station {
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipelineLayout, 2, 1, &m_perDrawDescriptorSet,
+                                        1, &draw.perDrawUboOffset);
                 vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
             }
         }
@@ -2111,6 +2340,9 @@ namespace station {
                 vkCmdPushConstants(cmd, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(PushConstantData), &pc);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipelineLayout, 2, 1, &m_perDrawDescriptorSet,
+                                        1, &draw.perDrawUboOffset);
                 vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
             }
         }

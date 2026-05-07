@@ -102,17 +102,26 @@ void            station_engine_unload_texture(StationEngine*  engine,
 // Clear the draw list for the next frame
 void station_engine_begin_scene(StationEngine* engine);
 
-// Queue one mesh instance with a model matrix (column-major float[16])
+// Queue one mesh instance with a model matrix (column-major float[16]).
+// E10.3 — `prevModelMatrix` is the matrix this mesh was drawn with on the
+// previous frame, used by the vertex shader to compute screen-space
+// velocity for motion blur (E10.4 reads the velocity attachment). Pass
+// nullptr when no prev tracking exists (engine treats prev = current →
+// zero velocity, the natural fallback for static geometry or first-frame
+// draws). For moving objects (asteroids, bullets, fireballs), Kotlin
+// caches the prev model matrix between frames and supplies it here.
 void station_engine_draw_mesh(StationEngine* engine,
                               StationMesh*   mesh,
-                              const float    modelMatrix[16]);
+                              const float    modelMatrix[16],
+                              const float    prevModelMatrix[16]);
 
 // Submit the draw list — call once per frame after all draw_mesh calls
 void station_engine_draw_pickable_mesh(StationEngine* engine,
                                        StationMesh*   mesh,
                                        int32_t        objectId,
                                        const float    modelMatrix[16],
-                                       float          pickRadius);
+                                       float          pickRadius,
+                                       const float    prevModelMatrix[16]);
 
 void station_engine_draw_billboard_mesh(StationEngine* engine,
                                         StationMesh*   mesh,
@@ -141,6 +150,8 @@ void station_engine_draw_plasma_billboard(StationEngine* engine,
 // E8.3 — textured opaque mesh draw. Mesh must have authored UVs; texture
 // must come from station_engine_load_texture. (r,g,b,a) is a per-draw
 // tint multiplied into the sampled colour (default 1,1,1,1 = no tint).
+// E10.3 — `prevModelMatrix` is per-draw motion vector input (see
+// station_engine_draw_mesh for semantics).
 void station_engine_draw_textured_mesh(StationEngine*  engine,
                                        StationMesh*    mesh,
                                        StationTexture* texture,
@@ -148,7 +159,8 @@ void station_engine_draw_textured_mesh(StationEngine*  engine,
                                        float           r,
                                        float           g,
                                        float           b,
-                                       float           a);
+                                       float           a,
+                                       const float     prevModelMatrix[16]);
 
 // E9 — instanced particle batch draw. `mesh` is the unit-quad mesh shared
 // by every particle (vertex-shader billboards it via per-instance pos).
@@ -173,7 +185,8 @@ void station_engine_draw_particles(StationEngine*  engine,
 void station_engine_draw_translucent_mesh(StationEngine* engine,
                                           StationMesh*   mesh,
                                           const float    modelMatrix[16],
-                                          int32_t        material);
+                                          int32_t        material,
+                                          const float    prevModelMatrix[16]);
 
 // E7 — additive-blend mesh draw. ONE/ONE additive blend (like plasma
 // billboards) but accepts arbitrary 3D meshes via model matrix. Depth-test
@@ -190,7 +203,8 @@ void station_engine_draw_additive_mesh(StationEngine* engine,
                                        float          g,
                                        float          b,
                                        float          a,
-                                       int32_t        material);
+                                       int32_t        material,
+                                       const float    prevModelMatrix[16]);
 
 void station_engine_draw_object_frame_mesh(StationEngine* engine,
                                            StationMesh*   frameMesh,

@@ -5,13 +5,17 @@ layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec2 vLocalXZ;   // model-space X/Z — used for radial soft-fade (E2.1)
 layout(location = 4) in vec2 vUV;        // texture coords (E8.1) — sampled by E8.3+ textured branch
+layout(location = 5) in vec2 vVelocity;  // E10.3 — screen-space NDC velocity from triangle.vert
 
 layout(location = 0) out vec4 outColor;
 // E10.2 — second colour attachment: screen-space velocity in NDC units
-// (RG16F). Placeholder zero for now — real per-object velocity needs
-// prev_model push-const + view/proj history (E10.3). Writing zero keeps
-// the velocity buffer well-defined for the post pass (E10.4 motion blur
-// reads zeros as "static" → no blur, matching pre-E10 behaviour).
+// (RG16F). E10.3 made it real (was placeholder vec2(0.0)) — vertex shader
+// computes vVelocity = (currClip - prevClip)/w * 0.5, fragment writes it
+// here for branches whose draw has a real prev_model (mesh / additive /
+// translucent / textured). Branches whose prev_model isn't meaningful —
+// the plasma billboard branch (camera-aligned matrix recomputed per frame)
+// and the frame line branch (UI overlays) — overwrite with vec2(0.0)
+// before returning so motion blur (E10.4) treats them as static.
 layout(location = 1) out vec2 outVelocity;
 
 // Push constant: model matrix (vert-only) at offset 0, then tint flags,
@@ -129,9 +133,11 @@ float hexAlphaMod() {
 }
 
 void main() {
-    // E10.2 — velocity placeholder; written once at the top so the many
-    // early-return branches below all leave outVelocity well-defined.
-    outVelocity = vec2(0.0);
+    // E10.3 — default to the per-vertex computed velocity (real motion
+    // for mesh-style draws). Branches below where prev_model isn't
+    // meaningful (frame, plasma billboard) overwrite with vec2(0.0) just
+    // before their early return so motion blur sees them as static.
+    outVelocity = vVelocity;
 
     float alpha = vColor.a * plasmaSoftFade() * nebulaAlphaMod() * hexAlphaMod();
 
@@ -140,7 +146,8 @@ void main() {
     bool isFrame = (vColor.g > 0.95 && vColor.r < 0.05 && vColor.b < 0.20)
                 || (vColor.r > 0.90 && vColor.g < 0.50);
     if (isFrame) {
-        outColor = vec4(vColor.rgb, alpha);
+        outColor    = vec4(vColor.rgb, alpha);
+        outVelocity = vec2(0.0);  // UI overlays — no motion
         return;
     }
 
@@ -179,7 +186,12 @@ void main() {
         vec2 fireWarp = vec2(pc.time * 1.4, pc.time * 0.9);
         float n = fbm4(vWorldPos.xz * 8.0 + fireWarp);
         float fire = 0.55 + n * 0.95;        // ~[0.55, 1.5] turbulence
-        outColor = vec4(fireColor * pc.plasmaColor.rgb * fire * alpha * pc.plasmaColor.a, alpha);
+        outColor    = vec4(fireColor * pc.plasmaColor.rgb * fire * alpha * pc.plasmaColor.a, alpha);
+        // Plasma billboards use a per-frame camera-aligned model matrix
+        // that the engine doesn't track as prev_model — they share the
+        // sentinel slot at offset 0 (identity), so vVelocity here is
+        // meaningless. Force zero so motion blur skips them.
+        outVelocity = vec2(0.0);
         return;
     }
 

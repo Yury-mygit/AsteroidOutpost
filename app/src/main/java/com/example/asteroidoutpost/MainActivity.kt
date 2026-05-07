@@ -167,6 +167,13 @@ class MainActivity : AppCompatActivity() {
         // Render mesh — Bullet.glb for normal/side, Bullet_Heavy.glb for the
         // heavy cannon. 0 falls back to the red quad on the engine side.
         val meshHandle: Long = 0L,
+        // E10.3 — previous-frame position for motion-vector tracking.
+        // Updated end-of-tick (snapshot of (x, z) before the next move).
+        // First frame after spawn keeps prev = current, producing zero
+        // velocity for that frame; from frame 2 onward the bullet's flight
+        // direction reads as a real velocity vector at the velocity
+        // attachment, which the motion-blur shader (E10.4) will sample.
+        var prevX: Float = x, var prevZ: Float = z,
         // AoE on impact. aoeRadius == 0 means single-target (default).
         // aoeDamage applied to every other asteroid within the radius.
         val aoeRadius: Float = 0f,
@@ -212,6 +219,12 @@ class MainActivity : AppCompatActivity() {
         var life: Float, val maxLife: Float,
         val baseRadius: Float,
         val intensity: Float = 1f,
+        // E10.3 — previous-frame `life` value. Fireballs don't translate but
+        // their scale curve advances each tick (ease-out quad on age = 1 -
+        // life/maxLife), so the rendered model matrix grows between frames.
+        // Snapshotting prevLife at end-of-tick lets buildScene reconstruct
+        // last frame's scale and feed motion blur a real prev_model.
+        var prevLife: Float = life,
     )
     private val fireballs: MutableList<Fireball> = mutableListOf()
 
@@ -261,6 +274,14 @@ class MainActivity : AppCompatActivity() {
         // Picked at spawn from the per-type mesh pool (NORMAL/FAST randomize
         // across two grey variants for visual diversity). 0 = engine fallback.
         val meshHandle: Long = 0L,
+        // E10.3 — previous-frame z position and rotation for motion-vector
+        // tracking. xPos doesn't change (asteroids fall straight down) so we
+        // don't need a prevX; but the spin around Z DOES move screen-pixels
+        // around the asteroid silhouette so we cache it here. Snapshotted
+        // BEFORE applying the per-frame movement so the next frame's render
+        // has the matrix-pair that produced the current visible motion.
+        var prevZ: Float = zPos,
+        var prevRotation: Float = rotation,
     )
     private val bullets:    MutableList<Bullet>   = mutableListOf()
     private val asteroids:  MutableList<Asteroid> = mutableListOf(
@@ -1474,12 +1495,24 @@ class MainActivity : AppCompatActivity() {
             // Per-asteroid mesh chosen at spawn (5 distinct .glbs across 5 types
             // + grey variant pool). Roughly unit bbox; scale by `half` so FAST
             // asteroids look small and HEAVY ones look chunky.
-            SceneObject(
+            // E10.3 — build prev_model from prevZ + prevRotation cached at the
+            // top of the asteroid movement step. xPos doesn't change so we
+            // reuse it for both matrices; the prev SceneObject is a temporary
+            // we only ever ask `modelMatrix()` of.
+            val prev = SceneObject(
                 id         = 200 + i,
-                meshHandle = if (a.meshHandle != 0L) a.meshHandle else asteroidMeshGrey1,
-                x          = a.xPos, y = 0f, z = a.zPos,
-                rotationZ  = a.rotation,
+                meshHandle = 0L,
+                x          = a.xPos, y = 0f, z = a.prevZ,
+                rotationZ  = a.prevRotation,
                 scale      = a.half,
+            ).modelMatrix()
+            SceneObject(
+                id              = 200 + i,
+                meshHandle      = if (a.meshHandle != 0L) a.meshHandle else asteroidMeshGrey1,
+                x               = a.xPos, y = 0f, z = a.zPos,
+                rotationZ       = a.rotation,
+                scale           = a.half,
+                prevModelMatrix = prev,
             )
         } + bullets.mapIndexed { i, b ->
             // Bullet model — long axis aligned with velocity. Y-rotation =
@@ -1490,13 +1523,25 @@ class MainActivity : AppCompatActivity() {
             // Scale: the .glb has its own intrinsic bbox (~unit), so `b.halfW`
             // (≈0.04..0.10) gives a small bullet sized roughly like the old
             // quad placeholder. Uniform scale keeps the model's proportions.
-            val mesh = if (b.meshHandle != 0L) b.meshHandle else quadMeshHandle
-            SceneObject(
+            // E10.3 — prev_model from prevX/prevZ; rotation is constant for
+            // a bullet (fixed velocity vector), so reuse current rotationY.
+            val mesh   = if (b.meshHandle != 0L) b.meshHandle else quadMeshHandle
+            val rotY   = kotlin.math.atan2(b.vx, b.vz) + DraftCombat.BULLET_MODEL_YAW_OFFSET
+            val bScale = b.halfH * DraftCombat.BULLET_MODEL_SCALE_MUL
+            val prev   = SceneObject(
                 id         = 300 + i,
-                meshHandle = mesh,
-                x          = b.x, y = 0f, z = b.z,
-                rotationY  = kotlin.math.atan2(b.vx, b.vz) + DraftCombat.BULLET_MODEL_YAW_OFFSET,
-                scale      = b.halfH * DraftCombat.BULLET_MODEL_SCALE_MUL,
+                meshHandle = 0L,
+                x          = b.prevX, y = 0f, z = b.prevZ,
+                rotationY  = rotY,
+                scale      = bScale,
+            ).modelMatrix()
+            SceneObject(
+                id              = 300 + i,
+                meshHandle      = mesh,
+                x               = b.x, y = 0f, z = b.z,
+                rotationY       = rotY,
+                scale           = bScale,
+                prevModelMatrix = prev,
             )
         }
 
@@ -1574,6 +1619,20 @@ class MainActivity : AppCompatActivity() {
                 val tintG = tStart[1] + (tEnd[1] - tStart[1]) * t
                 val tintB = tStart[2] + (tEnd[2] - tStart[2]) * t
                 val brightness = kotlin.math.sqrt(u) * fb.intensity
+                // E10.3 — same scale curve evaluated against prevLife.
+                // Fireballs don't translate so prev_model differs only in
+                // scale; the velocity attachment captures the radial
+                // expansion as outward motion vectors per surface element.
+                val prevT = (1f - fb.prevLife / fb.maxLife).coerceIn(0f, 1f)
+                val prevU = 1f - prevT
+                val prevScaleCurve = 1f - prevU * prevU
+                val prevS = fb.baseRadius * (0.4f + prevScaleCurve * 1.0f)
+                val prev = SceneObject(
+                    id         = 800 + i,
+                    meshHandle = 0L,
+                    x          = fb.x, y = 0f, z = fb.z,
+                    scale      = prevS,
+                ).modelMatrix()
                 SceneObject(
                     id               = 800 + i,
                     meshHandle       = fireballMeshHandle,
@@ -1581,6 +1640,7 @@ class MainActivity : AppCompatActivity() {
                     scale            = s,
                     tintR            = tintR, tintG = tintG, tintB = tintB, tintA = brightness,
                     additiveMaterial = EngineJni.ADDITIVE_FIRE,
+                    prevModelMatrix  = prev,
                 )
             }
         }
@@ -2769,6 +2829,12 @@ class MainActivity : AppCompatActivity() {
             val bulletIter = bullets.iterator()
             while (bulletIter.hasNext()) {
                 val b = bulletIter.next()
+                // E10.3 — snapshot prev (x, z) before moving so the next
+                // frame's render can build a prev_model matrix that lags
+                // current by one tick — the velocity attachment then reads
+                // as the bullet's true on-screen velocity.
+                b.prevX = b.x
+                b.prevZ = b.z
                 b.x += b.vx * dt
                 b.z += b.vz * dt
                 // Drop a tiny fading flash at the current position at fixed
@@ -2909,9 +2975,12 @@ class MainActivity : AppCompatActivity() {
                 if (f.life <= 0f) flashIter.remove()
             }
             // E7.1 — same lifecycle for 3D fireballs.
+            // E10.3 — snapshot prevLife before tick so buildScene can
+            // reconstruct last frame's scale curve for motion-vector input.
             val fireballIter = fireballs.iterator()
             while (fireballIter.hasNext()) {
                 val fb = fireballIter.next()
+                fb.prevLife = fb.life
                 fb.life -= dt
                 if (fb.life <= 0f) fireballIter.remove()
             }
@@ -2924,6 +2993,11 @@ class MainActivity : AppCompatActivity() {
             // Move asteroids down at their own speed (mission baseline × type
             // multiplier, captured at spawn); spin around their own axis.
             for (a in asteroids) {
+                // E10.3 — snapshot prev z + rotation before mutating so the
+                // motion-vector at this frame's render reads as one tick of
+                // fall + spin (correct delta for motion blur).
+                a.prevZ        = a.zPos
+                a.prevRotation = a.rotation
                 a.zPos     -= a.speed * dt
                 a.rotation += a.rotationSpeed * dt
             }

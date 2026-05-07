@@ -61,11 +61,20 @@ namespace station {
                            int32_t mode);
         static constexpr uint32_t kParticleFloatStride = 8; // pos3 + size1 + rgba4
 
-        // Scene API — called each frame from engine_api
+        // Scene API — called each frame from engine_api.
+        // E10.3 — every mesh-style draw takes an optional `prevModelMatrix`
+        // (nullptr = "no prev tracking", engine treats prev_model = current
+        // model → zero screen-space velocity for that draw). The vertex
+        // shader reads prev_model from descriptor set 2 (binding 0) with
+        // a dynamic offset that the render loop pushes per draw. This is
+        // the per-object input to the motion-blur shader (E10.4 — currently
+        // post.frag is still passthrough).
         void beginScene();
-        void drawMesh(uint32_t token, const float modelMatrix[16]);
+        void drawMesh(uint32_t token, const float modelMatrix[16],
+                      const float prevModelMatrix[16] = nullptr);
         void drawPickableMesh(uint32_t token, int32_t objectId,
-                              const float modelMatrix[16], float pickRadius);
+                              const float modelMatrix[16], float pickRadius,
+                              const float prevModelMatrix[16] = nullptr);
         void drawBillboardMesh(uint32_t token, float x, float y, float z, float scale);
         void drawPlasmaBillboard(uint32_t token, float x, float y, float z,
                                  float scaleH, float scaleV,
@@ -74,7 +83,9 @@ namespace station {
         // pipeline: 0 = plain (per-vertex alpha only), 1 = nebula (FBM noise
         // modulates alpha), 2 = hex (procedural hex grid modulates alpha).
         // Encoded into pc.tint.y/z so the shader can branch with no extra API.
-        void drawTranslucentMesh(uint32_t token, const float modelMatrix[16], int32_t material = 0);
+        void drawTranslucentMesh(uint32_t token, const float modelMatrix[16],
+                                 int32_t material = 0,
+                                 const float prevModelMatrix[16] = nullptr);
         // E7 — additive-blend mesh draw. ONE/ONE blend (like plasma billboards)
         // but accepts arbitrary 3D meshes via model matrix. Per-vertex alpha
         // controls glow falloff; (r,g,b,a) tint multiplies in as colour and
@@ -84,7 +95,8 @@ namespace station {
         // plasma laser beams, electric arcs, etc.
         void drawAdditiveMesh(uint32_t token, const float modelMatrix[16],
                               float r, float g, float b, float a,
-                              int32_t material = 0);
+                              int32_t material = 0,
+                              const float prevModelMatrix[16] = nullptr);
         // E8.3 — textured opaque mesh. Same opaque pipeline as drawMesh, but
         // binds the given texture's descriptor set 1 and sets pc.textureMode
         // so the fragment shader samples vUV instead of using vColor.rgb.
@@ -93,7 +105,8 @@ namespace station {
         // for the lookup to be meaningful.
         void drawTexturedMesh(uint32_t meshToken, uint32_t textureToken,
                               const float modelMatrix[16],
-                              float r, float g, float b, float a);
+                              float r, float g, float b, float a,
+                              const float prevModelMatrix[16] = nullptr);
         void drawObjectFrameMesh(uint32_t frameToken, uint32_t targetToken, const float modelMatrix[16], float padding, const float tint[4]);
         void drawGameplayFrameMesh(uint32_t frameToken, const float modelMatrix[16],
                                    const float* localPoints, int32_t pointCount,
@@ -164,6 +177,12 @@ namespace station {
             uint32_t token;
             uint32_t targetToken;
             uint32_t textureToken;     // E8.3 — 0 = no texture (default white set 1)
+            uint32_t perDrawUboOffset; // E10.3 — byte offset of this draw's
+                                       // prev_model slot in m_perDrawUboBuffer.
+                                       // Plasma billboards / frame meshes /
+                                       // particles share a single zero-velocity
+                                       // slot; mesh-style draws each take their
+                                       // own slot during the draw* call.
             bool     billboard;
             bool     objectFrame;
             float    center[3];
@@ -284,6 +303,34 @@ namespace station {
         // procedural effects.
         std::chrono::steady_clock::time_point m_renderStart{};
         bool m_renderStartInitialised = false;
+
+        // E10.3 — previous-frame camera matrices, cached at end of
+        // updateUniformBuffer and uploaded as prev_view / prev_proj to the
+        // UBO on the NEXT frame. First frame leaves them at identity which
+        // produces zero camera-velocity (correct for "no history yet").
+        float m_prevView[16]{};
+        float m_prevProj[16]{};
+        bool  m_prevCameraInitialised = false;
+
+        // E10.3 — per-draw dynamic UBO. Holds prev_model per draw call;
+        // the vertex shader reads it from descriptor set 2 (binding 0)
+        // with a dynamic offset that the engine updates per draw via
+        // vkCmdBindDescriptorSets. Persistent-mapped HOST_VISIBLE so each
+        // draw call's prev_model write is a single memcpy. Sized for
+        // kMaxDrawsPerFrame slots; the cursor resets in beginScene and
+        // grows as draw* calls land. Dynamic-offset rather than push-const
+        // because growing push-const past the 128-byte Vulkan minimum
+        // would trip device-cliff failures on older Adreno/Mali; UBO with
+        // dynamic offset is portable across every Vulkan implementation.
+        static constexpr uint32_t kMaxDrawsPerFrame = 4096;
+        VkBuffer       m_perDrawUboBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory m_perDrawUboMemory = VK_NULL_HANDLE;
+        void*          m_perDrawUboMapped = nullptr;
+        uint32_t       m_perDrawUboStride = 0;       // padded slot stride in bytes (≥ 64)
+        uint32_t       m_perDrawUboCursor = 0;       // next free slot index, reset in beginScene
+        VkDescriptorSetLayout m_perDrawSetLayout    = VK_NULL_HANDLE;  // set 2
+        VkDescriptorPool      m_perDrawDescriptorPool = VK_NULL_HANDLE;
+        VkDescriptorSet       m_perDrawDescriptorSet  = VK_NULL_HANDLE;
 
         bool pickQueueFamily();
         bool createDevice();

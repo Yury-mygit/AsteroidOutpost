@@ -291,18 +291,20 @@ extern "C" void station_engine_begin_scene(StationEngine* e) {
 
 extern "C" void station_engine_draw_mesh(StationEngine* e,
                                          StationMesh*   mesh,
-                                         const float    modelMatrix[16]) {
+                                         const float    modelMatrix[16],
+                                         const float    prevModelMatrix[16]) {
     if (!e || !mesh) return;
-    e->vulkan.drawMesh(mesh->token, modelMatrix);
+    e->vulkan.drawMesh(mesh->token, modelMatrix, prevModelMatrix);
 }
 
 extern "C" void station_engine_draw_pickable_mesh(StationEngine* e,
                                                   StationMesh*   mesh,
                                                   int32_t        objectId,
                                                   const float    modelMatrix[16],
-                                                  float          pickRadius) {
+                                                  float          pickRadius,
+                                                  const float    prevModelMatrix[16]) {
     if (!e || !mesh) return;
-    e->vulkan.drawPickableMesh(mesh->token, objectId, modelMatrix, pickRadius);
+    e->vulkan.drawPickableMesh(mesh->token, objectId, modelMatrix, pickRadius, prevModelMatrix);
 }
 
 extern "C" void station_engine_draw_billboard_mesh(StationEngine* e,
@@ -328,9 +330,11 @@ extern "C" void station_engine_draw_textured_mesh(StationEngine* e,
                                                   StationMesh*    mesh,
                                                   StationTexture* texture,
                                                   const float     modelMatrix[16],
-                                                  float r, float g, float b, float a) {
+                                                  float r, float g, float b, float a,
+                                                  const float     prevModelMatrix[16]) {
     if (!e || !mesh || !texture) return;
-    e->vulkan.drawTexturedMesh(mesh->token, texture->token, modelMatrix, r, g, b, a);
+    e->vulkan.drawTexturedMesh(mesh->token, texture->token, modelMatrix,
+                               r, g, b, a, prevModelMatrix);
 }
 
 extern "C" void station_engine_draw_particles(StationEngine*  e,
@@ -348,18 +352,20 @@ extern "C" void station_engine_draw_particles(StationEngine*  e,
 extern "C" void station_engine_draw_translucent_mesh(StationEngine* e,
                                                      StationMesh*   mesh,
                                                      const float    modelMatrix[16],
-                                                     int32_t        material) {
+                                                     int32_t        material,
+                                                     const float    prevModelMatrix[16]) {
     if (!e || !mesh) return;
-    e->vulkan.drawTranslucentMesh(mesh->token, modelMatrix, material);
+    e->vulkan.drawTranslucentMesh(mesh->token, modelMatrix, material, prevModelMatrix);
 }
 
 extern "C" void station_engine_draw_additive_mesh(StationEngine* e,
                                                   StationMesh*   mesh,
                                                   const float    modelMatrix[16],
                                                   float r, float g, float b, float a,
-                                                  int32_t material) {
+                                                  int32_t material,
+                                                  const float    prevModelMatrix[16]) {
     if (!e || !mesh) return;
-    e->vulkan.drawAdditiveMesh(mesh->token, modelMatrix, r, g, b, a, material);
+    e->vulkan.drawAdditiveMesh(mesh->token, modelMatrix, r, g, b, a, material, prevModelMatrix);
 }
 
 extern "C" void station_engine_draw_object_frame_mesh(StationEngine* e,

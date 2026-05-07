@@ -203,37 +203,48 @@ Java_com_example_asteroidoutpost_EngineJni_nativeBeginScene(JNIEnv* /*env*/, job
     station_engine_begin_scene(reinterpret_cast<StationEngine*>(handle));
 }
 
+// E10.3 — mesh draws now take an optional `prevModelMatrix`. nullptr in C
+// (== Java FloatArray null) means "no prev tracking, use current model"
+// which the engine resolves to zero velocity at the per-draw UBO write.
 JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawMesh(JNIEnv* env, jobject /*thiz*/,
                                              jlong engineHandle, jlong meshHandle,
-                                             jfloatArray modelMatrix) {
+                                             jfloatArray modelMatrix,
+                                             jfloatArray prevModelMatrix) {
     if (!modelMatrix) return;
     jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
     if (!m) return;
+    jfloat* pm = prevModelMatrix ? env->GetFloatArrayElements(prevModelMatrix, nullptr) : nullptr;
     station_engine_draw_mesh(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
-            reinterpret_cast<const float*>(m)
+            reinterpret_cast<const float*>(m),
+            reinterpret_cast<const float*>(pm)
     );
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+    if (pm) env->ReleaseFloatArrayElements(prevModelMatrix, pm, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawPickableMesh(JNIEnv* env, jobject /*thiz*/,
                                                      jlong engineHandle, jlong meshHandle,
                                                      jint objectId, jfloatArray modelMatrix,
-                                                     jfloat pickRadius) {
+                                                     jfloat pickRadius,
+                                                     jfloatArray prevModelMatrix) {
     if (!modelMatrix) return;
     jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
     if (!m) return;
+    jfloat* pm = prevModelMatrix ? env->GetFloatArrayElements(prevModelMatrix, nullptr) : nullptr;
     station_engine_draw_pickable_mesh(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
             objectId,
             reinterpret_cast<const float*>(m),
-            pickRadius
+            pickRadius,
+            reinterpret_cast<const float*>(pm)
     );
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+    if (pm) env->ReleaseFloatArrayElements(prevModelMatrix, pm, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL
@@ -267,33 +278,41 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawTexturedMesh(JNIEnv* env, j
                                                      jlong engineHandle, jlong meshHandle,
                                                      jlong textureHandle,
                                                      jfloatArray modelMatrix,
-                                                     jfloat r, jfloat g, jfloat b, jfloat a) {
+                                                     jfloat r, jfloat g, jfloat b, jfloat a,
+                                                     jfloatArray prevModelMatrix) {
     if (!modelMatrix) return;
     jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
     if (!m) return;
+    jfloat* pm = prevModelMatrix ? env->GetFloatArrayElements(prevModelMatrix, nullptr) : nullptr;
     station_engine_draw_textured_mesh(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
             reinterpret_cast<StationTexture*>(textureHandle),
             reinterpret_cast<const float*>(m),
-            r, g, b, a);
+            r, g, b, a,
+            reinterpret_cast<const float*>(pm));
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+    if (pm) env->ReleaseFloatArrayElements(prevModelMatrix, pm, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawTranslucentMesh(JNIEnv* env, jobject /*thiz*/,
                                                         jlong engineHandle, jlong meshHandle,
-                                                        jfloatArray modelMatrix, jint material) {
+                                                        jfloatArray modelMatrix, jint material,
+                                                        jfloatArray prevModelMatrix) {
     if (!modelMatrix) return;
     jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
     if (!m) return;
+    jfloat* pm = prevModelMatrix ? env->GetFloatArrayElements(prevModelMatrix, nullptr) : nullptr;
     station_engine_draw_translucent_mesh(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
             reinterpret_cast<const float*>(m),
-            static_cast<int32_t>(material)
+            static_cast<int32_t>(material),
+            reinterpret_cast<const float*>(pm)
     );
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+    if (pm) env->ReleaseFloatArrayElements(prevModelMatrix, pm, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL
@@ -301,18 +320,22 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawAdditiveMesh(JNIEnv* env, j
                                                      jlong engineHandle, jlong meshHandle,
                                                      jfloatArray modelMatrix,
                                                      jfloat r, jfloat g, jfloat b, jfloat a,
-                                                     jint material) {
+                                                     jint material,
+                                                     jfloatArray prevModelMatrix) {
     if (!modelMatrix) return;
     jfloat* m = env->GetFloatArrayElements(modelMatrix, nullptr);
     if (!m) return;
+    jfloat* pm = prevModelMatrix ? env->GetFloatArrayElements(prevModelMatrix, nullptr) : nullptr;
     station_engine_draw_additive_mesh(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
             reinterpret_cast<const float*>(m),
             r, g, b, a,
-            static_cast<int32_t>(material)
+            static_cast<int32_t>(material),
+            reinterpret_cast<const float*>(pm)
     );
     env->ReleaseFloatArrayElements(modelMatrix, m, JNI_ABORT);
+    if (pm) env->ReleaseFloatArrayElements(prevModelMatrix, pm, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL

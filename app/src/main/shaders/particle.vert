@@ -5,9 +5,16 @@
 // the main triangle shaders so the existing pipeline layout works
 // unchanged. Reads binding 1 (input rate INSTANCE).
 
+// E10.3 — UBO grew to 4 mat4 (view, proj, prev_view, prev_proj). Particle
+// vertex shader doesn't compute motion vectors yet (per-instance prev_pos
+// arrives in E10.5), but the struct must match the C++ UBO layout for
+// every shader that binds set 0 — declaring the prev_* fields keeps the
+// SPIR-V reflection happy without forcing us to use them.
 layout(set = 0, binding = 0) uniform Ubo {
     mat4 view;
     mat4 proj;
+    mat4 prev_view;
+    mat4 prev_proj;
 } ubo;
 
 layout(push_constant) uniform PushConst {
