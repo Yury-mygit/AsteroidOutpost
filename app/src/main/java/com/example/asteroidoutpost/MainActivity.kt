@@ -133,6 +133,11 @@ class MainActivity : AppCompatActivity() {
     // alignment is required: the fragment shader's Fresnel-like fade uses
     // abs(vNormal.y) under this project's fixed pitch=π/2 camera.
     private var fireballMeshHandle: Long = 0L
+    // E11 — procedural cone-fan mesh for muzzle blasts. Triangle fan in the
+    // X-Z plane, ±15° aperture (30° wedge total) around local +Z, radius 1.
+    // Drawn through the plasma pipeline with per-draw rotation so each of
+    // the three muzzle flashes points in its own world direction.
+    private var muzzleConeMeshHandle: Long = 0L
     // E9 — particle infrastructure. `particleQuadHandle` is the unit X-Z
     // quad shared by all instances (the fragment shader produces shape via
     // soft-fade + heat-ramp). `smokeTextureHandle` and `debrisTextureHandle`
@@ -178,11 +183,6 @@ class MainActivity : AppCompatActivity() {
         // aoeDamage applied to every other asteroid within the radius.
         val aoeRadius: Float = 0f,
         val aoeDamage: Int = 0,
-        // Bullet-trail VFX (M7.1). Counts down to next trail-particle emission;
-        // the tick loop drops a tiny fading flash at the current bullet position
-        // each time this hits zero, producing a comet-style streak behind the
-        // projectile. Persisted per-bullet so trails stay even-spaced.
-        var trailTimer: Float = 0f,
     )
     private data class Flash(
         val x: Float, val z: Float,
@@ -194,6 +194,14 @@ class MainActivity : AppCompatActivity() {
         // Default white preserves the E4 warm-flame look; non-white recolours
         // by event (cyan ENERGY pickup, blue shield absorb, orange-red AoE).
         val tintR: Float = 1f, val tintG: Float = 1f, val tintB: Float = 1f, val tintA: Float = 1f,
+        // E11 — optional non-quad mesh for directional flashes (muzzle cones).
+        // 0 = engine fallback to quadFlashHandle in buildScene mapping.
+        val meshHandle: Long = 0L,
+        // E11 — local Y-axis rotation in radians, applied before billboard
+        // alignment. 0 keeps the plasma quad axis-aligned (legacy round flash);
+        // muzzle cones set this to atan2(dirX, dirZ) so the wedge points along
+        // its world direction.
+        val rotation: Float = 0f,
     )
     private val flashes: MutableList<Flash> = mutableListOf()
 
@@ -368,7 +376,21 @@ class MainActivity : AppCompatActivity() {
     private var upgradesOverlay:   View? = null
     private var upgradesReturnTo:  (() -> Unit)? = null
     private object DraftCombat {
-        const val FIRE_INTERVAL_SEC: Float = 0.15f   // ~6.7 shots/sec
+        // Side-turret fire rate. The side turrets are cannon-style (heavy
+        // bullet + AoE) since the muzzle-blast / motion-blur rework, so
+        // this is paced like the central heavy cannon (1 shot/sec) rather
+        // than the original M1 machine-gun cadence (~6.7 shots/sec).
+        const val FIRE_INTERVAL_SEC: Float = 1.0f
+        // Side-turret bullet specs (cannon-style). Mirrors the central
+        // HEAVY_CANNON weapon's projectile parameters; differences in damage
+        // scaling are handled by SIDE_DAMAGE_MUL applied to the upgrade
+        // ladder's effectiveTurretDamage.
+        const val SIDE_BULLET_SPEED:    Float = 18f
+        const val SIDE_BULLET_HALF_W:   Float = 0.065f
+        const val SIDE_BULLET_HALF_H:   Float = 0.117f
+        const val SIDE_DAMAGE_MUL:      Float = 3f
+        const val SIDE_AOE_RADIUS:      Float = 0.5f
+        const val SIDE_AOE_DAMAGE_MUL:  Float = 0.6f
         const val BULLET_SPEED:      Float = 25f     // world units per second
         const val BULLET_HALF_W:     Float = 0.04f   // ~1.6% screen width
         const val BULLET_HALF_H:     Float = 0.18f   // ~3.3% screen height
@@ -422,21 +444,23 @@ class MainActivity : AppCompatActivity() {
         // and the additive sphere needs time for the FBM turbulence to read
         // as fire instead of a static blob.
         const val FIREBALL_LIFE_SEC: Float = 0.50f
-        // M7.1 VFX — turret muzzle, projectile trail, AoE ring.
+        // M7.1 VFX — turret muzzle, projectile hit flash, AoE ring.
         const val MUZZLE_FLASH_LIFE: Float = 0.08f
-        const val MUZZLE_FLASH_HALF: Float = 0.13f
-        const val TRAIL_INTERVAL_SEC:Float = 0.04f
-        const val TRAIL_LIFE_SEC:    Float = 0.12f
-        const val TRAIL_HALF:        Float = 0.05f
-        // Perimeter-ring particle constants removed — explosions are now a
-        // single AoE-sized billboard (see spawnExplosion).
+        const val MUZZLE_FLASH_HALF: Float = 0.39f  // 3× of pre-E11 0.13 for cone-shape blast
+        // E10.4-trails — direct (non-AoE) hit flash. Sized as
+        // `bullet.halfW * HIT_FLASH_SIZE_MUL`, so cannon bullets (halfW≈0.065)
+        // get a 0.20-half flash and machine-gun bullets (halfW≈0.04) get a
+        // 0.12-half flash without any per-weapon flag. AoE bullets skip
+        // this and run spawnExplosion (fireball + spark burst) instead.
+        const val HIT_FLASH_LIFE:    Float = 0.12f
+        const val HIT_FLASH_SIZE_MUL:Float = 3.0f
         // E5.1 — per-event flash tints (RGBA), multiplied into the plasma
         // fragment heat-ramp. RGB channels recolour the warm-flame baseline;
         // alpha is an overall brightness scalar (>1 = boost). White (default)
         // keeps the E4 look. Tunable; non-const because Kotlin disallows
         // const FloatArray in companion objects.
         val FLASH_TINT_MUZZLE     = floatArrayOf(1.00f, 0.95f, 0.70f, 1.00f)  // warm white-yellow
-        val FLASH_TINT_TRAIL      = floatArrayOf(1.00f, 0.80f, 0.45f, 0.85f)  // warm trail, slightly dimmer
+        val FLASH_TINT_HIT        = floatArrayOf(1.00f, 0.75f, 0.30f, 1.00f)  // warm orange impact
         val FLASH_TINT_ENERGY     = floatArrayOf(0.45f, 0.85f, 1.00f, 1.10f)  // cyan electric, slightly brighter
         val FLASH_TINT_DEATH      = floatArrayOf(1.00f, 0.85f, 0.40f, 1.00f)  // warm yellow burst
         val FLASH_TINT_SHIELD     = floatArrayOf(0.35f, 0.75f, 1.00f, 1.00f)  // blue shield deflection
@@ -1163,6 +1187,62 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * E11 — muzzle-blast cone mesh: triangle fan in the X-Z plane with
+     * ±15° aperture (30° total wedge) around local +Z, radius 1, alpha 1
+     * everywhere. The plasma fragment shader's radial soft-fade
+     * (`plasmaSoftFade()`, smoothstep(0.4, 1.0, length(vLocalXZ))) does the
+     * fade — alpha 1 at origin → 0 at perimeter — so each cone reads as a
+     * wispy fire wedge fading outward. Forward = +Z so a `rotation=0`
+     * cone aligns to the screen-up direction; spawnMuzzleBlast feeds in
+     * three rotations 120° apart for the trefoil pattern.
+     *
+     * Default 12 segments → 12 triangles, ~13 vertices. Sub-pixel detail
+     * comes from FBM turbulence in the fragment shader, not from mesh
+     * tessellation, so a low segment count is fine.
+     */
+    private fun buildMuzzleConeMesh(segments: Int = 12): Long {
+        val aperture = (30.0 * Math.PI / 180.0).toFloat()  // total cone width in radians
+        val halfAp   = aperture * 0.5f
+
+        // 1 centre vertex + (segments+1) perimeter vertices, 10 floats each.
+        val nVerts = 1 + (segments + 1)
+        val vertices = FloatArray(nVerts * 10)
+        // Centre vertex at origin — alpha 1, rest of fields don't matter for the
+        // plasma fragment branch (it doesn't read normal, and uv stays default).
+        vertices[0] = 0f; vertices[1] = 0f; vertices[2] = 0f
+        vertices[3] = 1f; vertices[4] = 1f; vertices[5] = 1f; vertices[6] = 1f
+        vertices[7] = 0f; vertices[8] = 1f; vertices[9] = 0f
+
+        var off = 10
+        for (i in 0..segments) {
+            // phi sweeps from -halfAp to +halfAp; phi=0 puts the vertex at +Z
+            // (forward), so the fan opens forward. The cos/sin assignment maps
+            // phi=0 → (0, 0, 1), phi=+halfAp → (sin(halfAp), 0, cos(halfAp)).
+            val phi  = -halfAp + (aperture / segments) * i
+            val px   = kotlin.math.sin(phi)
+            val pz   = kotlin.math.cos(phi)
+            vertices[off + 0] = px
+            vertices[off + 1] = 0f
+            vertices[off + 2] = pz
+            vertices[off + 3] = 1f; vertices[off + 4] = 1f; vertices[off + 5] = 1f
+            vertices[off + 6] = 1f
+            vertices[off + 7] = 0f; vertices[off + 8] = 1f; vertices[off + 9] = 0f
+            off += 10
+        }
+
+        // Triangle fan: (centre=0, perim_i, perim_i+1) for i in 1..segments.
+        val indices = ShortArray(segments * 3)
+        var idx = 0
+        for (i in 1..segments) {
+            indices[idx++] = 0
+            indices[idx++] = i.toShort()
+            indices[idx++] = (i + 1).toShort()
+        }
+
+        return engineView.engine.loadMeshRaw(vertices, indices)
+    }
+
+    /**
      * E9 — unit UV-mapped X-Z plane quad for particles. Same primitive as
      * the E8.4 textured-quad smoke test, regenerated here because it lives
      * permanently and the smoke-test version was retired. Particle vertex
@@ -1332,6 +1412,9 @@ class MainActivity : AppCompatActivity() {
         // E7.1 — load the fireball UV-sphere once. Drawn through the additive
         // pipeline with ADDITIVE_FIRE material in spawnAoeRing.
         fireballMeshHandle = buildFireballSphereMesh()
+        // E11 — load the muzzle cone fan once; spawnMuzzleBlast spawns 3
+        // plasma billboards using this mesh with per-flash rotation.
+        muzzleConeMeshHandle = buildMuzzleConeMesh()
         // E9 — particle infrastructure. Single shared unit-quad mesh, plus
         // two procedural textures (smoke puff for AoE/death, asteroid-chunk
         // debris for asteroid death). Sparks (additive) ignore textures.
@@ -1553,7 +1636,13 @@ class MainActivity : AppCompatActivity() {
         val flashBillboards = flashes.map { f ->
             val t = 1f - (f.life / f.maxLife)
             val s = f.halfMax * (0.6f + t * 0.8f)
-            BillboardDraw(quadFlashHandle, f.x, 0f, f.z, s, f.tintR, f.tintG, f.tintB, f.tintA)
+            // E11 — flashes that specify their own mesh (e.g. muzzle cones)
+            // route through it; round flashes fall back to the standard
+            // quadFlashHandle. Rotation is plumbed straight through; default
+            // 0 leaves quads axis-aligned as before.
+            val mesh = if (f.meshHandle != 0L) f.meshHandle else quadFlashHandle
+            BillboardDraw(mesh, f.x, 0f, f.z, s, f.tintR, f.tintG, f.tintB, f.tintA,
+                          rotation = f.rotation)
         }
         engineView.plasmaBillboards   = flashBillboards
         engineView.translucentObjects = nebulaeTranslucent + buildShieldDome()
@@ -1777,6 +1866,59 @@ class MainActivity : AppCompatActivity() {
      * velocity (already normalised inside this helper). 3-5 short sparks
      * per shot read as gunpowder kick.
      */
+    /**
+     * E10.4-trails / E11 — directional muzzle blast as 3 plasma cones spaced
+     * 120° apart around the muzzle. Each cone uses the procedural muzzle-cone
+     * mesh (30° wedge fan) routed through the plasma pipeline with per-flash
+     * rotation, so the wedges point along their respective world directions
+     * with the full plasma look (FBM turbulence + heat ramp + soft fade).
+     *
+     * `dirX, dirZ` is the bullet's unit velocity; `bulletHalfW` scales the
+     * blast so a chunkier projectile pops bigger than a slim one. Each cone
+     * starts at the muzzle (origin = tip) and flares outward by `mainSize`
+     * along its rotation, producing a tri-fork shape rooted at the barrel
+     * exit. The plasma soft-fade in the fragment shader handles the alpha
+     * gradient from bright tip to transparent rim.
+     */
+    private fun spawnMuzzleBlast(
+        cx: Float, cz: Float,
+        dirX: Float, dirZ: Float,
+        bulletHalfW: Float,
+        tint: FloatArray,
+    ) {
+        // Reference: BULLET_HALF_W = 0.04 maps to sizeMul ~1.0; clamps stop
+        // very-small / very-large bullets from collapsing or overflowing.
+        val sizeMul  = (bulletHalfW / DraftCombat.BULLET_HALF_W).coerceIn(0.5f, 2.0f)
+        val mainSize = DraftCombat.MUZZLE_FLASH_HALF * sizeMul
+        val life     = DraftCombat.MUZZLE_FLASH_LIFE
+
+        // Forward angle in the engine's rotation convention: rotation=0 leaves
+        // the cone's local +Z pointing screen-up (= world +Z under the fixed
+        // pitch=π/2 camera). To rotate forward to (dirX, dirZ), the angle is
+        // atan2(dirX, dirZ): atan2(0, 1) = 0 (no rotation, points up),
+        // atan2(1, 0) = π/2 (points right), etc.
+        val forwardAngle = kotlin.math.atan2(dirX, dirZ)
+        val twoThirdsPi  = (2.0 * Math.PI / 3.0).toFloat()
+
+        fun add(rot: Float) {
+            flashes.add(Flash(
+                x = cx, z = cz,
+                life = life, maxLife = life,
+                halfMax = mainSize,
+                tintR = tint[0], tintG = tint[1], tintB = tint[2], tintA = tint[3],
+                meshHandle = muzzleConeMeshHandle,
+                rotation = rot,
+            ))
+        }
+
+        // Three cones at 0°, +120°, -120° from forward. All rooted at the
+        // muzzle position (cone tip = local origin); the rotation parameter
+        // points each wedge's apex outward along its share of the trefoil.
+        add(forwardAngle)
+        add(forwardAngle + twoThirdsPi)
+        add(forwardAngle - twoThirdsPi)
+    }
+
     private fun spawnMuzzleSparks(cx: Float, cz: Float, vx: Float, vz: Float) {
         val baseTheta = kotlin.math.atan2(vz, vx)
         val n = (DraftCombat.SPARK_MUZZLE_COUNT_MIN..DraftCombat.SPARK_MUZZLE_COUNT_MAX).random()
@@ -2768,18 +2910,16 @@ class MainActivity : AppCompatActivity() {
                     aoeRadius = weapon.aoeRadius,
                     aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
                 ))
-                // Muzzle flash at the barrel tip — short bright pop.
-                val mt = DraftCombat.FLASH_TINT_MUZZLE
-                flashes.add(Flash(
-                    x = muzzleX, z = muzzleZ,
-                    life = DraftCombat.MUZZLE_FLASH_LIFE,
-                    maxLife = DraftCombat.MUZZLE_FLASH_LIFE,
-                    halfMax = DraftCombat.MUZZLE_FLASH_HALF,
-                    tintR = mt[0], tintG = mt[1], tintB = mt[2], tintA = mt[3],
-                ))
+                // Muzzle blast — cannon-with-brake shape (central pop +
+                // forward plume + 2 perpendicular vents). Sized by the
+                // weapon's projectile half-width so the heavy cannon pops
+                // bigger than the automatic.
+                spawnMuzzleBlast(muzzleX, muzzleZ, sinA, cosA,
+                                 weapon.projectileHalfW,
+                                 DraftCombat.FLASH_TINT_MUZZLE)
                 // E9 — micro-sparks fanning out of the barrel along the
                 // bullet velocity. Brief (~0.1s) so they punctuate the
-                // shot without trailing into the bullet's own trail VFX.
+                // shot without obscuring the muzzle blast cluster.
                 spawnMuzzleSparks(muzzleX, muzzleZ,
                                   sinA * weapon.projectileSpeed,
                                   cosA * weapon.projectileSpeed)
@@ -2800,26 +2940,35 @@ class MainActivity : AppCompatActivity() {
                     val nz = dz / len
                     val muzzleX = tx
                     val muzzleZ = tz + DraftCombat.TURRET_HALF
+                    // Side turrets fire heavy AoE shells matching the central
+                    // HEAVY_CANNON weapon profile — chunky projectile, slow
+                    // muzzle velocity, splash damage to nearby asteroids. The
+                    // cadence is paced by FIRE_INTERVAL_SEC (1 shot/sec) so
+                    // they read as supporting artillery rather than a stream
+                    // of small projectiles.
+                    val sideDamage = (effectiveTurretDamage * DraftCombat.SIDE_DAMAGE_MUL).toInt()
                     bullets.add(Bullet(
-                        x = muzzleX, z = muzzleZ,
-                        vx = nx * DraftCombat.BULLET_SPEED,
-                        vz = nz * DraftCombat.BULLET_SPEED,
-                        damage = effectiveTurretDamage,
-                        meshHandle = bulletMeshHandle,
+                        x  = muzzleX, z = muzzleZ,
+                        vx = nx * DraftCombat.SIDE_BULLET_SPEED,
+                        vz = nz * DraftCombat.SIDE_BULLET_SPEED,
+                        damage     = sideDamage,
+                        halfW      = DraftCombat.SIDE_BULLET_HALF_W,
+                        halfH      = DraftCombat.SIDE_BULLET_HALF_H,
+                        meshHandle = bulletHeavyMeshHandle,
+                        aoeRadius  = DraftCombat.SIDE_AOE_RADIUS,
+                        aoeDamage  = (sideDamage * DraftCombat.SIDE_AOE_DAMAGE_MUL).toInt(),
                     ))
-                    // Side-turret muzzle flash — same look as the central
-                    // turret's, slightly smaller to keep them visually secondary.
-                    val st = DraftCombat.FLASH_TINT_MUZZLE
-                    flashes.add(Flash(
-                        x = muzzleX, z = muzzleZ,
-                        life = DraftCombat.MUZZLE_FLASH_LIFE,
-                        maxLife = DraftCombat.MUZZLE_FLASH_LIFE,
-                        halfMax = DraftCombat.MUZZLE_FLASH_HALF * 0.7f,
-                        tintR = st[0], tintG = st[1], tintB = st[2], tintA = st[3],
-                    ))
-                    // E9 — side turrets get the same micro-spark fan, kept
-                    // lighter (no count override here — same SPARK_MUZZLE_COUNT
-                    // range) so player still reads side-turret as support.
+                    // Side-turret muzzle blast — same cannon-with-brake
+                    // cluster as the central turret, sized by the bullet's
+                    // half-width (so an upgraded chunkier projectile gets a
+                    // bigger pop without per-turret-type flags).
+                    spawnMuzzleBlast(muzzleX, muzzleZ, nx, nz,
+                                     bullets.last().halfW,
+                                     DraftCombat.FLASH_TINT_MUZZLE)
+                    // E9 — side turrets get the same micro-spark fan; the
+                    // sparks tell "this is a turret shot" identically across
+                    // central and side, the muzzle-blast size tells projectile
+                    // weight.
                     spawnMuzzleSparks(muzzleX, muzzleZ,
                                       nx * DraftCombat.BULLET_SPEED,
                                       nz * DraftCombat.BULLET_SPEED)
@@ -2837,20 +2986,6 @@ class MainActivity : AppCompatActivity() {
                 b.prevZ = b.z
                 b.x += b.vx * dt
                 b.z += b.vz * dt
-                // Drop a tiny fading flash at the current position at fixed
-                // intervals so each bullet visibly trails a comet streak.
-                b.trailTimer -= dt
-                if (b.trailTimer <= 0f) {
-                    b.trailTimer += DraftCombat.TRAIL_INTERVAL_SEC
-                    val tt = DraftCombat.FLASH_TINT_TRAIL
-                    flashes.add(Flash(
-                        x = b.x, z = b.z,
-                        life = DraftCombat.TRAIL_LIFE_SEC,
-                        maxLife = DraftCombat.TRAIL_LIFE_SEC,
-                        halfMax = DraftCombat.TRAIL_HALF,
-                        tintR = tt[0], tintG = tt[1], tintB = tt[2], tintA = tt[3],
-                    ))
-                }
                 if (b.z > DraftCombat.SCREEN_TOP_Z + 1f ||
                     b.z < DraftCombat.SCREEN_BOTTOM_Z - 1f ||
                     b.x < -DraftCombat.SCREEN_HALF_W - 1f ||
@@ -2875,10 +3010,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 if (hit) {
-                    // AoE: apply splash damage to other live asteroids within
-                    // aoeRadius (centred on the hit asteroid). The direct target
-                    // already took full damage above and is excluded.
                     if (b.aoeRadius > 0f && b.aoeDamage > 0) {
+                        // AoE: apply splash damage to other live asteroids within
+                        // aoeRadius (centred on the hit asteroid). The direct
+                        // target already took full damage above and is excluded.
+                        // The fireball + spark burst inside spawnExplosion is the
+                        // cannon's hit-feedback — visibly bigger than the small
+                        // hit flash a direct-hit bullet would otherwise spawn.
                         val r2 = b.aoeRadius * b.aoeRadius
                         for (a in asteroids) {
                             if (a.hp <= 0) continue
@@ -2889,9 +3027,21 @@ class MainActivity : AppCompatActivity() {
                                 a.hp -= b.aoeDamage
                             }
                         }
-                        // M7.1 — ring of small flashes traces the AoE radius
-                        // so the player can read the explosion's reach.
                         spawnExplosion(hitX, hitZ, b.aoeRadius)
+                    } else {
+                        // Direct-hit bullet (no AoE) — spawn a small hit flash
+                        // sized by the projectile's half-width, so cannon-style
+                        // bullets read as a chunkier impact than mg-style ones.
+                        // No fireball needed: the flash punctuates the moment,
+                        // motion blur (E10.4) carries the trajectory feel.
+                        val ht = DraftCombat.FLASH_TINT_HIT
+                        flashes.add(Flash(
+                            x = hitX, z = hitZ,
+                            life = DraftCombat.HIT_FLASH_LIFE,
+                            maxLife = DraftCombat.HIT_FLASH_LIFE,
+                            halfMax = b.halfW * DraftCombat.HIT_FLASH_SIZE_MUL,
+                            tintR = ht[0], tintG = ht[1], tintB = ht[2], tintA = ht[3],
+                        ))
                     }
                     bulletIter.remove()
                 }

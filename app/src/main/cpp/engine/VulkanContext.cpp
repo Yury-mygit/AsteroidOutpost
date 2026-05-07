@@ -1020,6 +1020,18 @@ namespace station {
         r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_pipeline);
         if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines: %s", vkRes(r).c_str()); return false; }
 
+        // E10.4 — only the opaque pipeline writes the velocity attachment.
+        // All subsequent overlay pipelines (system / plasma / translucent /
+        // additive / frame / star / particles) keep their colour blend
+        // mutations on cbAtts[0] but stop writing slot 1, so plasma flashes
+        // / bullet trails / nebulae overlapping moving meshes don't clobber
+        // the underlying velocity with their own outVelocity = vec2(0).
+        // Fireballs (additive) lose motion blur this way too — accepted for
+        // E10.4 since they're short-lived (≤0.5s) and the alternative
+        // (per-pipeline conditional write masks) costs more bookkeeping
+        // than the visual benefit.
+        cbAtts[1].colorWriteMask = 0;
+
         // System overlay pipeline: triangle mesh, drawn after scene, no depth test/write.
         dsCI.depthTestEnable  = VK_FALSE;
         dsCI.depthWriteEnable = VK_FALSE;
@@ -1566,7 +1578,8 @@ namespace station {
     // bullets, flat shockwaves). Pass equal values for a square billboard.
     void VulkanContext::drawPlasmaBillboard(uint32_t token, float x, float y, float z,
                                             float scaleH, float scaleV,
-                                            float r, float g, float b, float a) {
+                                            float r, float g, float b, float a,
+                                            float rotation) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token     = token;
@@ -1574,6 +1587,7 @@ namespace station {
         cmd.center[0] = x; cmd.center[1] = y; cmd.center[2] = z;
         cmd.scale     = scaleH;
         cmd.scaleV    = scaleV;
+        cmd.rotation  = rotation;
         cmd.plasmaColor[0] = r;
         cmd.plasmaColor[1] = g;
         cmd.plasmaColor[2] = b;
@@ -2370,7 +2384,18 @@ namespace station {
                 const math::Mat4 billboard = m_camera.billboardMatrix(
                         {draw.center[0], draw.center[1], draw.center[2]},
                         draw.scale, draw.scaleV);
-                std::memcpy(pc.model, billboard.m, sizeof(float) * 16);
+                // E11 — apply Ry(rotation) in local space BEFORE the
+                // billboard transform. multiply(billboard, rot) composes
+                // M = T*camera-align*S*Ry, so a local point p first gets
+                // rotated in its X-Z plane (Ry*p), then scaled and aligned
+                // to camera right/up. With uniform scaleH==scaleV the
+                // result is a clean rotation in screen space; non-uniform
+                // scale would shear. Default rotation=0 = identity, matches
+                // pre-E11 behaviour.
+                const math::Mat4 model = (draw.rotation != 0.0f)
+                        ? math::multiply(billboard, math::Mat4::rotationY(draw.rotation))
+                        : billboard;
+                std::memcpy(pc.model, model.m, sizeof(float) * 16);
                 // E2.1 — flag plasma fragment shader to apply radial soft-fade.
                 // Project's plasma billboards use quad.gltf (corners at ±1 in X-Z).
                 // Fragment shader maps length(vLocalXZ) → alpha so the visible

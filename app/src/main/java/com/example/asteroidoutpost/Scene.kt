@@ -140,6 +140,10 @@ data class BillboardDraw(
     val scale: Float,
     val r: Float = 1f, val g: Float = 1f, val b: Float = 1f, val a: Float = 1f,
     val scaleV: Float = scale,
+    // E11 — local Y-axis rotation (radians) applied before the billboard
+    // camera-align transform. 0 keeps the legacy round-flash axis alignment;
+    // non-zero is used for directional plasma meshes (muzzle cones).
+    val rotation: Float = 0f,
 )
 
 /**
@@ -207,7 +211,8 @@ fun submitScene(
                                 t.prevModelMatrix)
     }
     for (p in plasmaBillboards) {
-        engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV, p.r, p.g, p.b, p.a)
+        engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV,
+                                   p.r, p.g, p.b, p.a, p.rotation)
     }
     for (pb in particleBatches) {
         engine.drawParticles(pb.meshHandle, pb.textureHandle, pb.data, pb.count, pb.mode)

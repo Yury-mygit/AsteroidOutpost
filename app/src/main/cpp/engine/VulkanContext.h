@@ -76,9 +76,15 @@ namespace station {
                               const float modelMatrix[16], float pickRadius,
                               const float prevModelMatrix[16] = nullptr);
         void drawBillboardMesh(uint32_t token, float x, float y, float z, float scale);
+        // E11 — `rotation` (radians) rotates the mesh in its local X-Z
+        // plane (around Y) before the camera-aligned billboard transform.
+        // 0 keeps legacy "mesh local +Z = screen-up" behaviour. Useful for
+        // non-circular plasma meshes (muzzle cones, streak quads) that
+        // need to orient along an arbitrary direction in screen space.
         void drawPlasmaBillboard(uint32_t token, float x, float y, float z,
                                  float scaleH, float scaleV,
-                                 float r, float g, float b, float a);
+                                 float r, float g, float b, float a,
+                                 float rotation = 0.0f);
         // E3.1 — `material` selects a fragment-shader branch in the translucent
         // pipeline: 0 = plain (per-vertex alpha only), 1 = nebula (FBM noise
         // modulates alpha), 2 = hex (procedural hex grid modulates alpha).
@@ -188,6 +194,7 @@ namespace station {
             float    center[3];
             float    scale;            // billboard horizontal half-size (legacy: uniform)
             float    scaleV;           // E5.2 — billboard vertical half-size (plasma only)
+            float    rotation;         // E11 — local Y-axis rotation (radians, plasma only)
             float    halfExtents[3];
             float    padding;
             float    tint[4];

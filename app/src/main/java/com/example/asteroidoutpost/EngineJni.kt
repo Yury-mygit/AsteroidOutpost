@@ -180,11 +180,20 @@ class EngineJni {
      * half-sizes; pass equal values for a square billboard, or stretch
      * one axis for streak/shockwave-style effects.
      */
+    /**
+     * E11 — `rotation` (radians) rotates the local mesh around its own
+     * Y axis before the billboard camera-align transform. Default 0 keeps
+     * legacy behaviour (mesh local +Z = screen-up). Use this to orient
+     * non-circular plasma meshes (cone fans, streak quads) along an
+     * arbitrary screen direction.
+     */
     fun drawPlasmaBillboard(meshHandle: Long, x: Float, y: Float, z: Float,
                             scaleH: Float, scaleV: Float,
-                            r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f) {
+                            r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f,
+                            rotation: Float = 0f) {
         if (engineHandle != 0L && meshHandle != 0L)
-            nativeDrawPlasmaBillboard(engineHandle, meshHandle, x, y, z, scaleH, scaleV, r, g, b, a)
+            nativeDrawPlasmaBillboard(engineHandle, meshHandle, x, y, z, scaleH, scaleV,
+                                      r, g, b, a, rotation)
     }
 
     /**
@@ -379,7 +388,8 @@ class EngineJni {
         meshHandle: Long,
         x: Float, y: Float, z: Float,
         scaleH: Float, scaleV: Float,
-        r: Float, g: Float, b: Float, a: Float
+        r: Float, g: Float, b: Float, a: Float,
+        rotation: Float
     )
     private external fun nativeDrawTranslucentMesh(
         engineHandle: Long,

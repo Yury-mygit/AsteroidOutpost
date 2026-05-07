@@ -135,6 +135,11 @@ void station_engine_draw_billboard_mesh(StationEngine* engine,
 // E5.2 — `scaleH, scaleV` lets callers stretch the quad along screen-horizontal
 // and screen-vertical independently (streak bullets, flat shockwaves). Pass
 // (s, s) for a square billboard.
+// E11 — `rotation` (radians) rotates the local mesh around its own Y axis
+// before the camera-aligned billboard transform. Lets callers orient
+// non-circular plasma meshes (cone fans, streak quads) along an arbitrary
+// world direction without authoring per-angle meshes. 0 keeps the legacy
+// behaviour (mesh's local +Z maps to screen-up).
 void station_engine_draw_plasma_billboard(StationEngine* engine,
                                           StationMesh*   mesh,
                                           float          x,
@@ -145,7 +150,8 @@ void station_engine_draw_plasma_billboard(StationEngine* engine,
                                           float          r,
                                           float          g,
                                           float          b,
-                                          float          a);
+                                          float          a,
+                                          float          rotation);
 
 // E8.3 — textured opaque mesh draw. Mesh must have authored UVs; texture
 // must come from station_engine_load_texture. (r,g,b,a) is a per-draw

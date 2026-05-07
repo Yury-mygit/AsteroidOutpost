@@ -264,12 +264,14 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawPlasmaBillboard(JNIEnv* /*e
                                                         jlong engineHandle, jlong meshHandle,
                                                         jfloat x, jfloat y, jfloat z,
                                                         jfloat scaleH, jfloat scaleV,
-                                                        jfloat r, jfloat g, jfloat b, jfloat a) {
+                                                        jfloat r, jfloat g, jfloat b, jfloat a,
+                                                        jfloat rotation) {
     station_engine_draw_plasma_billboard(
             reinterpret_cast<StationEngine*>(engineHandle),
             reinterpret_cast<StationMesh*>(meshHandle),
             x, y, z, scaleH, scaleV,
-            r, g, b, a
+            r, g, b, a,
+            rotation
     );
 }
 
