@@ -518,9 +518,15 @@ namespace station {
         // the result. Format = swapchain format for trivial passthrough
         // (the post pipeline currently just samples + writes; in E10.4
         // it'll do motion blur on top).
+        // E10.2 — second colour attachment for screen-space velocity.
+        // R16G16_SFLOAT is enough range for [-1,+1] NDC deltas with sign,
+        // and only 4 bytes/pixel so the bandwidth hit is modest. Same usage
+        // (COLOR_ATTACHMENT + SAMPLED) as the colour image so the post pass
+        // can sample velocity for motion blur (E10.4).
         const VkFormat offscreenFormat = m_sel.format.format;
+        const VkFormat velocityFormat  = VK_FORMAT_R16G16_SFLOAT;
         if (!RenderResourcesBuilder::createRenderPass(
-                m_device, offscreenFormat, m_depthFormat,
+                m_device, offscreenFormat, velocityFormat, m_depthFormat,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 m_renderResources.renderPass)) return false;
         if (!RenderResourcesBuilder::createDepthResources(
@@ -533,12 +539,22 @@ namespace station {
                 m_renderResources.offscreenColorMemory,
                 m_renderResources.offscreenColorView,
                 m_renderResources.offscreenColorSampler)) return false;
+        // Reuse the offscreen-colour factory for the velocity attachment —
+        // identical resource shape (image + memory + view + sampler), only
+        // the format differs.
+        if (!RenderResourcesBuilder::createOffscreenColorResources(
+                m_physicalDevice, m_device, m_sel.extent, velocityFormat,
+                m_renderResources.offscreenVelocityImage,
+                m_renderResources.offscreenVelocityMemory,
+                m_renderResources.offscreenVelocityView,
+                m_renderResources.offscreenVelocitySampler)) return false;
         // Single scene framebuffer wrapped in the existing vector for
         // indexing parity with the rest of the codebase.
         VkFramebuffer sceneFb = VK_NULL_HANDLE;
         if (!RenderResourcesBuilder::createSceneFramebuffer(
                 m_device, m_renderResources.renderPass, m_sel.extent,
                 m_renderResources.offscreenColorView,
+                m_renderResources.offscreenVelocityView,
                 m_renderResources.depthImageView,
                 sceneFb)) return false;
         m_renderResources.framebuffers = { sceneFb };
@@ -830,12 +846,20 @@ namespace station {
         dsCI.depthTestEnable = VK_TRUE; dsCI.depthWriteEnable = VK_TRUE;
         dsCI.depthCompareOp = VK_COMPARE_OP_LESS;
 
-        VkPipelineColorBlendAttachmentState cbAtt{};
+        // E10.2 — two colour attachments: [0] = scene colour (per-pipeline
+        // blend state, mutated below), [1] = velocity (always no-blend,
+        // R+G write mask only). Existing code keeps mutating `cbAtt` which
+        // is now an alias for cbAtts[0]; the velocity slot stays untouched.
+        // Post pipeline below uses its own postCb/postCbCI and is unaffected.
+        VkPipelineColorBlendAttachmentState cbAtts[2]{};
+        auto& cbAtt = cbAtts[0];
         cbAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        cbAtts[1].blendEnable    = VK_FALSE;
+        cbAtts[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
         VkPipelineColorBlendStateCreateInfo cbCI{};
         cbCI.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        cbCI.attachmentCount = 1; cbCI.pAttachments = &cbAtt;
+        cbCI.attachmentCount = 2; cbCI.pAttachments = cbAtts;
 
         // Push constant range: mat4 model + vec4 tint, visible to both stages
         VkPushConstantRange pcRange{};
@@ -1065,20 +1089,29 @@ namespace station {
             if (!makeModule(postVertSpv, m_postVertModule)) return false;
             if (!makeModule(postFragSpv, m_postFragModule)) return false;
 
-            // Set 0: combined image sampler for the offscreen scene colour.
-            VkDescriptorSetLayoutBinding sceneColorBinding{};
-            sceneColorBinding.binding         = 0;
-            sceneColorBinding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            sceneColorBinding.descriptorCount = 1;
-            sceneColorBinding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+            // Two bindings — binding 0 = scene colour, binding 1 = scene
+            // velocity (E10.2). The post.frag in E10.2 only samples colour
+            // (passthrough); the velocity binding is wired up now so the
+            // motion-blur shader in E10.4 can use it without further
+            // descriptor changes. Vulkan permits descriptor bindings the
+            // shader doesn't read — only the reverse is an error.
+            VkDescriptorSetLayoutBinding postBindings[2]{};
+            postBindings[0].binding         = 0;
+            postBindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            postBindings[0].descriptorCount = 1;
+            postBindings[0].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+            postBindings[1].binding         = 1;
+            postBindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            postBindings[1].descriptorCount = 1;
+            postBindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
             VkDescriptorSetLayoutCreateInfo dslCI{};
             dslCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            dslCI.bindingCount = 1;
-            dslCI.pBindings    = &sceneColorBinding;
+            dslCI.bindingCount = 2;
+            dslCI.pBindings    = postBindings;
             r = vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_postSetLayout);
             if (r != VK_SUCCESS) { LOGE("vkCreateDescriptorSetLayout(post): %s", vkRes(r).c_str()); return false; }
 
-            VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+            VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
             VkDescriptorPoolCreateInfo poolCI{};
             poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
             poolCI.poolSizeCount = 1;
@@ -1095,18 +1128,27 @@ namespace station {
             r = vkAllocateDescriptorSets(m_device, &dsAI, &m_postDescriptorSet);
             if (r != VK_SUCCESS) { LOGE("vkAllocateDescriptorSets(post): %s", vkRes(r).c_str()); return false; }
 
-            VkDescriptorImageInfo dii{};
-            dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            dii.imageView   = m_renderResources.offscreenColorView;
-            dii.sampler     = m_renderResources.offscreenColorSampler;
-            VkWriteDescriptorSet write{};
-            write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet           = m_postDescriptorSet;
-            write.dstBinding       = 0;
-            write.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            write.descriptorCount  = 1;
-            write.pImageInfo       = &dii;
-            vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+            VkDescriptorImageInfo diis[2]{};
+            diis[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            diis[0].imageView   = m_renderResources.offscreenColorView;
+            diis[0].sampler     = m_renderResources.offscreenColorSampler;
+            diis[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            diis[1].imageView   = m_renderResources.offscreenVelocityView;
+            diis[1].sampler     = m_renderResources.offscreenVelocitySampler;
+            VkWriteDescriptorSet writes[2]{};
+            writes[0].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet           = m_postDescriptorSet;
+            writes[0].dstBinding       = 0;
+            writes[0].descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[0].descriptorCount  = 1;
+            writes[0].pImageInfo       = &diis[0];
+            writes[1].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet           = m_postDescriptorSet;
+            writes[1].dstBinding       = 1;
+            writes[1].descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[1].descriptorCount  = 1;
+            writes[1].pImageInfo       = &diis[1];
+            vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
 
             // Pipeline layout — own minimal layout (1 set, no PCs).
             VkPipelineLayoutCreateInfo plCI{};
@@ -1828,9 +1870,13 @@ namespace station {
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         vkBeginCommandBuffer(cmd, &bi);
 
-        VkClearValue cv[2]{};
+        // Scene pass clears, in attachment order: colour, velocity, depth.
+        // Velocity clears to (0, 0) — "no motion" so untouched pixels read
+        // as static under the motion-blur shader (E10.4).
+        VkClearValue cv[3]{};
         cv[0].color        = {{0.01f, 0.01f, 0.04f, 1.0f}}; // very dark blue-black
-        cv[1].depthStencil = {1.0f, 0};
+        cv[1].color        = {{0.0f, 0.0f, 0.0f, 0.0f}};    // velocity (RG only)
+        cv[2].depthStencil = {1.0f, 0};
 
         // E10.1 — scene pass renders into the offscreen colour image.
         // framebuffers[0] is shared (single offscreen colour + depth);
@@ -1840,7 +1886,7 @@ namespace station {
         rpi.renderPass = m_renderResources.renderPass;
         rpi.framebuffer = m_renderResources.framebuffers[0];
         rpi.renderArea.extent = m_sel.extent;
-        rpi.clearValueCount = 2; rpi.pClearValues = cv;
+        rpi.clearValueCount = 3; rpi.pClearValues = cv;
         vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
 
         // E8.2 — bind set 1 (texture) once with the default white 1×1 texture.

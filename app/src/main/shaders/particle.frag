@@ -21,6 +21,11 @@ layout(location = 3) in vec2 vLocalXZ;
 layout(location = 4) in vec2 vUV;
 
 layout(location = 0) out vec4 outColor;
+// E10.2 — velocity attachment placeholder. Particles get their own
+// motion-vector path in E10.5 (per-instance prevPos in instance buffer);
+// for now they write zero so the velocity buffer stays well-defined and
+// the post pass (E10.4 motion blur) treats particles as static.
+layout(location = 1) out vec2 outVelocity;
 
 layout(push_constant) uniform PushConst {
     layout(offset = 64)  vec4  tint;
@@ -32,6 +37,10 @@ layout(push_constant) uniform PushConst {
 layout(set = 1, binding = 0) uniform sampler2D uTex;
 
 void main() {
+    // E10.2 — velocity placeholder, written before the early-return
+    // textured branch so it's set on every code path.
+    outVelocity = vec2(0.0);
+
     // Radial soft-fade from the quad centre — same trick as plasma
     // billboards (E2.1). length(vLocalXZ) is 0 at centre, 1 at edge,
     // sqrt(2) at corners. smoothstep(0.4, 1.0) keeps a bright core and

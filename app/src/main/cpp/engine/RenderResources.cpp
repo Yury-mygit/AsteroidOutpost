@@ -89,49 +89,73 @@ namespace station {
     bool RenderResourcesBuilder::createRenderPass(
             VkDevice device,
             VkFormat colorFormat,
+            VkFormat velocityFormat,
             VkFormat depthFormat,
             VkImageLayout finalLayout,
             VkRenderPass& outRenderPass
     ) {
-        // Attachment 0: color
-        VkAttachmentDescription colorAttachment{};
-        colorAttachment.format         = colorFormat;
-        colorAttachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachment.finalLayout    = finalLayout;
+        const bool hasVelocity = (velocityFormat != VK_FORMAT_UNDEFINED);
 
-        // Attachment 1: depth
-        VkAttachmentDescription depthAttachment{};
-        depthAttachment.format         = depthFormat;
-        depthAttachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE; // not read after render
-        depthAttachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        depthAttachment.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        // Attachment 0: colour
+        VkAttachmentDescription attachments[3]{};
+        attachments[0].format         = colorFormat;
+        attachments[0].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[0].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[0].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[0].finalLayout    = finalLayout;
 
-        VkAttachmentReference colorRef{};
-        colorRef.attachment = 0;
-        colorRef.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        // Attachment 1: velocity (E10.2) when velocityFormat provided.
+        // Same loadOp/storeOp/finalLayout as colour — the post pass needs to
+        // sample velocity for motion blur (E10.4). Clear value (0,0) means
+        // "no motion" which is the correct background for the blur shader.
+        // When no velocity attachment, slot is unused and depth slides up.
+        const uint32_t velocityIdx = hasVelocity ? 1u : 0u;
+        const uint32_t depthIdx    = hasVelocity ? 2u : 1u;
+        const uint32_t attachmentCount = hasVelocity ? 3u : 2u;
+
+        if (hasVelocity) {
+            attachments[1].format         = velocityFormat;
+            attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
+            attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachments[1].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[1].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+
+        // Depth attachment (index depends on whether velocity is present).
+        attachments[depthIdx].format         = depthFormat;
+        attachments[depthIdx].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[depthIdx].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[depthIdx].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[depthIdx].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[depthIdx].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[depthIdx].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[depthIdx].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colorRefs[2]{};
+        colorRefs[0].attachment = 0;
+        colorRefs[0].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        if (hasVelocity) {
+            colorRefs[1].attachment = velocityIdx;
+            colorRefs[1].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
 
         VkAttachmentReference depthRef{};
-        depthRef.attachment = 1;
+        depthRef.attachment = depthIdx;
         depthRef.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount    = 1;
-        subpass.pColorAttachments       = &colorRef;
+        subpass.colorAttachmentCount    = hasVelocity ? 2u : 1u;
+        subpass.pColorAttachments       = colorRefs;
         subpass.pDepthStencilAttachment = &depthRef;
 
-        // Two dependencies: external → subpass and subpass → external (depth)
         VkSubpassDependency deps[2]{};
-
         deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
         deps[0].dstSubpass    = 0;
         deps[0].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
@@ -149,11 +173,9 @@ namespace station {
         deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         deps[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 
-        VkAttachmentDescription attachments[2] = { colorAttachment, depthAttachment };
-
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = 2;
+        renderPassInfo.attachmentCount = attachmentCount;
         renderPassInfo.pAttachments    = attachments;
         renderPassInfo.subpassCount    = 1;
         renderPassInfo.pSubpasses      = &subpass;
@@ -166,7 +188,8 @@ namespace station {
             return false;
         }
 
-        log_info("Render pass created (color + depth)");
+        log_info(std::string("Render pass created (color") +
+                 (hasVelocity ? " + velocity" : "") + " + depth)");
         return true;
     }
 
@@ -503,14 +526,23 @@ namespace station {
             VkRenderPass sceneRenderPass,
             VkExtent2D extent,
             VkImageView offscreenColorView,
+            VkImageView offscreenVelocityView,
             VkImageView depthImageView,
             VkFramebuffer& outFramebuffer
     ) {
-        VkImageView attachments[] = { offscreenColorView, depthImageView };
+        // Attachment order must match the render-pass description in
+        // createRenderPass: colour, velocity (optional), depth.
+        const bool hasVelocity = (offscreenVelocityView != VK_NULL_HANDLE);
+        VkImageView attachments[3]{};
+        uint32_t attachmentCount = 0;
+        attachments[attachmentCount++] = offscreenColorView;
+        if (hasVelocity) attachments[attachmentCount++] = offscreenVelocityView;
+        attachments[attachmentCount++] = depthImageView;
+
         VkFramebufferCreateInfo info{};
         info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         info.renderPass      = sceneRenderPass;
-        info.attachmentCount = 2;
+        info.attachmentCount = attachmentCount;
         info.pAttachments    = attachments;
         info.width           = extent.width;
         info.height          = extent.height;
@@ -520,7 +552,8 @@ namespace station {
             log_error("vkCreateFramebuffer(scene) failed: " + vkResultToString(r));
             return false;
         }
-        log_info("Scene framebuffer created");
+        log_info(std::string("Scene framebuffer created (") +
+                 std::to_string(attachmentCount) + " attachments)");
         return true;
     }
 
@@ -742,6 +775,24 @@ namespace station {
         if (resources.offscreenColorMemory != VK_NULL_HANDLE) {
             vkFreeMemory(device, resources.offscreenColorMemory, nullptr);
             resources.offscreenColorMemory = VK_NULL_HANDLE;
+        }
+
+        // E10.2 — velocity attachment cleanup, same shape as colour.
+        if (resources.offscreenVelocitySampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, resources.offscreenVelocitySampler, nullptr);
+            resources.offscreenVelocitySampler = VK_NULL_HANDLE;
+        }
+        if (resources.offscreenVelocityView != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, resources.offscreenVelocityView, nullptr);
+            resources.offscreenVelocityView = VK_NULL_HANDLE;
+        }
+        if (resources.offscreenVelocityImage != VK_NULL_HANDLE) {
+            vkDestroyImage(device, resources.offscreenVelocityImage, nullptr);
+            resources.offscreenVelocityImage = VK_NULL_HANDLE;
+        }
+        if (resources.offscreenVelocityMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, resources.offscreenVelocityMemory, nullptr);
+            resources.offscreenVelocityMemory = VK_NULL_HANDLE;
         }
 
         if (resources.depthImageView != VK_NULL_HANDLE) {

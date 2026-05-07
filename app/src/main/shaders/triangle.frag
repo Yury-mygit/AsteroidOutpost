@@ -7,6 +7,12 @@ layout(location = 3) in vec2 vLocalXZ;   // model-space X/Z — used for radial 
 layout(location = 4) in vec2 vUV;        // texture coords (E8.1) — sampled by E8.3+ textured branch
 
 layout(location = 0) out vec4 outColor;
+// E10.2 — second colour attachment: screen-space velocity in NDC units
+// (RG16F). Placeholder zero for now — real per-object velocity needs
+// prev_model push-const + view/proj history (E10.3). Writing zero keeps
+// the velocity buffer well-defined for the post pass (E10.4 motion blur
+// reads zeros as "static" → no blur, matching pre-E10 behaviour).
+layout(location = 1) out vec2 outVelocity;
 
 // Push constant: model matrix (vert-only) at offset 0, then tint flags,
 // plasmaColor, and time visible here. Keep these layouts in lockstep with
@@ -123,6 +129,10 @@ float hexAlphaMod() {
 }
 
 void main() {
+    // E10.2 — velocity placeholder; written once at the top so the many
+    // early-return branches below all leave outVelocity well-defined.
+    outVelocity = vec2(0.0);
+
     float alpha = vColor.a * plasmaSoftFade() * nebulaAlphaMod() * hexAlphaMod();
 
     // Frame mesh vertices bypass lighting; color is baked into vertex data.

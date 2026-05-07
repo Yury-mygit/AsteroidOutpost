@@ -33,6 +33,18 @@ namespace station {
         VkImageView    offscreenColorView   = VK_NULL_HANDLE;
         VkSampler      offscreenColorSampler= VK_NULL_HANDLE;
 
+        // E10.2 — velocity attachment. Second colour attachment of the scene
+        // pass, R16G16_SFLOAT (signed half-float per channel — enough range
+        // for screen-space NDC deltas which clamp to [-1,+1]). Same usage as
+        // colour (COLOR_ATTACHMENT + SAMPLED) so the post pass can sample it
+        // for motion blur in E10.4. Fragment shaders write vec2 NDC velocity
+        // to location 1; for E10.2 they write zero (real per-object velocity
+        // computation lands in E10.3 with prev_model push-const).
+        VkImage        offscreenVelocityImage   = VK_NULL_HANDLE;
+        VkDeviceMemory offscreenVelocityMemory  = VK_NULL_HANDLE;
+        VkImageView    offscreenVelocityView    = VK_NULL_HANDLE;
+        VkSampler      offscreenVelocitySampler = VK_NULL_HANDLE;
+
         VkCommandPool commandPool = VK_NULL_HANDLE;
         std::vector<VkCommandBuffer> commandBuffers;
 
@@ -50,9 +62,13 @@ namespace station {
         // (UNDEFINED → SHADER_READ_ONLY_OPTIMAL so the post-process pass
         // can sample the result) from the post pass (UNDEFINED →
         // PRESENT_SRC_KHR for swapchain output).
+        // E10.2 — `velocityFormat` adds a second colour attachment for
+        // screen-space velocity. Pass VK_FORMAT_UNDEFINED to skip (single
+        // colour attachment, pre-E10.2 behaviour).
         static bool createRenderPass(
                 VkDevice device,
                 VkFormat colorFormat,
+                VkFormat velocityFormat,
                 VkFormat depthFormat,
                 VkImageLayout finalLayout,
                 VkRenderPass& outRenderPass
@@ -83,6 +99,8 @@ namespace station {
         // E10.1 — offscreen colour target used by the scene pass.
         // COLOR_ATTACHMENT + SAMPLED, B8G8R8A8_UNORM. Single image shared
         // across frames (the inFlightFence ensures no overlap).
+        // E10.2 — same factory for the velocity attachment (R16G16_SFLOAT,
+        // also COLOR_ATTACHMENT + SAMPLED). Format passed in by caller.
         static bool createOffscreenColorResources(
                 VkPhysicalDevice physicalDevice,
                 VkDevice device,
@@ -105,11 +123,15 @@ namespace station {
 
         // E10.1 — scene framebuffer (single, shared across frames) wrapping
         // the offscreen colour view + depth view.
+        // E10.2 — `offscreenVelocityView` adds a second colour attachment
+        // matching the render-pass layout. Pass VK_NULL_HANDLE to skip
+        // (single colour attachment, pre-E10.2 behaviour).
         static bool createSceneFramebuffer(
                 VkDevice device,
                 VkRenderPass sceneRenderPass,
                 VkExtent2D extent,
                 VkImageView offscreenColorView,
+                VkImageView offscreenVelocityView,
                 VkImageView depthImageView,
                 VkFramebuffer& outFramebuffer
         );
