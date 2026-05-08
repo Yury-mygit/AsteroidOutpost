@@ -81,10 +81,17 @@ namespace station {
         // 0 keeps legacy "mesh local +Z = screen-up" behaviour. Useful for
         // non-circular plasma meshes (muzzle cones, streak quads) that
         // need to orient along an arbitrary direction in screen space.
+        // E12 — `lightningSeed` (>0) opts the draw into the lightning-bolt
+        // sub-shader: the fragment paints a procedural electric arc instead
+        // of the heat-ramp flame. Seed value reaches the shader via
+        // `pc.tint.z`; setting `lightningSeed = 0` keeps legacy plasma
+        // flash behaviour and is the default everywhere except the railgun
+        // muzzle stack.
         void drawPlasmaBillboard(uint32_t token, float x, float y, float z,
                                  float scaleH, float scaleV,
                                  float r, float g, float b, float a,
-                                 float rotation = 0.0f);
+                                 float rotation = 0.0f,
+                                 float lightningSeed = 0.0f);
         // E3.1 — `material` selects a fragment-shader branch in the translucent
         // pipeline: 0 = plain (per-vertex alpha only), 1 = nebula (FBM noise
         // modulates alpha), 2 = hex (procedural hex grid modulates alpha).
@@ -195,6 +202,7 @@ namespace station {
             float    scale;            // billboard horizontal half-size (legacy: uniform)
             float    scaleV;           // E5.2 — billboard vertical half-size (plasma only)
             float    rotation;         // E11 — local Y-axis rotation (radians, plasma only)
+            float    lightningSeed;    // E12 — >0 enables lightning-bolt sub-shader (plasma only)
             float    halfExtents[3];
             float    padding;
             float    tint[4];

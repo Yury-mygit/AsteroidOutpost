@@ -144,6 +144,10 @@ data class BillboardDraw(
     // camera-align transform. 0 keeps the legacy round-flash axis alignment;
     // non-zero is used for directional plasma meshes (muzzle cones).
     val rotation: Float = 0f,
+    // E12 — per-bolt seed for the lightning sub-shader. >0 opts into the
+    // electric-arc fragment branch and decorrelates noise between
+    // simultaneous bolts; 0 keeps the legacy plasma flash heat-ramp.
+    val lightningSeed: Float = 0f,
 )
 
 /**
@@ -212,7 +216,7 @@ fun submitScene(
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV,
-                                   p.r, p.g, p.b, p.a, p.rotation)
+                                   p.r, p.g, p.b, p.a, p.rotation, p.lightningSeed)
     }
     for (pb in particleBatches) {
         engine.drawParticles(pb.meshHandle, pb.textureHandle, pb.data, pb.count, pb.mode)

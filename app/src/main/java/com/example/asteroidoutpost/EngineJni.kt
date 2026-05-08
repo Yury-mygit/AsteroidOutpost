@@ -186,14 +186,19 @@ class EngineJni {
      * legacy behaviour (mesh local +Z = screen-up). Use this to orient
      * non-circular plasma meshes (cone fans, streak quads) along an
      * arbitrary screen direction.
+     * E12 — `lightningSeed` (>0) opts the draw into the lightning-bolt
+     * sub-shader (procedural electric arc on a unit X-Z quad). The seed
+     * decorrelates noise fields between simultaneous bolts. Default 0 =
+     * legacy plasma flash (heat-ramp + FBM turbulence).
      */
     fun drawPlasmaBillboard(meshHandle: Long, x: Float, y: Float, z: Float,
                             scaleH: Float, scaleV: Float,
                             r: Float = 1f, g: Float = 1f, b: Float = 1f, a: Float = 1f,
-                            rotation: Float = 0f) {
+                            rotation: Float = 0f,
+                            lightningSeed: Float = 0f) {
         if (engineHandle != 0L && meshHandle != 0L)
             nativeDrawPlasmaBillboard(engineHandle, meshHandle, x, y, z, scaleH, scaleV,
-                                      r, g, b, a, rotation)
+                                      r, g, b, a, rotation, lightningSeed)
     }
 
     /**
@@ -389,7 +394,8 @@ class EngineJni {
         x: Float, y: Float, z: Float,
         scaleH: Float, scaleV: Float,
         r: Float, g: Float, b: Float, a: Float,
-        rotation: Float
+        rotation: Float,
+        lightningSeed: Float
     )
     private external fun nativeDrawTranslucentMesh(
         engineHandle: Long,

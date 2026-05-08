@@ -41,15 +41,18 @@ object WeaponCatalog {
     )
 
     /**
-     * Heavy cannon — slow, hard-hitting, AoE. Roughly 7× the cooldown of the
-     * automatic gun and 3× per-shot damage; AoE deals 60% of weapon damage to
-     * other asteroids within `aoeRadius`. Chunky projectile, slower flight so
-     * the player can read the trajectory before it lands.
+     * Railgun (concept-renamed in E12; enum id stays HEAVY_CANNON for code
+     * stability). Electromagnetic launcher: slow, hard-hitting, AoE. Roughly
+     * 7× the cooldown of the automatic gun and 3× per-shot damage; AoE deals
+     * 60% of weapon damage to other asteroids within `aoeRadius`. Chunky
+     * projectile, slow flight so the player can read the trajectory before
+     * it lands. Visually identified by a bright cyan-white core + electric
+     * arc discharges at the muzzle (E12 spawnRailgunMuzzle).
      */
     val HEAVY_CANNON = Weapon(
         id = WeaponId.HEAVY_CANNON,
-        displayName     = "Тяжёлая пушка",
-        description     = "Редкий мощный выстрел, урон по области. Хороша против групп и крупных астероидов.",
+        displayName     = "Рельсотрон",
+        description     = "Электромагнитный пуск. Редкий мощный выстрел с разрядами тока на стволе, урон по области. Эффективен против групп и крупных астероидов.",
         fireIntervalSec = 1.0f,
         damageMultiplier = 3.0f,
         projectileSpeed = 18f,

@@ -24,7 +24,7 @@ object Missions {
             description = "Прицеливайтесь касанием и удерживайте палец, чтобы стрелять. Обычные цели, низкая скорость.",
             difficulty  = "Лёгкая",
             waves       = List(2) {
-                WaveConfig(asteroidCount = 5, spawnIntervalSec = 3.0f)
+                WaveConfig(asteroidCount = 7, spawnIntervalSec = 2.6f)
             },
             asteroidHp    = 50,
             asteroidSpeed = 0.8f,
@@ -42,21 +42,21 @@ object Missions {
             difficulty  = "Лёгкая",
             waves       = listOf(
                 WaveConfig(
-                    asteroidCount = 6, spawnIntervalSec = 2.5f,
+                    asteroidCount = 10, spawnIntervalSec = 2.0f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL to 0.7f,
                         AsteroidType.FAST   to 0.3f,
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 7, spawnIntervalSec = 2.2f,
+                    asteroidCount = 12, spawnIntervalSec = 1.8f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL to 0.5f,
                         AsteroidType.FAST   to 0.5f,
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 8, spawnIntervalSec = 2.0f,
+                    asteroidCount = 14, spawnIntervalSec = 1.6f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL to 0.3f,
                         AsteroidType.FAST   to 0.7f,
@@ -80,21 +80,21 @@ object Missions {
             difficulty  = "Средняя",
             waves       = listOf(
                 WaveConfig(
-                    asteroidCount = 7, spawnIntervalSec = 2.0f,
+                    asteroidCount = 12, spawnIntervalSec = 1.8f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL to 0.7f,
                         AsteroidType.HEAVY  to 0.3f,
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 8, spawnIntervalSec = 2.0f,
+                    asteroidCount = 14, spawnIntervalSec = 1.7f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL to 0.5f,
                         AsteroidType.HEAVY  to 0.5f,
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 9, spawnIntervalSec = 1.8f,
+                    asteroidCount = 16, spawnIntervalSec = 1.5f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL to 0.3f,
                         AsteroidType.HEAVY  to 0.6f,
@@ -119,7 +119,7 @@ object Missions {
             difficulty  = "Средняя",
             waves       = listOf(
                 WaveConfig(
-                    asteroidCount = 8, spawnIntervalSec = 1.6f,
+                    asteroidCount = 14, spawnIntervalSec = 1.4f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.6f,
                         AsteroidType.EXPLOSIVE to 0.3f,
@@ -127,7 +127,7 @@ object Missions {
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 9, spawnIntervalSec = 1.5f,
+                    asteroidCount = 16, spawnIntervalSec = 1.3f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.5f,
                         AsteroidType.EXPLOSIVE to 0.4f,
@@ -135,7 +135,7 @@ object Missions {
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 10, spawnIntervalSec = 1.4f,
+                    asteroidCount = 18, spawnIntervalSec = 1.2f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.35f,
                         AsteroidType.EXPLOSIVE to 0.5f,
@@ -161,7 +161,7 @@ object Missions {
             difficulty  = "Высокая",
             waves       = listOf(
                 WaveConfig(
-                    asteroidCount = 10, spawnIntervalSec = 1.5f,
+                    asteroidCount = 18, spawnIntervalSec = 1.3f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.4f,
                         AsteroidType.FAST      to 0.25f,
@@ -171,7 +171,7 @@ object Missions {
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 10, spawnIntervalSec = 1.4f,
+                    asteroidCount = 20, spawnIntervalSec = 1.2f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.3f,
                         AsteroidType.FAST      to 0.2f,
@@ -181,7 +181,7 @@ object Missions {
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 11, spawnIntervalSec = 1.3f,
+                    asteroidCount = 22, spawnIntervalSec = 1.1f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.2f,
                         AsteroidType.FAST      to 0.2f,
@@ -191,7 +191,7 @@ object Missions {
                     ),
                 ),
                 WaveConfig(
-                    asteroidCount = 12, spawnIntervalSec = 1.2f,
+                    asteroidCount = 24, spawnIntervalSec = 1.0f,
                     typeWeights = mapOf(
                         AsteroidType.NORMAL    to 0.15f,
                         AsteroidType.FAST      to 0.25f,

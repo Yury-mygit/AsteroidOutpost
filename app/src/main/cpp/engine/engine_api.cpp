@@ -322,10 +322,11 @@ extern "C" void station_engine_draw_plasma_billboard(StationEngine* e,
                                                      float x, float y, float z,
                                                      float scaleH, float scaleV,
                                                      float r, float g, float b, float a,
-                                                     float rotation) {
+                                                     float rotation,
+                                                     float lightningSeed) {
     if (!e || !mesh) return;
     e->vulkan.drawPlasmaBillboard(mesh->token, x, y, z, scaleH, scaleV,
-                                  r, g, b, a, rotation);
+                                  r, g, b, a, rotation, lightningSeed);
 }
 
 extern "C" void station_engine_draw_textured_mesh(StationEngine* e,

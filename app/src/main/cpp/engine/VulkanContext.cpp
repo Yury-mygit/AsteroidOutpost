@@ -1579,7 +1579,8 @@ namespace station {
     void VulkanContext::drawPlasmaBillboard(uint32_t token, float x, float y, float z,
                                             float scaleH, float scaleV,
                                             float r, float g, float b, float a,
-                                            float rotation) {
+                                            float rotation,
+                                            float lightningSeed) {
         if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
         DrawCommand cmd{};
         cmd.token     = token;
@@ -1588,6 +1589,7 @@ namespace station {
         cmd.scale     = scaleH;
         cmd.scaleV    = scaleV;
         cmd.rotation  = rotation;
+        cmd.lightningSeed = lightningSeed;
         cmd.plasmaColor[0] = r;
         cmd.plasmaColor[1] = g;
         cmd.plasmaColor[2] = b;
@@ -2401,6 +2403,12 @@ namespace station {
                 // Fragment shader maps length(vLocalXZ) → alpha so the visible
                 // glow inscribes the quad and corners go transparent.
                 pc.tint[0] = 1.0f;
+                // E12 — lightning-bolt sub-mode flag (.y) + per-bolt seed (.z).
+                // Slot reuse: nebulaAlphaMod / hexAlphaMod gate on tint.x<0.5
+                // so they ignore these in the plasma path. Default 0 here =
+                // legacy plasma flash (heat-ramp + FBM turbulence).
+                pc.tint[1] = (draw.lightningSeed > 0.0f) ? 1.0f : 0.0f;
+                pc.tint[2] = draw.lightningSeed;
                 // E5.1 — per-billboard colour tint, multiplied into the heat-ramp
                 // result inside the plasma fragment branch. Default white at the
                 // Kotlin layer preserves the E4 look; non-white tints recolour

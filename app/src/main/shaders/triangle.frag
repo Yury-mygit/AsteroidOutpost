@@ -80,7 +80,12 @@ float fbm4(vec2 p) {
     return v;
 }
 float nebulaAlphaMod() {
-    if (pc.tint.y < 0.5) return 1.0;
+    // E12 — `pc.tint.y` is reused as the lightning sub-mode flag in the
+    // plasma branch (pc.tint.x >= 0.5). Gate on `pc.tint.x < 0.5` so this
+    // function only treats `tint.y` as the NEBULA flag in the translucent
+    // path, where `tint.x` is always 0. Translucent and plasma never
+    // share a draw call so the overload is safe.
+    if (pc.tint.y < 0.5 || pc.tint.x >= 0.5) return 1.0;
     // E6 — slow drift over time so nebulae feel alive instead of frozen.
     // Drift speed kept low (~0.04 sample units/sec) so the motion reads as
     // ambient gas circulation, not visibly flowing.
@@ -118,7 +123,11 @@ float hexEdgeDist(vec2 p) {
     return 0.866025 - max(p.x * 0.866025 + p.y * 0.5, p.y);
 }
 float hexAlphaMod() {
-    if (pc.tint.z < 0.5) return 1.0;
+    // E12 — `pc.tint.z` is reused as the per-bolt lightning seed (a positive
+    // float that often exceeds 0.5) in the plasma branch. Gate on
+    // `pc.tint.x < 0.5` so this function only treats `tint.z` as the HEX
+    // flag in the translucent path. See nebulaAlphaMod() comment.
+    if (pc.tint.z < 0.5 || pc.tint.x >= 0.5) return 1.0;
     // ~6 hex cells across the dome's local diameter (vLocalXZ ranges ±1).
     // Slightly fewer + bigger cells than v1 so each hex reads cleaner.
     vec4 hex = hexTile(vLocalXZ * 6.0);
@@ -175,6 +184,52 @@ void main() {
     // spark, orange-red AoE), and `pc.plasmaColor.a` is an overall brightness
     // scalar. Default (1,1,1,1) at the Kotlin layer leaves E4 unchanged.
     if (pc.tint.x >= 0.5) {
+        // E12 — railgun lightning bolt sub-mode. `pc.tint.y` is the flag
+        // (set by drawPlasmaBillboard when lightningSeed > 0), `pc.tint.z`
+        // is the per-bolt seed. Drawn on a unit X-Z quad oriented in screen
+        // space via the E11 rotation parameter — vLocalXZ.x is perpendicular
+        // to the bolt direction, vLocalXZ.y runs along it. The shader paints
+        // a thin Gaussian-core arc that wiggles via FBM-displaced centerline,
+        // animated with pc.time so the discharge feels alive within its
+        // ~0.1s lifetime; per-bolt seed offsets the noise field so multiple
+        // bolts in one trefoil look distinct instead of identical.
+        if (pc.tint.y >= 0.5) {
+            float seed = pc.tint.z;
+            float t = vLocalXZ.y;     // along bolt direction
+            float u = vLocalXZ.x;     // perpendicular to bolt
+            // Two-octave FBM perpendicular displacement of the centerline.
+            // Coefficients pick a coarse sweep + finer kinks that read as
+            // a true zigzag arc; scaling pc.time by 9 makes the wiggle
+            // visibly evolve within a 0.1-0.2s flash without flickering.
+            vec2 wp = vec2(t * 3.0 + seed * 17.31, pc.time * 9.0 + seed * 4.13);
+            float c1 = fbm4(wp) - 0.5;
+            float c2 = fbm4(wp * 3.7 + vec2(12.3, 7.1)) - 0.5;
+            float displaceX = c1 * 0.55 + c2 * 0.18;     // ≈ ±0.5 perpendicular
+            float dist = abs(u - displaceX);
+            // Sharp Gaussian core (white-hot) + softer cyan halo. The core
+            // sharpness 60 → core half-width ~0.13 (= ~1/sqrt(60)), giving a
+            // thin readable bolt on a unit quad. Halo coefficient 6 makes
+            // the surrounding cyan glow ~0.17 wide before falling to 1/e.
+            float core = exp(-dist * dist * 60.0);
+            float halo = exp(-abs(dist) * 6.0) * 0.35;
+            // Brightness modulation along bolt — patches of brighter / dimmer
+            // simulate uneven plasma channel intensity. Keeps the bolt from
+            // reading as a perfectly uniform stripe.
+            float bright = 0.6 + 0.5 * fbm4(vec2(t * 6.0 + seed * 3.7, pc.time * 4.5));
+            // End fade so the rectangular quad's ±t edges go dark and we
+            // don't see hard cut-off lines at |t|=1.
+            float endFade = 1.0 - smoothstep(0.80, 1.0, abs(t));
+            // Hot white core blends with cyan halo via the core mask.
+            vec3 col = mix(vec3(0.55, 0.85, 1.0), vec3(1.0), core);
+            float intensity = (core + halo) * bright * endFade * pc.plasmaColor.a;
+            // Premultiplied for ONE/ONE blend (matches the regular plasma
+            // flash branch below). `pc.plasmaColor.rgb` is the per-bolt
+            // tint multiplier — Kotlin can use it to recolour individual
+            // bolts (e.g. tinge cooler/warmer per railgun upgrade tier).
+            outColor    = vec4(col * pc.plasmaColor.rgb * intensity, intensity);
+            outVelocity = vec2(0.0);
+            return;
+        }
         vec3 hot  = vec3(1.0, 0.95, 0.70);   // warm white-yellow core
         vec3 cool = vec3(1.0, 0.40, 0.08);   // orange flame edge
         float r = length(vLocalXZ);

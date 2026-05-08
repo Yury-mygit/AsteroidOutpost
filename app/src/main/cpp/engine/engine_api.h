@@ -140,6 +140,11 @@ void station_engine_draw_billboard_mesh(StationEngine* engine,
 // non-circular plasma meshes (cone fans, streak quads) along an arbitrary
 // world direction without authoring per-angle meshes. 0 keeps the legacy
 // behaviour (mesh's local +Z maps to screen-up).
+// E12 — `lightningSeed` (>0) opts into the lightning-bolt sub-shader —
+// the fragment paints a procedural electric arc instead of the heat-ramp
+// flame. Seed value is passed through to the shader as `pc.tint.z` to
+// decorrelate noise fields between simultaneous bolts. 0 = legacy plasma
+// flash (heat-ramp + FBM turbulence).
 void station_engine_draw_plasma_billboard(StationEngine* engine,
                                           StationMesh*   mesh,
                                           float          x,
@@ -151,7 +156,8 @@ void station_engine_draw_plasma_billboard(StationEngine* engine,
                                           float          g,
                                           float          b,
                                           float          a,
-                                          float          rotation);
+                                          float          rotation,
+                                          float          lightningSeed);
 
 // E8.3 — textured opaque mesh draw. Mesh must have authored UVs; texture
 // must come from station_engine_load_texture. (r,g,b,a) is a per-draw
