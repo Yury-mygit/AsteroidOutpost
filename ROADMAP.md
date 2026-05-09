@@ -1,7 +1,7 @@
 # Asteroid Outpost — Концепция и состояние
 
 > Живой документ. Обновляй после каждой значимой сессии.
-> Последнее обновление: **2026-05-08** (M8 + M9 геймплейный pivot. Центральная турель больше не управляется вручную — auto-aim с sticky lock на самую "толстую" цель + tap-to-priority. HP-bars над повреждёнными астероидами. Энергия как ресурс под способности (100 max, +10/sec). Две способности: Ракетный залп (3 homing missiles, 30 энергии, cd 8с) + Лазерный удар (drag-line, 5 lightning bolts, 50 энергии, cd 18с). Ability framework — `game/Ability.kt` + `AbilityCatalog`, runtime в `AbilitySlot`. UI: ability bar рядом с щитом. Threading — все mutate-list ability activations marshalled на mission thread через `missionHandler.post`. Mission counts ×1.5–2 + интервалы спавна тактнее. M9 — щит переработан: убран ShieldState (READY/ACTIVE/COOLING), теперь permanent HP-based barrier (max 500). Урон астероидов идёт сначала в щит, overflow на платформу. Кнопка ЩИТ — hold-to-recharge: 50 энергии/сек → 200 HP/сек (4× ratio). Гео — `buildShieldArchMesh` строит wide flat ellipse arch с вершинами в мировых координатах (constant-thickness band, никакой anisotropy от scaleX≠scaleZ). Раньше: E12 railgun muzzle lightning + concept rename Тяжёлая пушка→Рельсотрон. E11 — drawPlasmaBillboard(rotation) + cone-trefoil muzzle blast + side turrets cannon-style. E10.4 motion blur post.frag.)
+> Последнее обновление: **2026-05-09** (большой день. M10 UI/щит-полировка: иконки на ability-buttons (V-щит, ракета, лазер-режет-астероид), щит-кнопка с green/gray HP-fill вертикальной полосой, action-bar 32dp icon-only, форма щита-арки = superellipse n=4 (плоский верх, резкие плечи) с подъёмом 5%, новая иконка приложения (заменяет g3-зелёную). M11 процедурные платформенные меши: турели расщеплены на статичную базу + вращающуюся башню (`buildTurretBaseMesh` + `buildTurretBarrelMesh`), лазерный купол (ground-telescope-style) и ракетная шахта (open-hatch with launch tube) рядом с центральной турелью. M12 непрерывный лазер (5 сек, 50 dps, blocks-on-first-asteroid) заменяет старый drag-line strike; полностью выпилен legacy strike + armed-target framework. **E13** plasma billboard матрица rotation+non-uniform-scale fix — добавлен `Mat4::scale`, переписана композиция в `VulkanContext::renderFrame` plasma-секции на `billboard_uniform × Ry(rot) × S(scaleH,1,scaleV)`. **E14** dedicated `drawLaserBeam` API — новый Vulkan pipeline `m_beamPipeline` с собственным layout, `beam.vert/.frag` GLSL шейдеры, GPU-side view-aligned quad expansion, sharp endpoints, gentle pulse. Через C/JNI/Kotlin → `BeamDraw` data class + `EngineView.beams`. M13 WeaponEffect umbrella — refactor `bullets: List<Bullet>` → `effects: List<WeaponEffect>`, единый `tick(dt) → consumed`-loop. Конкретные классы: `Projectile` (с `behaviour: ProjectileBehavior` strategy), `Beam` (с closure source/aim для g3-портабельности). M14 ракетный overhaul: процедурный меш (`buildRocketMesh`: engine bell + body + 2 fins + nose + warning stripe), spring-launch sequence (queue в RocketSilo, ASCENDING фаза straight-up, ASCENT_HEIGHT=2×length, FLYING фаза = boost+steer), 3-фазный VFX (no-engine во время spring → яркий ignition flash на переходе → реактивный jet + smoke trail в FLYING). M15 per-weapon firing arcs (90/80/80/70/95/95) + priority-lock semantics (master target для центра+лазера, re-tap toggles release, центр клампит вращение в свою дугу но всё равно ведёт цель, лазер фолловит того же таргета через canEngage closure в Beam). Также: астероиды разбиваются о щит-арку через superellipse Z(x), не долетая до базы; -20% урона по щиту во время recharge + cyan tangential искры по дуге. M9 ↑ выше: M8 + M9 геймплейный pivot. Центральная турель больше не управляется вручную — auto-aim с sticky lock на самую "толстую" цель + tap-to-priority. HP-bars над повреждёнными астероидами. Энергия как ресурс под способности (100 max, +10/sec). Две способности: Ракетный залп (3 homing missiles, 30 энергии, cd 8с) + Лазерный удар (drag-line, 5 lightning bolts, 50 энергии, cd 18с). Ability framework — `game/Ability.kt` + `AbilityCatalog`, runtime в `AbilitySlot`. UI: ability bar рядом с щитом. Threading — все mutate-list ability activations marshalled на mission thread через `missionHandler.post`. Mission counts ×1.5–2 + интервалы спавна тактнее. M9 — щит переработан: убран ShieldState (READY/ACTIVE/COOLING), теперь permanent HP-based barrier (max 500). Урон астероидов идёт сначала в щит, overflow на платформу. Кнопка ЩИТ — hold-to-recharge: 50 энергии/сек → 200 HP/сек (4× ratio). Гео — `buildShieldArchMesh` строит wide flat ellipse arch с вершинами в мировых координатах (constant-thickness band, никакой anisotropy от scaleX≠scaleZ). Раньше: E12 railgun muzzle lightning + concept rename Тяжёлая пушка→Рельсотрон. E11 — drawPlasmaBillboard(rotation) + cone-trefoil muzzle blast + side turrets cannon-style. E10.4 motion blur post.frag.)
 
 ## Концепция
 
@@ -923,6 +923,135 @@ E1 закрыл базовую прозрачность и процедурны�
 - 🟡 **HP-modulated alpha/color на щите** — engine work. Нужен либо tint-forward в translucent path, либо runtime-rebuild mesh при смене HP threshold (ugly).
 - 🟡 **Shield impact ripple/pulse** — на момент попадания было бы здорово видеть ripple. Нужен impact event-канал (когда астероид бьёт щит → передать coordinate в шейдер). E6 time push-constant + ещё один push-const slot → ripple в шейдере.
 - 🟡 **Энергию upgrade за металл** — связана с M8 ability balance. Отложена.
+
+### M10 — UI / щит-полировка (завершено 2026-05-09)
+
+Послойный подгон action-бара и купола под концепт «играю-управляю-базой».
+
+Сделано:
+- ✅ **Иконки на ability-кнопках** — replaced labels (ЩИТ/РАКЕТЫ/ЛАЗЕР) на инфографику. Новый `IconDrawable` (Path-based, runtime-tintable). Три фабрики: `makeShieldIcon` (V-shaped heater shield: плоский верх, выпуклые плечи, острый V-кончик + chief line), `makeRocketIcon` (вертикальная пуля + два плавника + выхлоп), `makeLaserIcon` (диагональный луч режет нерегулярный астероид-полигон). Кеширование per-button — retint на state-change через `setIconTint`, без аллокаций.
+- ✅ **Щит-кнопка как HP-полоса** — убрали число, фон вертикально делится: снизу зелёный (остаток HP), сверху серый (потрачено). Граница опускается по мере падения HP, поднимается при подзарядке. `ShieldFillDrawable` — кастомный Drawable с rounded-rect клипом и двумя rect-fill.
+- ✅ **Action-bar 32dp** — высота снижена с 52dp до 32dp. Способности двухрежимные: icon-mode (`textSize=0`) когда READY/INSUFFICIENT/ARMED, text-mode (`SP_CAPTION` + `setCompoundDrawables(null)`) только при COOLING. ARMED-state отказались от caption "!" в пользу зелёного фона + светлой иконки.
+- ✅ **Шит-арка superellipse n=4** — `|x/a|^n + |z/b|^n = 1` вместо обычного полу-эллипса. Плоский верх и резкие плечи, читается как force-field band. `SHIELD_ARCH_SHARPNESS = 4f`. Параметризован градиент-нормаль для constant-thickness ring. Подъём `SHIELD_ARCH_LIFT_FRAC = 0.05` — концы зависают над платформой.
+- ✅ **Иконка приложения** — заменена с зелёной g3-шной на «тёмно-синий космос + астероид + cyan луч». Скопированы PNG из `art/icon/android/mipmap-*` в `res/mipmap-*` (5 плотностей × 4 файла = 20 PNG), удалены старые `.webp`. `mipmap-anydpi/ic_launcher.xml` обновлён на `@mipmap/ic_launcher_foreground/background` (новые density-PNG) вместо `@drawable/ic_launcher_*` (старые vector).
+- ✅ **Астероиды разбиваются о щит-арку** — раньше астероид долетал до платформы (визуально проходя сквозь дугу), и щит абсорбировал урон. Теперь collision-check проверяет дугу первой: для X внутри `±SHIELD_ARCH_HALF_W` считается `archZ(x) = baseZ + halfH × (1 − |x/halfW|^n)^(1/n)`. Если астероидBottom опускается до `archZ` — астероид удаляется, флэш в точке контакта на дуге, урон роутится в щит как раньше (full absorb / partial+overflow). На флангах за пределами `halfW` — старая логика прохода до платформы.
+- ✅ **Recharge-режим даёт −20% урона по щиту** + **cyan-искры бегут по дуге**. `SHIELD_RECHARGE_DAMAGE_MUL = 0.80f` — пока кнопка нажата, входящий dmgF умножается. `emitShieldRechargeSparks(dt)` — fractional accumulator на `RATE × dt`, каждая искра спавнится в случайной точке superellipse (параметрический u ∈ [-1,+1]) с **тангенциальной** скоростью (gradient-derived, rotated 90°), randomized direction (вправо/влево по дуге), drag=4 (быстро тормозят), life 0.10-0.22s, cyan tint `(0.55, 0.85, 1.00)`. ~14 одновременных искр при RATE=90/сек.
+
+### M11 — Процедурные платформенные меши (завершено 2026-05-09)
+
+Заменили flat-quad визуалы турелей и абилки-источников на процедурные сборки через `TurretMeshBuilder`.
+
+Сделано:
+- ✅ **`TurretMeshBuilder`** — общий builder с `addRect`, `addChamferedRect` (8-vertex octagonal silhouette + center, triangle fan), `addTri` (для плавников/нос-конусов ракет), `addHalfDisk` (для лазерного купола). Вершины с `pos3 + rgba4 + normal3 = (0,1,0)`. Опциональный `y` per-call для слойных деталей (LESS depth-test trick — `-0.005f` для overlay-слоёв).
+- ✅ **Расщепление турелей** — каждая турель стала **базой (статичная) + башней (вращается вокруг своего origin)**. `buildTurretBaseMesh`: chamfered slab + 2 vent slits + accent stripe. `buildTurretBarrelMesh`: pivot collar + chamfered housing с акцентным цветом + 2 dark slits + mantlet + barrel + cooling fin + muzzle ring + dark bore. Параметры: housing/barrel/muzzle half-W и length, accent RGB (red для центральной, blue для боковых). `centralBaseMesh + centralBarrelMesh + sideBaseMesh + sideBarrelMesh` хранятся как 4 хэндла. Pivot Z двигается на `BASE_HEIGHT` вверх (CENTRAL_TURRET_BASE_Z с -0.94 на -0.90), формула muzzleZ = `BASE_Z + 2*HALF_H` сохранена потому что общая длина башни = `housingLen + barrelLen + muzzleLen = 2*HALF_H` by construction. Боковые турели тоже стали поворотными — `sideTurretAngles[2]` ранится экспоненциальным lerp каждый тик к `nearestAsteroidInArc(...)`. Боковые muzzleZ переехал с фиксированной точки на `(tx + nx*SIDE_TOTAL_LEN, tz + nz*SIDE_TOTAL_LEN)` — дуло в реальном кончике повёрнутого ствола.
+- ✅ **Лазерная установка** — наземно-телескопический dome: фасочная плита-фундамент + half-disk купол (24-сегментная триангуляция фаном) + cyan-полоса на стыке. Раньше включала торчащий лазерный ствол + linear opening, после фидбэка пользователя «увеличь на 60% и убери телескоп» — остались только база и купол, размеры × 1.6.
+- ✅ **Ракетная шахта** — open-hatch установка зеркально с лазером. Слои: chamfered foundation + mid-tower + slightly-wider top rim (создающий «горловину») + 2 vertical warning stripes (orange) на боку tower'а + dark deep-cut launch opening. Позиция X = -0.9 (зеркало лазерного купола на X=+0.9).
+- ✅ **`addHalfDisk`** добавлен в TurretMeshBuilder — расширяемый builder поддерживает теперь все нужные примитивы для процедурных VFX-объектов будущего.
+
+### M12 — Непрерывный лазер + чистка legacy (завершено 2026-05-09)
+
+Старый «drag-line strike» (M8.6) был заглушкой под идею способности; пользователь захотел нормальный непрерывный лучевой режим.
+
+Сделано:
+- ✅ **Лазер: 5 сек continuous beam, 50 DPS** — `LASER_BEAM_DURATION_SEC = 5f`, `LASER_BEAM_DPS = 50f`. `Beam` weapon-effect (см. M13) ray-cast-ит каждый тик от dome к мастер-таргету, ищет первый астероид на луче (no piercing — толстый астероид в пути блокирует луч), наносит fractional DPS с `dmgAccum: Float` для int-HP астероидов. Цель умерла → auto-pick подхватывает следующего, луч следует.
+- ✅ **`Ability.LASER_STRIKE.needsTarget = false`** — кнопка теперь instant-fire, без drag. Описание обновлено.
+- ✅ **Lazer pipeline через E14** — впервые задействован новый `drawLaserBeam` engine API (см. ниже E14). Раньше луч использовал плазма-биллборды с lightning-shader hack-ом; теперь — собственный pipeline.
+- ✅ **Выпилен legacy code:** `fireLaserStrike()` функция, `handleArmedAbilityTouch()`, `armedAbilityId` поле + все ссылки, `laserGestureActive/laserStartX/Z`, `Ability.needsTarget` свойство (фреймворк armed-target больше нигде не используется), legacy `LASER_DAMAGE/LASER_HIT_PAD/LASER_BOLT_*` константы, ARMED-ветка в `refreshAbilityButton`, `if (armedAbilityId != null)` ветка в touch-listener, `if (a.needsTarget)` ветка в `onAbilityTapped`.
+
+### E13 — Plasma billboard rotation + non-uniform scale fix (завершено 2026-05-09)
+
+Триггер: пользователь сказал «лазер бьёт только вертикально, не следует за rotation». Расследование показало старый известный баг (комментарий в самом VulkanContext.cpp признавал его): rotation композирована как `billboard_with_scale × Ry(rot)` где scale baked в camera-aligned axes. С uniform scale OK, с non-uniform (тонкая в perp, длинная вдоль) — длинная и тонкая оси меняются местами в screen при поворотах ≠ 0/π.
+
+Сделано:
+- ✅ **`Mat4::scale(Vec3)`** factory добавлена в `cpp/engine/math/Mat4.h`.
+- ✅ **Композиция в `VulkanContext::renderFrame` plasma-секции** переписана:
+  ```
+  було: billboard(scaleH, scaleV) × Ry(rot)
+  стало: billboard(1,1) × Ry(rot) × Scale(scaleH, 1, scaleV)
+  ```
+  Вертекс сначала растягивается non-uniform в model space, потом крутится в model X-Z, потом billboard камера-выравнивает с uniform scale=1. Стрик-форма правильно следует за rotation.
+- ✅ **Backward-compat математически проверен:**
+  - Uniform scale, rot=0 (round flashes) → `billboard(1,1)*S(s,1,s) = billboard(s,s)` идентично.
+  - Uniform scale, rot≠0 (E11 muzzle cones) → идентично старому.
+  - Non-uniform + rotation (наш лазер, E12 railgun bolts, legacy drag-laser) — раньше шерсило, теперь честно крутится.
+
+### E14 — Dedicated beam API (завершено 2026-05-09)
+
+Триггер: после E13 пользователь решил, что плазма-биллборды + lightning-sub-shader — не идеальный путь для непрерывного лазера, и попросил "отдельный API под лучевые эффекты", потому что движок будет переиспользоваться (g3 strategy game с многими кораблями-лазерами одновременно).
+
+Сделано:
+- ✅ **Новые шейдеры** `app/src/main/shaders/beam.vert` + `beam.frag`. Vert разворачивает 6-вершинный quad из `gl_VertexIndex` (без vertex buffer), считает view-aligned perpendicular как `cross(beamDir, viewForward)` где `viewForward = -ubo.view[*][2]` — работает для произвольной камеры (g3-критично). Frag красит Gaussian core perpendicular (`exp(-v²·24)`) + soft halo + smoothstep end-fade на последних 2% длины + лёгкий пульс по `pc.time`. Premultiplied alpha для ONE/ONE additive.
+- ✅ **`m_beamPipeline`** — новый Vulkan pipeline в VulkanContext. Свой минимальный layout (set 0 = scene UBO, push constants для beam params, 64 bytes std140 — start/end vec3 + color vec4 + width + time). Empty vertex input, TRIANGLE_LIST topology, additive ONE/ONE blend, depth-test on read-only, velocity attachment writeMask=0.
+- ✅ **Public API** через всю вертикаль:
+  - C: `station_engine_draw_laser_beam(start, end, width, rgba)` в `engine_api.h/cpp`
+  - JNI: `nativeDrawLaserBeam` в `cpp/android/EngineJni.cpp`
+  - Kotlin: `EngineJni.drawLaserBeam(startXYZ, endXYZ, width, rgba)`
+  - Scene: `BeamDraw` data class + `submitScene(beams: List<BeamDraw>)` маршрутизирует
+  - EngineView: `@Volatile var beams: List<BeamDraw>`
+  - StationEngine struct: `beamVertSpv/beamFragSpv`, `set_shader("beam.vert"/"beam.frag")`
+- ✅ **Render-pass integration** — между additive mesh (3D fireballs) и plasma billboards в scene render pass. Один вызов `vkCmdDraw(6, 1, 0, 0)` per beam с push constants.
+
+### M13 — WeaponEffect umbrella architecture (завершено 2026-05-09)
+
+Триггер: пользователь спросил «как реализована логика снаряда» — ответ был «жирная Bullet data class + ветки в тике». Согласовали поэтапный refactor; stage 1 — единая umbrella для projectile + beam, stage 2 (slot/installation система) отложен на «дизайн базы».
+
+Сделано:
+- ✅ **`WeaponEffect` interface** — единый абстракт с `tick(dt: Float): Boolean (consumed)`. Заменяет старые `bullets: MutableList<Bullet>` + плоские `laserBeam*` поля единым `effects: MutableList<WeaponEffect>`.
+- ✅ **`Projectile` class** (бывший `Bullet`, переименован) — implements WeaponEffect, инкапсулирует прежнюю tick-логику (snapshot prev → behavior.tick → move → off-screen cull → AABB collision → behavior.onImpact). Несёт `behaviour: ProjectileBehavior` strategy для steering/impact variation. Дополнительные поля `modelScale: Float` и `modelYawOffset: Float` (defaults under legacy .glb-bullet'ам, процедурная ракета передаёт `1f / 0f` под её +Z-forward, world-unit меш).
+- ✅ **`Beam` class** — implements WeaponEffect для непрерывных лучей. Source как **`() -> Vec3` closure** (для g3-портабельности с движущимися кораблями), aim selector как **`() -> Asteroid?` closure** (re-evaluated каждый тик), optional `canEngage: (Asteroid) -> Boolean` для arc-gating (см. M15). Tick: ray-cast от source к aim, find first asteroid intersecting line, fractional DPS damage, endpoint stash для buildScene.
+- ✅ **`Vec3`** small data class private inside MainActivity (3D вектор для closure-источников; Y=0 в Outpost, не-ноль в g3).
+- ✅ **Tick-loop simplification** — был 70+ строк ветвлений (homing? aoe? hit flash?), стал 3 строки:
+  ```kotlin
+  effects.iterator().forEach { if (it.tick(dt)) it.remove() }
+  ```
+- ✅ **buildScene query** — `effects.filterIsInstance<Projectile>()` для SceneObjects, `effects.filterIsInstance<Beam>()` для BeamDraw'ов.
+- ✅ **`updateLaserBeam(dt)`** функция выпилена — её логика инкапсулирована в `Beam.tick()`.
+- ✅ **`launchRocketStrike` → `RocketSilo.fire()`** (см. M14) — спавны привязаны к weapon-классу.
+
+### M14 — Ракетный overhaul (завершено 2026-05-09)
+
+Включает: type-bound RocketSilo class, процедурный rocket mesh, 3-фазный VFX (boost+trail с ASCENDING/FLYING-разделением + ignition flash + reactive jet), spring-launch sequence с очередью.
+
+Сделано:
+- ✅ **`RocketSilo` weapon class** (`private inner class`) — `fire(targets: List<Asteroid>)` хардкодит Projectile + HomingRocketBehavior конструкцию. Через эту точку входа НЕВОЗМОЖНО структурно произвести non-rocket Projectile. Поле `rocketSilo` инициализируется константами `ROCKET_SILO_X / ROCKET_SILO_MUZZLE_OFFSET`.
+- ✅ **Процедурный меш ракеты** `buildRocketMesh()` — origin at centre, axis along +Z, total length 0.30 (ROCKET_BODY_LENGTH). Слои: engine bell (фасочный, тёмный) + body rect (грей) + 2 fin triangles (mid-grey, через `addTri`) + nose triangle + warning stripe orange (y-сдвиг `-0.003`). `rocketMeshHandle` строится в `buildTurretMeshes()`. Per-projectile `modelScale = 1f` и `modelYawOffset = 0f` (vs legacy bullet'ы с `halfH × MUL` и `-π/2`).
+- ✅ **Spring-launch sequence + очередь** — `RocketSilo.fire()` теперь **не спавнит сразу**, а queues target IDs в `pending: ArrayDeque<Long>`. Каждый тик вызывается `rocketSilo.tick()`: если в `effects` нет ракеты в фазе `RocketPhase.ASCENDING` (tube свободен) — pop первого target ID и spawn. Спавнится **строго вверх** (vx=0, vz=ASCENT_SPEED), центром в `siloZ + LENGTH/2` чтобы база сидела на горловине. Spring-puff (warm cone) с направлением `(0,1)`.
+- ✅ **`HomingRocketBehavior` 2-фазная state-machine** — `RocketPhase { ASCENDING, FLYING }` enum (private file-level, потому что Kotlin запрещает enum внутри inner class). ASCENDING: constant straight-up rise at ASCENT_SPEED, **двигатель ВЫКЛ — нет ни smoke trail ни jet** (rocket inert, рулит инерция пружины). При `p.z - launchZ >= ASCENT_HEIGHT` (= 2 × LENGTH = 0.60) → переход в FLYING. FLYING: boost-accel вдоль heading до `cruiseSpeed` + steer toward `targetId` clamped по `turnRate`. Smoke trail и engine jet эмитятся только в FLYING.
+- ✅ **Ignition flash** — one-shot bright burst spawned at `ASCENDING → FLYING` transition. `spawnRocketIgnition(p.x, p.z)`: `halfMax = 0.18` (крупнее обычного hit-flash), `life = 0.20s` (быстрый fade), `tint = FLASH_TINT_MUZZLE × alpha 1.4` — ярче muzzle-blast'а.
+- ✅ **Reactive jet** — `spawnRocketJet(x, z, vx, vz)` каждые 0.02 сек (50 Hz) во FLYING. Position = центр ракеты сдвинут назад на `LENGTH × 0.45` вдоль обратной velocity. HalfMax 0.055, life 0.07s. Per-instance `jetTimer` jitter — салво не пульсирует в lock-step. Получается «язык пламени» из 3-4 одновременных перекрывающихся вспышек.
+- ✅ **Smoke trail** — `spawnRocketTrail(x, z, vx, vz)` каждые 0.025 сек во FLYING. Использует существующий E9 alpha-textured smoke pool. Backward drift, life 0.5-0.9s, cooler grey-blue tint (vs warmer asteroid-death smoke).
+- ✅ **`steerProjectileTowards(p, target, turnRate, dt)`** — выделен из старого `homeBulletTowardsTarget` как pure helper, используется HomingRocketBehavior.
+
+### M15 — Per-weapon firing arcs + priority-lock semantics (завершено 2026-05-09)
+
+Pull-request-style полировка: каждое оружие имеет свою боевую дугу (90/80/80/70/95/95% от 180°), priority-lock на астероид охватывает обе центральные пушки И лазер (master target).
+
+Сделано:
+- ✅ **Константы дуг в DraftCombat** (radians, half-arc):
+  ```
+  ARC_CENTRAL_CANNON_HALF_RAD = 1.4137  // 90% × 180° / 2 = ±81° (Рельсотрон)
+  ARC_CENTRAL_MG_HALF_RAD     = 1.2566  // 80% (Автомат)
+  ARC_SIDE_CANNON_HALF_RAD    = 1.2566  // 80%
+  ARC_SIDE_MG_HALF_RAD        = 1.0996  // 70% (задел на будущий)
+  ARC_LASER_HALF_RAD          = 1.4923  // 95%
+  ARC_ROCKET_HALF_RAD         = 1.4923  // 95%
+  ```
+- ✅ **Хелперы:** `isWithinArc(a, sx, sz, halfArc)`, `centralWeaponHalfArc()` (dispatch по `currentWeapon.id`), `nearestAsteroidInArc(sx, sz, halfArc)` (для боковых — filter+nearest), `bestHpTargetInArc(sx, sz, halfArc)` (для центральной — filter+max-HP+tiebreak nearest).
+- ✅ **Priority lock = master target** — Tap на астероид: `centralTargetId = picked.id` (новый лок) или `null` если уже залочен (re-tap toggle). Lock пережит изменение arc-relations: `centralTurretTarget()` возвращает locked **независимо от дуги**. Auto-pick (lock=null) ограничен дугой текущего оружия центральной.
+- ✅ **Центр клампит вращение в дугу** — `targetAngleRaw = atan2(...)` (не клампится, для `aimAligned`), `targetAngleClamped = raw.coerceIn(-halfArc, +halfArc)` (smoothing target). Турель доводит ствол до края дуги и встаёт. `aimAligned` сравнивает `centralTurretAngle` с `targetAngleRaw` — у out-of-arc цели турель упёрлась в clamp, diff остаётся = arc-edge-to-target, всегда выше threshold → fire-gate не пропускает. **Турель ведёт цель но не стреляет когда не достаёт.**
+- ✅ **Лазер: тот же мастер-таргет + `canEngage` gate** — `aimSelector = { centralTurretTarget() }` (как в первой версии), но в `Beam` добавлен `canEngage: (Asteroid) -> Boolean` closure. Лазер передаёт `{ a -> isWithinArc(a, dome, ARC_LASER_HALF_RAD) }`. Каждый тик: если `canEngage(target)` → ray-cast + урон + видимый луч; иначе → `endPos = src` (нулевая длина = невидимо), `dmgAccum = 0`, **таймер тикает дальше**. Цель умерла → beam terminate.
+- ✅ **Ракетная шахта** — `findRocketTargets` теперь считает top-N **от позиции шахты, не центра**, фильтрует на `ARC_ROCKET_HALF_RAD = 95%`. Шахта может стрелять по флангам, до которых центр не достаёт.
+- ✅ **Боковые турели** — переехали с `nearestAsteroid(tx, tz)` на `nearestAsteroidInArc(tx, tz, ARC_SIDE_CANNON_HALF_RAD)` (80%). И в aim-loop'е, и в fire-loop'е. Стволы не пытаются развернуться за горизонт.
+
+Сценарии:
+
+| Ситуация | Центр | Лазер |
+|---|---|---|
+| Лок на цель в обоих дугах | Стреляет | Стреляет |
+| Лок на цель только в дуге лазера | Ведёт ствол на edge, молчит | Стреляет |
+| Лок на цель за дугами обоих | Ведёт на edge, молчит | Луч скрыт, таймер идёт |
+| Лок умер → auto-pick | Подхватывает в своей дуге | Следует за тем же auto-pick |
+| Re-tap на лок | Релиз → auto-pick | Auto-pick (если в дуге лазера) |
 
 ## Старый бэклог (мелкая шерсть)
 
