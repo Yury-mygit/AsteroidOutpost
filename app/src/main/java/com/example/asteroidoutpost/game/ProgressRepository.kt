@@ -5,6 +5,12 @@ import android.content.Context
 /**
  * Persists [GameProgress] across app launches via SharedPreferences.
  *
+ * Owns the in-memory `current` state on top of the I/O — both Activity
+ * (overlays display metal / unlocks) and MissionRunner (reads upgrade
+ * levels for effective damage, writes +metal on win) share a single
+ * instance and read `current` directly. Mutations always go through
+ * `update { ... }`, which applies the transform and immediately persists.
+ *
  * Uses an Outpost-specific pref file so the existing g3 settings (handled by
  * SettingsActivity) stay untouched.
  *
@@ -17,7 +23,18 @@ class ProgressRepository(context: Context) {
 
     private val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
 
-    fun load(): GameProgress = GameProgress(
+    /** Current persistent state — read directly, mutate via [update]. */
+    var current: GameProgress = load()
+        private set
+
+    /** Apply a copy-transform and persist atomically. */
+    fun update(transform: (GameProgress) -> GameProgress) {
+        val updated = transform(current)
+        current = updated
+        save(updated)
+    }
+
+    private fun load(): GameProgress = GameProgress(
         metal                    = prefs.getInt(KEY_METAL, 0),
         mainWeaponDamageLevel    = prefs.getInt(KEY_LVL_MAIN_WEAPON_DMG, 1),
         baseHpLevel              = prefs.getInt(KEY_LVL_BASE_HP, 1),
@@ -25,7 +42,7 @@ class ProgressRepository(context: Context) {
         highestMissionUnlocked   = prefs.getInt(KEY_HIGHEST_MISSION, 0),
     )
 
-    fun save(progress: GameProgress) {
+    private fun save(progress: GameProgress) {
         prefs.edit()
             .putInt(KEY_METAL,                progress.metal)
             .putInt(KEY_LVL_MAIN_WEAPON_DMG,  progress.mainWeaponDamageLevel)

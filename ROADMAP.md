@@ -1053,6 +1053,35 @@ Pull-request-style полировка: каждое оружие имеет св
 | Лок умер → auto-pick | Подхватывает в своей дуге | Следует за тем же auto-pick |
 | Re-tap на лок | Релиз → auto-pick | Auto-pick (если в дуге лазера) |
 
+### M16 — Рефакторинг: декомпозиция MainActivity (завершено 2026-05-09)
+
+**Контекст.** К концу M15 `MainActivity.kt` распух до 5714 строк — god-object: lifecycle, asset loading, tick-loop, спавн VFX, сборка сцены, HUD-виджеты, оверлеи, прогресс-репозиторий, ability-фреймворк, weapon-effects, частицы — всё в одном файле. Растущий проект (Outpost + общий движок с g3) требует чистых границ.
+
+**Принципы.** «Делаем хорошо, профессионально». (1) Движок ничего не знает про игру — потребляет только `SceneObject/BillboardDraw/BeamDraw/ParticleBatchKt`. (2) Игровые компоненты независимы — VFX-spawner, авто-aim, weapon-effects не должны держать ссылку на Activity. (3) State живёт рядом с логикой — переезд логики тащит за собой её state, иначе появляются «прыжки» между файлами. (4) Минимальные дискретные шаги с проверкой на устройстве после каждого.
+
+**Извлечённые модули.**
+
+- **`game/combat/Asteroid.kt`, `Combat.kt` (DraftCombat-константы), `Particles.kt`, `Vfx.kt` (Flash/Fireball/Particle data classes), `AutoAim.kt`** — данные и хелперы боёвки, top-level, без зависимостей от Activity.
+- **`game/combat/VfxSpawner.kt` (471 строки)** — `spawnExplosion`, `spawnMuzzleBlast`, `spawnRailgunMuzzle`, `spawnLaserStrikeVfx`, поды частиц (sparks/smoke/debris), packing для batched-JNI. Получает движок и пулы через конструктор, MainActivity вызывает методы, не знает про детали.
+- **`game/combat/Effects.kt` (360 строк)** — `WeaponEffect` umbrella + `Projectile/Beam` + `ProjectileBehavior` strategy (Plain/HeavyShell/HomingRocket). **Ключевая декаплинг-точка**: `WeaponEffectContext` — интерфейс с `asteroids: List<Asteroid>` + `vfx: VfxSpawner`. Эффект тикает через `tick(dt, ctx) → consumed`, не видит Activity.
+- **`game/content/MeshBuilder.kt`, `Meshes.kt` (557 строк)** — процедурные меши (turret base/barrel, laser dome, rocket silo, shield arch, fireball sphere, muzzle cone). Pure functions от размеров → `(verts, indices)`.
+- **`game/content/Textures.kt`** — процедурные smoke/debris текстуры для частиц.
+- **`game/ui/IconDrawables.kt`** — Path-based иконки способностей (V-shield, ракета, лазер-режет-астероид) + `ShieldFillDrawable`.
+- **`game/ui/HudView.kt` (464 строки, конструктор от Activity)** — **владеет всем in-game HUD**: top-панель (mission/wave/score/HP/energy), action bar (shield + ability buttons + abort), wave-announce overlay, buff indicator. Методы: `buildHudPanel/buildShieldButton/buildAbilityButtons/buildAbortButton/buildBuffIndicator`, `refreshScore/Hp/Energy/MissionLabel/WaveLabel/Shield/Ability/AllAbilities/Buff`, `pulseBaseDamage`, `announceWave`, `setHudVisible`. MainActivity монтирует HudView в FrameLayout и больше HUD-виджеты не трогает.
+- **`game/SceneAssembler.kt` (458 строк)** — **граница game ↔ engine**. Конструктор принимает ~28 параметров (asteroids/effects/flashes/fireballs/particles/mesh-handles по ссылке). Метод `assemble(reloadProgress, centralTurretAngle, shieldHp): SceneFrame` собирает 6 списков для `engineView` (opaque/translucent/additive/textured/billboards/beams/particle-batches). Старая `MainActivity.buildScene()` теперь — тонкая обёртка вокруг `sceneAssembler.assemble(...)`.
+- **`game/ProgressRepository.kt`** — поднят с уровня «I/O wrapper» до **владельца state**: поле `current: GameProgress` + метод `update(transform: (GameProgress) → GameProgress)`. И Activity, и tick читают `progressRepo.current` напрямую и мутируют через `update { it.copy(...) }`. Один источник правды, persist на каждой мутации.
+
+**Чистка.** Удалён весь мёртвый g3-код, к которому MainActivity больше не имеет вызовов: импорты `sim/`, `intelligence/`, `ai/`, `mission/`, `voice/`, `sound/` пакетов, поля для `SimulationWorld/StationAI/MissionController/SceneAdapter/FleetRegistry`, hidden-init для g3-UI кнопок (drawer/buildmenu/ship-card/mic/settings-tab/axis), legacy fleet-ship loaders. Папки на диске оставлены без entry points — удалить wholesale можно одной коммитом, когда понадобится.
+
+**Результат.** `MainActivity.kt`: **5714 → 1941 строки (−66%)**. Что осталось в Activity: lifecycle, asset loading orchestration, view mounting, overlay flow (`showMissionSelect/showWeaponSelect/showWin/showLose`), `applySettings`, settings launcher, `bgMusic`, engine touch handler, **gameplay state + tick (`scheduleDraftTick`)** — Phase C по выделению `MissionRunner` спроектирована, но не реализована (явное ограничение: «ничего более не делай»).
+
+**Уроки.**
+- **Capture by value хрупок при late-bound handles** — `SceneAssembler` сначала захватывал mesh-handles (Long) в конструкторе, но `setupBackgroundNebulae()` вызывался ДО `buildTurretMeshes()` — handles были `0L` на момент захвата. Лечение: переставить порядок инициализации. Урок на будущее: для late-bound значений лучше lambda-доступ (`val turretBaseHandle: () -> Long`), чем val.
+- **State edits часто переезжают раньше, чем готова логика** — попытка переместить логику в новый класс без переноса state приводила к «прыжкам» (метод в новом файле, поля в старом). Правило: state должен переезжать вместе с логикой, не порознь.
+- **Explicit proxy > implicit interface** — для callback'ов из `HudView` Activity явно проксирует тапы кнопок в нужные хендлеры (`hud.callbacks = object: HudView.Callbacks { ... }`), а НЕ MissionRunner implements HudView.Callbacks напрямую. Activity остаётся точкой композиции.
+
+**Дальше (deferred):** `MissionRunner` — выделить tick-loop + gameplay state из Activity, чтобы `MainActivity` стала чисто-UI shell'ом. Дизайн готов, реализация — в следующей сессии.
+
 ## Старый бэклог (мелкая шерсть)
 
 Сохранён до решения по релевантности:
@@ -1066,9 +1095,11 @@ Pull-request-style полировка: каждое оружие имеет св
 
 ## Технические заметки
 
-- **Движок:** 3D Vulkan (g3), используется в режиме фиксированной side-view камеры. Большая часть g3-инфраструктуры в коде есть, но **в рантайме обходится** — `buildScene()` собирает сцену напрямую, tick-loop выполняет только логику Outpost.
+- **Движок:** 3D Vulkan (общий с g3), используется в режиме фиксированной side-view камеры. Граница game↔engine — `game/SceneAssembler.kt`: производит `SceneFrame` (списки SceneObject/BillboardDraw/BeamDraw/ParticleBatchKt) из game state, движок дальше ничего про игру не знает.
+- **g3-инфраструктура** (`SimulationWorld/StationAI/MissionController/SceneAdapter/voice/sound/ml`) — после M16-рефакторинга **ни один call-site не остался**. Папки лежат на диске без entry points, готовы к удалению.
 - **Геометрия:** единый quad в плоскости X-Z с двусторонними треугольниками. `SceneObject` расширен полями `scaleX/Y/Z` и `rotationY` специально для этого draft.
 - **Координаты:** X — горизонталь экрана, Z — вертикаль, Y — глубина (всегда 0). Видимая область: X ∈ [−2.47, +2.47], Z ∈ [−1.49, +9.49] при экране ~1080×2400.
-- **State:** `GameProgress` (persistent: металл, уровни апгрейдов) сохраняется через `ProgressRepository` в `SharedPreferences`. `MissionRun` (in-flight: статы текущего прогона) сбрасывается на старте миссии. Игровой state-machine — enum `MENU/PLAYING/WON/LOST`, tick работает только в `PLAYING`.
-- **Все g3-UI оверлеи** (кнопки команд, axis-индикатор, ship-card, mic, settings) скрыты в `MainActivity.onCreate`. Outpost-UI собирается программно через `OverlayFactory`.
+- **State:** `GameProgress` (persistent: металл, уровни апгрейдов, разблокированные миссии) живёт в `ProgressRepository.current`, мутации через `progressRepo.update { it.copy(...) }`, persist на каждой мутации. `MissionRun` (in-flight: статы текущего прогона) сбрасывается на старте миссии. Игровой state-machine — enum `MENU/PLAYING/WON/LOST`, tick работает только в `PLAYING`.
+- **HUD** собирается и обновляется внутри `game/ui/HudView.kt` (top-панель, action bar, wave-announce, buff indicator). Activity монтирует HudView в root и дальше дёргает только `hud.refresh*`.
+- **Все g3-UI оверлеи** (кнопки команд, axis-индикатор, ship-card, mic, settings) скрыты в `MainActivity.onCreate`. Outpost-UI собирается программно через `OverlayFactory` (overlay-экраны) + `HudView` (in-game).
 - **Пакет:** `com.example.asteroidoutpost`. JNI-символы соответственно `Java_com_example_asteroidoutpost_*`.
