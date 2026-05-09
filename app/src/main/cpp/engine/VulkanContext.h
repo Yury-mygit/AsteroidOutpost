@@ -30,7 +30,9 @@ namespace station {
                             const std::vector<uint32_t>& particleVertSpv = {},
                             const std::vector<uint32_t>& particleFragSpv = {},
                             const std::vector<uint32_t>& postVertSpv = {},
-                            const std::vector<uint32_t>& postFragSpv = {});
+                            const std::vector<uint32_t>& postFragSpv = {},
+                            const std::vector<uint32_t>& beamVertSpv = {},
+                            const std::vector<uint32_t>& beamFragSpv = {});
 
         void setFocused(bool focused);
         [[nodiscard]] bool isFocused()      const { return m_focused; }
@@ -120,6 +122,18 @@ namespace station {
                               const float modelMatrix[16],
                               float r, float g, float b, float a,
                               const float prevModelMatrix[16] = nullptr);
+        // E14 — dedicated laser-beam draw call. Public-quality API: caller
+        // gives world-space start/end + perpendicular width + RGBA. Engine
+        // builds a view-aligned quad on the GPU (vertex shader expands it
+        // from gl_VertexIndex; no Kotlin geometry generation), runs the
+        // beam fragment shader (Gaussian core + halo, sharp endpoints,
+        // gentle pulse) on the additive pipeline. Routed through scene
+        // pass so depth-test occludes beams behind opaque geometry. Does
+        // NOT need any descriptor set or mesh handle.
+        void drawLaserBeam(float startX, float startY, float startZ,
+                           float endX,   float endY,   float endZ,
+                           float width,
+                           float r, float g, float b, float a);
         void drawObjectFrameMesh(uint32_t frameToken, uint32_t targetToken, const float modelMatrix[16], float padding, const float tint[4]);
         void drawGameplayFrameMesh(uint32_t frameToken, const float modelMatrix[16],
                                    const float* localPoints, int32_t pointCount,
@@ -304,6 +318,32 @@ namespace station {
         VkDescriptorSet       m_postDescriptorSet    = VK_NULL_HANDLE;
         VkShaderModule        m_postVertModule       = VK_NULL_HANDLE;
         VkShaderModule        m_postFragModule       = VK_NULL_HANDLE;
+        // E14 — dedicated beam pipeline. Own minimal pipeline layout (set 0
+        // = scene UBO for view/proj, push constants for per-beam params).
+        // No vertex bindings — vertex shader uses gl_VertexIndex to expand
+        // a 6-vertex quad spanning the segment. Additive ONE/ONE blend,
+        // depth-test on read-only (occluded by opaque geometry, doesn't
+        // occlude later VFX). Velocity attachment writeMask=0 to match
+        // overlay convention.
+        VkPipeline            m_beamPipeline         = VK_NULL_HANDLE;
+        VkPipelineLayout      m_beamPipelineLayout   = VK_NULL_HANDLE;
+        VkShaderModule        m_beamVertModule       = VK_NULL_HANDLE;
+        VkShaderModule        m_beamFragModule       = VK_NULL_HANDLE;
+        // Per-beam push constants — std140-aligned for Vulkan push_constant
+        // layout. start/end are vec3 padded to 16-byte slots. Total 56
+        // bytes used + 8 trailing padding = 64 bytes. Well under the
+        // 128-byte minimum guarantee.
+        struct BeamPushConstants {
+            float start[3];   float _pad0;
+            float end[3];     float _pad1;
+            float color[4];
+            float width;
+            float time;
+            float _pad2[2];
+        };
+        // Beam draws are stored as the push constant struct directly so
+        // renderFrame can memcpy each one straight into vkCmdPushConstants.
+        std::vector<BeamPushConstants> m_beamDrawList;
         MeshGpu               m_frameLineMesh{};
         MeshGpu               m_frameLineMeshEnemy{};
         bool                  m_wideLines            = false;

@@ -73,6 +73,15 @@ class EngineView @JvmOverloads constructor(
     @Volatile
     var particleBatches: List<ParticleBatchKt> = emptyList()
 
+    /**
+     * E14 — laser beams. One BeamDraw per active beam segment; each routes
+     * through the dedicated beam pipeline (additive ONE/ONE, view-aligned
+     * quad expanded GPU-side from start/end + width). Set per-frame by
+     * `MainActivity.buildScene` from runtime laser state.
+     */
+    @Volatile
+    var beams: List<BeamDraw> = emptyList()
+
     /** Engine render-loop FPS (sliding 1-sec window, updated by RenderThread). */
     @Volatile
     var fps: Float = 0f
@@ -287,7 +296,7 @@ class EngineView @JvmOverloads constructor(
     }
 
     fun submitCurrentScene() {
-        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects, particleBatches)
+        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects, particleBatches, beams)
     }
 
     private fun collectScreenFrames(objects: List<SceneObject>): List<ScreenFrame> {
@@ -333,7 +342,7 @@ class EngineView @JvmOverloads constructor(
             var fpsWindowStartNs = System.nanoTime()
             while (running) {
                 val currentScene = engineView.scene
-                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects, engineView.particleBatches)
+                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects, engineView.particleBatches, engineView.beams)
                 engine.renderFrame()
                 engineView.publishScreenFrames(engineView.collectScreenFrames(currentScene))
 

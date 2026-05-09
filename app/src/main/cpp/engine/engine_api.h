@@ -218,6 +218,22 @@ void station_engine_draw_additive_mesh(StationEngine* engine,
                                        int32_t        material,
                                        const float    prevModelMatrix[16]);
 
+// E14 — laser beam. Dedicated additive pipeline for thin glowing line
+// effects between two world-space points. The engine builds a view-aligned
+// quad on the GPU (no mesh, no caller-side geometry); the beam fragment
+// shader paints a Gaussian core + halo with sharp endpoints and a gentle
+// pulse. Public-API contract: works with arbitrary camera poses (the
+// vertex shader derives perpendicular from the view matrix, not project
+// assumptions). `width` is perpendicular thickness in world units; tint
+// is RGBA with alpha as overall brightness. Caller picks any colour;
+// the shader doesn't bake a "laser hue" — pass cyan, red, green, etc.
+void station_engine_draw_laser_beam(StationEngine* engine,
+                                    float startX, float startY, float startZ,
+                                    float endX,   float endY,   float endZ,
+                                    float width,
+                                    float r,      float g,      float b,
+                                    float a);
+
 void station_engine_draw_object_frame_mesh(StationEngine* engine,
                                            StationMesh*   frameMesh,
                                            StationMesh*   targetMesh,

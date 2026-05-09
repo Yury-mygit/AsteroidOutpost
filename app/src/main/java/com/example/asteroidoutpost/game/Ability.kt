@@ -4,11 +4,8 @@ package com.example.asteroidoutpost.game
  * Active abilities the player invokes during combat. Each costs energy and
  * has a cooldown; activation logic lives in MainActivity (effect dispatch
  * branches on `id`). Static metadata only — runtime state (current cooldown)
- * is held by MainActivity per slot.
- *
- * `needsTarget = true` means activation arms the ability and waits for a
- * follow-up screen interaction (e.g. drag a line for the laser). Instant
- * abilities apply on tap.
+ * is held by MainActivity per slot. All abilities are instant: the actual
+ * fire is marshalled onto the tick thread to keep list mutations atomic.
  */
 enum class AbilityId { ROCKET_STRIKE, LASER_STRIKE }
 
@@ -19,7 +16,6 @@ data class Ability(
     val description: String,
     val cost: Float,
     val cooldownSec: Float,
-    val needsTarget: Boolean = false,
 )
 
 object AbilityCatalog {
@@ -31,17 +27,15 @@ object AbilityCatalog {
         description  = "3 самонаводящихся ракеты по самым опасным астероидам.",
         cost         = 30f,
         cooldownSec  = 8f,
-        needsTarget  = false,
     )
 
     val LASER_STRIKE = Ability(
         id           = AbilityId.LASER_STRIKE,
-        displayName  = "Лазерный удар",
+        displayName  = "Лазерный луч",
         shortLabel   = "ЛАЗЕР",
-        description  = "Проведите линию по экрану — урон всем астероидам на пути.",
+        description  = "5 секунд непрерывного луча из лазерной установки. Бьёт цель центральной турели; любой астероид на пути блокирует луч и получает урон вместо неё.",
         cost         = 50f,
         cooldownSec  = 18f,
-        needsTarget  = true,
     )
 
     val ALL: List<Ability> = listOf(ROCKET_STRIKE, LASER_STRIKE)

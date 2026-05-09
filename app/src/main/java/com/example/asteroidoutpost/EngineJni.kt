@@ -264,6 +264,26 @@ class EngineJni {
             nativeDrawAdditiveMesh(engineHandle, meshHandle, modelMatrix, r, g, b, a, material, prevModelMatrix)
     }
 
+    /**
+     * E14 — laser beam. Dedicated additive pipeline for thin glowing line
+     * effects between two world-space points. The engine builds a view-
+     * aligned quad on the GPU; caller doesn't need a mesh handle. `width`
+     * is perpendicular thickness in world units. `(r, g, b, a)` is the tint;
+     * `a` doubles as overall brightness scalar.
+     */
+    fun drawLaserBeam(
+        startX: Float, startY: Float, startZ: Float,
+        endX:   Float, endY:   Float, endZ:   Float,
+        width:  Float,
+        r: Float, g: Float, b: Float, a: Float,
+    ) {
+        if (engineHandle != 0L)
+            nativeDrawLaserBeam(engineHandle,
+                startX, startY, startZ,
+                endX,   endY,   endZ,
+                width, r, g, b, a)
+    }
+
     fun drawObjectFrameMesh(
         frameMeshHandle: Long,
         targetMeshHandle: Long,
@@ -419,6 +439,13 @@ class EngineJni {
         r: Float, g: Float, b: Float, a: Float,
         material: Int,
         prevModelMatrix: FloatArray?,
+    )
+    private external fun nativeDrawLaserBeam(
+        engineHandle: Long,
+        startX: Float, startY: Float, startZ: Float,
+        endX:   Float, endY:   Float, endZ:   Float,
+        width:  Float,
+        r: Float, g: Float, b: Float, a: Float,
     )
     private external fun nativeDrawObjectFrameMesh(
         engineHandle: Long,

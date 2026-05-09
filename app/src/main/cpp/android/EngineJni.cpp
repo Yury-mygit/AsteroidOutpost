@@ -343,6 +343,21 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawAdditiveMesh(JNIEnv* env, j
 }
 
 JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawLaserBeam(JNIEnv* /*env*/, jobject /*thiz*/,
+                                                  jlong engineHandle,
+                                                  jfloat startX, jfloat startY, jfloat startZ,
+                                                  jfloat endX,   jfloat endY,   jfloat endZ,
+                                                  jfloat width,
+                                                  jfloat r, jfloat g, jfloat b, jfloat a) {
+    station_engine_draw_laser_beam(
+            reinterpret_cast<StationEngine*>(engineHandle),
+            startX, startY, startZ,
+            endX,   endY,   endZ,
+            width, r, g, b, a
+    );
+}
+
+JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawParticles(JNIEnv* env, jobject /*thiz*/,
                                                   jlong engineHandle,
                                                   jlong meshHandle,

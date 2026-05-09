@@ -100,6 +100,18 @@ namespace station::math {
             return result;
         }
 
+        // Non-uniform scale in model space. Used by E13 to apply (scaleH, 1,
+        // scaleV) BEFORE rotation when composing plasma billboards, so the
+        // streak axis follows the rotation parameter even when the quad is
+        // stretched non-uniformly.
+        static Mat4 scale(const Vec3& s) {
+            Mat4 result = identity();
+            result.m[0]  = s.x;
+            result.m[5]  = s.y;
+            result.m[10] = s.z;
+            return result;
+        }
+
         // Orthographic projection for Vulkan (Y-flipped, depth 0-1).
         // halfH: half world-space height visible on screen.
         static Mat4 orthoVulkan(float halfW, float halfH, float zNear, float zFar) {

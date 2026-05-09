@@ -151,6 +151,19 @@ data class BillboardDraw(
 )
 
 /**
+ * E14 — laser beam. Dedicated engine pipeline; no mesh handle required.
+ * The engine expands a view-aligned quad on the GPU between (startX, startY,
+ * startZ) and (endX, endY, endZ) with perpendicular thickness `width` in
+ * world units. `(r, g, b, a)` is the per-beam tint with `a` as brightness.
+ */
+data class BeamDraw(
+    val startX: Float, val startY: Float, val startZ: Float,
+    val endX:   Float, val endY:   Float, val endZ:   Float,
+    val width:  Float,
+    val r: Float = 1f, val g: Float = 1f, val b: Float = 1f, val a: Float = 1f,
+)
+
+/**
  * E9 — packed particle batch ready for the engine. `data` is `count * 8`
  * floats per particle (pos.xyz, size, rgba), `mesh` is the unit-quad mesh,
  * `texture` is the sampler-bound texture (0 for additive sparks). `mode`
@@ -182,6 +195,7 @@ fun submitScene(
     additiveObjects: List<SceneObject> = emptyList(),
     texturedObjects: List<SceneObject> = emptyList(),
     particleBatches: List<ParticleBatchKt> = emptyList(),
+    beams: List<BeamDraw> = emptyList(),
 ) {
     engine.beginScene()
     for (obj in objects) {
@@ -213,6 +227,12 @@ fun submitScene(
         engine.drawTexturedMesh(t.meshHandle, t.textureHandle, t.modelMatrix(),
                                 t.tintR, t.tintG, t.tintB, t.tintA,
                                 t.prevModelMatrix)
+    }
+    for (beam in beams) {
+        engine.drawLaserBeam(beam.startX, beam.startY, beam.startZ,
+                             beam.endX,   beam.endY,   beam.endZ,
+                             beam.width,
+                             beam.r, beam.g, beam.b, beam.a)
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV,

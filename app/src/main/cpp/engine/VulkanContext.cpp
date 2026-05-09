@@ -832,6 +832,11 @@ namespace station {
         if (m_postVertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_postVertModule, nullptr);              m_postVertModule = VK_NULL_HANDLE; }
         if (m_postFragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_postFragModule, nullptr);              m_postFragModule = VK_NULL_HANDLE; }
         m_postDescriptorSet = VK_NULL_HANDLE;
+        // E14 — beam pipeline / layout / shader cleanup.
+        if (m_beamPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_beamPipeline, nullptr);                    m_beamPipeline = VK_NULL_HANDLE; }
+        if (m_beamPipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_beamPipelineLayout, nullptr);        m_beamPipelineLayout = VK_NULL_HANDLE; }
+        if (m_beamVertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_beamVertModule, nullptr);              m_beamVertModule = VK_NULL_HANDLE; }
+        if (m_beamFragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_beamFragModule, nullptr);              m_beamFragModule = VK_NULL_HANDLE; }
         // E8.2/E8.3 — destroy textures before their descriptor pool. Free
         // every used pool slot first, then the engine-owned default white,
         // then drop the descriptor pool itself.
@@ -913,7 +918,9 @@ namespace station {
                                        const std::vector<uint32_t>& particleVertSpv,
                                        const std::vector<uint32_t>& particleFragSpv,
                                        const std::vector<uint32_t>& postVertSpv,
-                                       const std::vector<uint32_t>& postFragSpv) {
+                                       const std::vector<uint32_t>& postFragSpv,
+                                       const std::vector<uint32_t>& beamVertSpv,
+                                       const std::vector<uint32_t>& beamFragSpv) {
         auto makeModule = [&](const std::vector<uint32_t>& code, VkShaderModule& mod) -> bool {
             VkShaderModuleCreateInfo ci{};
             ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -1218,6 +1225,97 @@ namespace station {
             LOGI("Particle pipelines created (additive + alpha-textured)");
         }
 
+        // E14 — beam pipeline. Own minimal layout (set 0 = scene UBO for
+        // view/proj, push constants for per-beam params; no texture set,
+        // no per-draw set). No vertex buffer — vertex shader expands a
+        // 6-vert quad from gl_VertexIndex and pc.start/pc.end. Additive
+        // ONE/ONE blend, depth-test on read-only (occluded by opaque, but
+        // doesn't write depth). Velocity attachment writeMask=0 to match
+        // overlay convention (m_beamPipeline runs in the scene render pass
+        // alongside additive/plasma/etc.; cbAtts[1].colorWriteMask was
+        // already set to 0 above for all post-opaque pipelines).
+        if (!beamVertSpv.empty() && !beamFragSpv.empty()) {
+            if (!makeModule(beamVertSpv, m_beamVertModule)) return false;
+            if (!makeModule(beamFragSpv, m_beamFragModule)) return false;
+
+            VkPipelineShaderStageCreateInfo beamStages[2]{};
+            beamStages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            beamStages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            beamStages[0].module = m_beamVertModule; beamStages[0].pName = "main";
+            beamStages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            beamStages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+            beamStages[1].module = m_beamFragModule; beamStages[1].pName = "main";
+
+            // Pipeline layout — set 0 (scene UBO) only, plus push constants
+            // sized to BeamPushConstants. Beam shader doesn't need texture
+            // (set 1) or per-draw motion UBO (set 2).
+            VkPushConstantRange beamPcRange{};
+            beamPcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            beamPcRange.offset     = 0;
+            beamPcRange.size       = sizeof(BeamPushConstants);
+
+            VkPipelineLayoutCreateInfo beamPlCI{};
+            beamPlCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            beamPlCI.setLayoutCount         = 1;
+            beamPlCI.pSetLayouts            = &m_descriptorSetLayout;
+            beamPlCI.pushConstantRangeCount = 1;
+            beamPlCI.pPushConstantRanges    = &beamPcRange;
+            r = vkCreatePipelineLayout(m_device, &beamPlCI, nullptr, &m_beamPipelineLayout);
+            if (r != VK_SUCCESS) { LOGE("vkCreatePipelineLayout(beam): %s", vkRes(r).c_str()); return false; }
+
+            // Empty vertex input — gl_VertexIndex drives quad expansion.
+            VkPipelineVertexInputStateCreateInfo beamViCI{};
+            beamViCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+            VkPipelineInputAssemblyStateCreateInfo beamIaCI{};
+            beamIaCI.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            beamIaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            // Depth: test on, write off. Beams hide behind opaque geometry
+            // but multiple beams accumulate without occluding each other.
+            VkPipelineDepthStencilStateCreateInfo beamDsCI{};
+            beamDsCI.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            beamDsCI.depthTestEnable  = VK_TRUE;
+            beamDsCI.depthWriteEnable = VK_FALSE;
+            beamDsCI.depthCompareOp   = VK_COMPARE_OP_LESS;
+
+            // Two-attachment colour blend: [0] additive ONE/ONE for the
+            // scene colour, [1] writeMask=0 for the velocity attachment
+            // (beams shouldn't clobber underlying motion vectors).
+            VkPipelineColorBlendAttachmentState beamCbAtts[2]{};
+            beamCbAtts[0].blendEnable         = VK_TRUE;
+            beamCbAtts[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            beamCbAtts[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            beamCbAtts[0].colorBlendOp        = VK_BLEND_OP_ADD;
+            beamCbAtts[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            beamCbAtts[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            beamCbAtts[0].alphaBlendOp        = VK_BLEND_OP_ADD;
+            beamCbAtts[0].colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            beamCbAtts[1].blendEnable    = VK_FALSE;
+            beamCbAtts[1].colorWriteMask = 0;
+            VkPipelineColorBlendStateCreateInfo beamCbCI{};
+            beamCbCI.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            beamCbCI.attachmentCount = 2;
+            beamCbCI.pAttachments    = beamCbAtts;
+
+            VkGraphicsPipelineCreateInfo beamGpCI = gpCI;  // copy viewport / raster / multisample
+            beamGpCI.stageCount          = 2;
+            beamGpCI.pStages             = beamStages;
+            beamGpCI.pVertexInputState   = &beamViCI;
+            beamGpCI.pInputAssemblyState = &beamIaCI;
+            beamGpCI.pDepthStencilState  = &beamDsCI;
+            beamGpCI.pColorBlendState    = &beamCbCI;
+            beamGpCI.pDynamicState       = nullptr;
+            beamGpCI.layout              = m_beamPipelineLayout;
+            beamGpCI.renderPass          = m_renderResources.renderPass;
+            beamGpCI.subpass             = 0;
+
+            r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &beamGpCI, nullptr, &m_beamPipeline);
+            if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(beam): %s", vkRes(r).c_str()); return false; }
+            LOGI("Beam pipeline created");
+        }
+
         // E10.1 — post-process pipeline. Fullscreen triangle (no vertex
         // input bindings — gl_VertexIndex generates positions in vert),
         // single descriptor set with the offscreen colour sampler, no
@@ -1489,6 +1587,7 @@ namespace station {
         m_translucentDrawList.clear();
         m_additiveDrawList.clear();
         m_texturedDrawList.clear();
+        m_beamDrawList.clear();
         m_particleBatches.clear();
         m_particleAdditiveStaging.clear();
         m_particleAlphaStaging.clear();
@@ -1680,6 +1779,27 @@ namespace station {
                 m_perDrawUboCursor, kMaxDrawsPerFrame,
                 prevModelMatrix, modelMatrix);
         m_additiveDrawList.push_back(cmd);
+    }
+
+    // E14 — public API for the dedicated beam pipeline. Caller passes
+    // world-space (start, end) + perpendicular width + RGBA. The vertex
+    // shader expands a 6-vert quad on the GPU, view-aligning its
+    // perpendicular against the camera-forward derived from the UBO view
+    // matrix. No mesh handle, no descriptor sets beyond set 0 (UBO) which
+    // is already bound for the rest of the scene.
+    void VulkanContext::drawLaserBeam(float startX, float startY, float startZ,
+                                      float endX,   float endY,   float endZ,
+                                      float width,
+                                      float r, float g, float b, float a) {
+        if (!m_sceneOpen) return;
+        BeamPushConstants pc{};
+        pc.start[0] = startX; pc.start[1] = startY; pc.start[2] = startZ;
+        pc.end[0]   = endX;   pc.end[1]   = endY;   pc.end[2]   = endZ;
+        pc.color[0] = r; pc.color[1] = g; pc.color[2] = b; pc.color[3] = a;
+        pc.width    = width;
+        // pc.time is filled at render time so beams spawned across the
+        // current frame share the same animation phase.
+        m_beamDrawList.push_back(pc);
     }
 
     void VulkanContext::drawBillboardMesh(uint32_t token, float x, float y, float z, float scale) {
@@ -2363,6 +2483,24 @@ namespace station {
             }
         }
 
+        // E14 — beam pass. Sits between additive mesh (3D fireballs) and
+        // plasma billboards (overlay flashes). Beams are 3D objects in the
+        // scene with depth occlusion; depth-test ON so the beam terminates
+        // visually if asteroid geometry passes in front, but they don't
+        // write depth so multiple beams stack without occluding each other.
+        if (!m_beamDrawList.empty() && m_beamPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_beamPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_beamPipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+            for (auto& beam : m_beamDrawList) {
+                beam.time = elapsedSec;
+                vkCmdPushConstants(cmd, m_beamPipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(BeamPushConstants), &beam);
+                vkCmdDraw(cmd, 6, 1, 0, 0);
+            }
+        }
+
         // --- Draw plasma bolts with additive-blend pipeline ---
         if (!m_plasmaDrawList.empty() && m_plasmaPipeline != VK_NULL_HANDLE) {
             bool pipelineBound = false;
@@ -2382,21 +2520,31 @@ namespace station {
                 }
                 PushConstantData pc{};
                 pc.time = elapsedSec;
-                // E5.2 — plasma uses non-uniform (scaleH=draw.scale, scaleV).
+                // E13 — non-uniform scale + rotation composition fix. The
+                // pre-E13 path baked (scaleH, scaleV) into the billboard's
+                // camera-aligned right/up axes, then post-applied Ry(rot)
+                // to the model vertex. With uniform scale the result was a
+                // clean screen-space rotation; with non-uniform scale the
+                // bolt's "long" axis (scaleV) stayed glued to camera-up
+                // regardless of rotation — so a 90° rotation made a thin
+                // vertical streak instead of a long horizontal one.
+                //
+                // E13 composes M = billboard_uniform * Ry(rot) * S(scaleH,
+                // 1, scaleV): the vertex is first stretched non-uniformly
+                // in MODEL space (X-thin, Z-long), then rotated in the
+                // model X-Z plane (the streaked shape now points along
+                // (sin(rot), cos(rot))), then camera-aligned with uniform
+                // scale=1. Backward compatible with E2.1 round flashes
+                // (uniform scale, rot=0) and E11 muzzle cones (uniform
+                // scale, rot≠0) — both produce the same matrix as before.
                 const math::Mat4 billboard = m_camera.billboardMatrix(
                         {draw.center[0], draw.center[1], draw.center[2]},
-                        draw.scale, draw.scaleV);
-                // E11 — apply Ry(rotation) in local space BEFORE the
-                // billboard transform. multiply(billboard, rot) composes
-                // M = T*camera-align*S*Ry, so a local point p first gets
-                // rotated in its X-Z plane (Ry*p), then scaled and aligned
-                // to camera right/up. With uniform scaleH==scaleV the
-                // result is a clean rotation in screen space; non-uniform
-                // scale would shear. Default rotation=0 = identity, matches
-                // pre-E11 behaviour.
-                const math::Mat4 model = (draw.rotation != 0.0f)
-                        ? math::multiply(billboard, math::Mat4::rotationY(draw.rotation))
-                        : billboard;
+                        1.0f, 1.0f);
+                math::Mat4 inner = math::Mat4::scale({draw.scale, 1.0f, draw.scaleV});
+                if (draw.rotation != 0.0f) {
+                    inner = math::multiply(math::Mat4::rotationY(draw.rotation), inner);
+                }
+                const math::Mat4 model = math::multiply(billboard, inner);
                 std::memcpy(pc.model, model.m, sizeof(float) * 16);
                 // E2.1 — flag plasma fragment shader to apply radial soft-fade.
                 // Project's plasma billboards use quad.gltf (corners at ±1 in X-Z).

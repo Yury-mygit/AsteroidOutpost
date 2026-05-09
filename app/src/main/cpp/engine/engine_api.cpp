@@ -32,6 +32,9 @@ struct StationEngine {
     // by VulkanContext::createPipeline detecting empty SPV).
     std::vector<uint32_t> postVertSpv;
     std::vector<uint32_t> postFragSpv;
+    // E14 — dedicated beam pipeline shaders (own pipeline layout).
+    std::vector<uint32_t> beamVertSpv;
+    std::vector<uint32_t> beamFragSpv;
     bool pipelineCreated = false;
 };
 
@@ -94,6 +97,12 @@ extern "C" void station_engine_set_shader(StationEngine* e,
     } else if (std::string(name) == "post.frag") {
         e->postFragSpv = std::move(words);
         LOGI("Post fragment shader set (%zu bytes)", length);
+    } else if (std::string(name) == "beam.vert") {
+        e->beamVertSpv = std::move(words);
+        LOGI("Beam vertex shader set (%zu bytes)", length);
+    } else if (std::string(name) == "beam.frag") {
+        e->beamFragSpv = std::move(words);
+        LOGI("Beam fragment shader set (%zu bytes)", length);
     } else {
         LOGE("set_shader: unknown name '%s'", name);
     }
@@ -119,7 +128,8 @@ extern "C" void station_engine_surface_created(StationEngine* e,
         }
         if (e->vulkan.createPipeline(e->vertSpv, e->fragSpv,
                                      e->particleVertSpv, e->particleFragSpv,
-                                     e->postVertSpv, e->postFragSpv)) {
+                                     e->postVertSpv, e->postFragSpv,
+                                     e->beamVertSpv, e->beamFragSpv)) {
             e->pipelineCreated = true;
         } else {
             LOGE("createPipeline failed");
@@ -369,6 +379,17 @@ extern "C" void station_engine_draw_additive_mesh(StationEngine* e,
                                                   const float    prevModelMatrix[16]) {
     if (!e || !mesh) return;
     e->vulkan.drawAdditiveMesh(mesh->token, modelMatrix, r, g, b, a, material, prevModelMatrix);
+}
+
+extern "C" void station_engine_draw_laser_beam(StationEngine* e,
+                                               float startX, float startY, float startZ,
+                                               float endX,   float endY,   float endZ,
+                                               float width,
+                                               float r, float g, float b, float a) {
+    if (!e) return;
+    e->vulkan.drawLaserBeam(startX, startY, startZ,
+                            endX,   endY,   endZ,
+                            width, r, g, b, a);
 }
 
 extern "C" void station_engine_draw_object_frame_mesh(StationEngine* e,
