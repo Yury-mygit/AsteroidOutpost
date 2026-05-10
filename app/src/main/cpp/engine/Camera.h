@@ -60,7 +60,13 @@ namespace station {
         math::Quat m_rotation;
         float      m_radius   = 52.0f;
         float      m_aspect   =  1.0f;
-        float      m_fovY     =  28.0f * 3.14159265f / 180.0f;
+        // E16 — wider FOV for dramatic perspective (asteroid attack feel:
+        // distant objects visibly smaller, near ones larger; nebulae
+        // backdrop reads as space, not patches). Was 28° (telephoto-ish);
+        // 55° is "natural" wide-angle for game POV. Combined with reduced
+        // m_radius in Camera::reset() so the ship stays at similar screen
+        // coverage but perspective foreshortening becomes pronounced.
+        float      m_fovY     =  55.0f * 3.14159265f / 180.0f;
         float      m_zNear    =  0.5f;
         float      m_zFar     = 300.0f;
         mutable int m_normCounter = 0;

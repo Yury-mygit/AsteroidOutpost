@@ -32,6 +32,11 @@ data class SceneObject(
     // Rotation around world Y axis (depth). For draft side-view scenes, this
     // rotates a quad (lying in X-Z) within the screen plane.
     val rotationY: Float = 0f,
+    // 3D-pivot Phase: rotation around world X axis. Lets a model
+    // (e.g. bullet with +Z forward) pitch up/down independently of yaw,
+    // so a projectile travelling with vy ≠ 0 actually points along its
+    // velocity vector instead of staying flat in the X-Z plane.
+    val rotationX: Float = 0f,
     val scale: Float = 1f,
     // Non-uniform scale overrides. When NaN, fall back to `scale` (uniform).
     val scaleX: Float = Float.NaN,
@@ -69,26 +74,46 @@ data class SceneObject(
     // fireballs) populate this from their cached prev-frame state.
     val prevModelMatrix: FloatArray? = null,
 ) {
-    /** Column-major model matrix: translation * Rz(rotationZ) * Ry(rotationY) * scale (per-axis). */
+    /**
+     * Column-major model matrix:
+     * `translation * Rz(rotationZ) * Ry(rotationY) * Rx(rotationX) * S(per-axis)`.
+     *
+     * Rotations apply to the model in order Rx → Ry → Rz (model space first).
+     * For projectiles fired in 3D, that means: pitch the +Z-forward bullet
+     * to face vy (Rx), then yaw to face vx/vz (Ry). Roll (Rz) is unused for
+     * projectiles; asteroids use it for in-plane spin.
+     */
     fun modelMatrix(scaleOverride: Float = scale): FloatArray {
         val cz = kotlin.math.cos(rotationZ); val sz_ = kotlin.math.sin(rotationZ)
         val cy = kotlin.math.cos(rotationY); val sy_ = kotlin.math.sin(rotationY)
-        val sx = if (scaleX.isNaN()) scaleOverride else scaleX
-        val sy = if (scaleY.isNaN()) scaleOverride else scaleY
-        val sz = if (scaleZ.isNaN()) scaleOverride else scaleZ
-        // Rz * Ry =
-        // [ cz*cy   -sz_   cz*sy_ ]
-        // [ sz_*cy   cz    sz_*sy_]
-        // [ -sy_    0     cy     ]
+        val cx = kotlin.math.cos(rotationX); val sx_ = kotlin.math.sin(rotationX)
+        val sX = if (scaleX.isNaN()) scaleOverride else scaleX
+        val sY = if (scaleY.isNaN()) scaleOverride else scaleY
+        val sZ = if (scaleZ.isNaN()) scaleOverride else scaleZ
+        // Rz · Ry · Rx (column-major). Derivation:
+        //   Ry · Rx =
+        //     [cy   sy_·sx_   sy_·cx ]
+        //     [0    cx       -sx_    ]
+        //     [-sy_ cy_·sx_   cy·cx  ]
+        //   Rz · (Ry · Rx) — premultiply by Rz on the left.
+        // Each `col*` below is the rotated unit basis × per-axis scale.
+        // col0 = Rz · Ry · Rx · (sX, 0, 0)  (pitch doesn't affect X axis)
+        val c00 = cz * cy        * sX
+        val c01 = sz_ * cy       * sX
+        val c02 = -sy_           * sX
+        // col1 = Rz · Ry · Rx · (0, sY, 0)
+        val c10 = (cz * sy_ * sx_ - sz_ * cx) * sY
+        val c11 = (sz_ * sy_ * sx_ + cz * cx) * sY
+        val c12 = cy * sx_                    * sY
+        // col2 = Rz · Ry · Rx · (0, 0, sZ)
+        val c20 = (cz * sy_ * cx + sz_ * sx_) * sZ
+        val c21 = (sz_ * sy_ * cx - cz * sx_) * sZ
+        val c22 = cy * cx                     * sZ
         return floatArrayOf(
-            // col0 = Rz*Ry * (sx,0,0)
-            cz * cy * sx,   sz_ * cy * sx,  -sy_ * sx,  0f,
-            // col1 = Rz*Ry * (0,sy,0)
-            -sz_ * sy,      cz * sy,        0f,         0f,
-            // col2 = Rz*Ry * (0,0,sz)
-            cz * sy_ * sz,  sz_ * sy_ * sz, cy * sz,    0f,
-            // col3 = translation
-            x,              y,              z,          1f
+            c00, c01, c02, 0f,
+            c10, c11, c12, 0f,
+            c20, c21, c22, 0f,
+            x,   y,   z,   1f,
         )
     }
 }

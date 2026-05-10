@@ -33,6 +33,12 @@ import kotlin.math.pow
  * x = 0; turrets / aux mounts sit on the deck at various Z values along
  * it (see `DraftCombat.CENTRAL_TURRET_BASE_Z`, `TURRET_TOP_Z`, etc.).
  */
+/** Vertical extent of the ship hull (camera-far from deck). The top face
+ *  stays at y=0 so deck-mounted geometry doesn't have to move; the volume
+ *  drops to y=+HULL_Y_DEPTH which renders as the underside of the ship
+ *  receding into shadow under the tilted camera. */
+internal const val HULL_Y_DEPTH: Float = 0.10f
+
 internal fun buildShipHullMesh(engine: EngineJni): Long {
     val mb = MeshBuilder()
 
@@ -60,18 +66,26 @@ internal fun buildShipHullMesh(engine: EngineJni): Long {
     val bowAccentR = 0.30f; val bowAccentG = 0.55f; val bowAccentB = 0.70f
     val mastR = 0.22f; val mastG = 0.24f; val mastB = 0.30f
 
-    // 1. Trapezoidal hull — two triangles span the four corners.
-    mb.addTri(
-        -sternHalfX, sternZ,    // stern-port
-         sternHalfX, sternZ,    // stern-starboard
-         bowHalfX,   bowZ,      // bow-starboard
-        hullR, hullG, hullB,
+    // 1. Trapezoidal hull — extruded as a single 3D prism. Top face (deck)
+    //    sits at y=0; the volume extends DOWNWARD into the water (y > 0
+    //    = farther from the camera in our convention), so everything that
+    //    used to sit on the deck (turret bases, laser dome, rocket silo,
+    //    shield arch) keeps its existing world Y unchanged.
+    //
+    //    Outline is CCW in (x, z): stern-port → stern-starboard up the right
+    //    flank → bow-starboard → across the bow → bow-port → down the left
+    //    flank → back to stern-port. All four corners are convex, so
+    //    ear-clipping resolves to two triangles immediately.
+    val hullOutline = listOf(
+        -sternHalfX to sternZ,    // stern-port
+         sternHalfX to sternZ,    // stern-starboard
+         bowHalfX   to bowZ,      // bow-starboard
+        -bowHalfX   to bowZ,      // bow-port
     )
-    mb.addTri(
-        -sternHalfX, sternZ,    // stern-port
-         bowHalfX,   bowZ,      // bow-starboard
-        -bowHalfX,   bowZ,      // bow-port
+    mb.addExtrudedPolygon(
+        hullOutline,
         hullR, hullG, hullB,
+        yTop = 0f, yBottom = HULL_Y_DEPTH,
     )
 
     // 2. Centerline deck stripe — slightly lighter band along the keel
@@ -161,10 +175,21 @@ internal fun buildSoftDiskMesh(
 ): Long {
     val nVerts = sectors + 1
     val vertices = FloatArray(nVerts * 10)
-    // Centre vertex: position (0,0,0), RGBA opaque, normal (0,1,0).
+    // Vertex normal points along the engine's main light direction
+    // (`triangle.frag` hardcodes `lightDir = normalize(0.4, 0.6, 0.8)` =
+    // (0.371, 0.557, 0.743)). Translucent nebulae are conceptually
+    // emissive cloud patches — they shouldn't fall off when their plane
+    // tilts away from the light. By baking light-aligned normals at mesh
+    // build time, the shader's Lambertian `diff = max(dot(N, L), 0)`
+    // returns ~1 regardless of any SceneObject rotation later applied
+    // (Phase 6 tilts each nebula by `CAMERA_TILT_RAD` around X to stand
+    // them up as billboards; with a +Y normal the dot would collapse to
+    // ~0.04 and the clouds would render mostly as rim+ambient = dim grey).
+    val nx = 0.371f; val ny = 0.557f; val nz = 0.743f
+    // Centre vertex: position (0,0,0), RGBA opaque.
     vertices[0] = 0f; vertices[1] = 0f; vertices[2] = 0f
     vertices[3] = r;  vertices[4] = g;  vertices[5] = b; vertices[6] = 1f
-    vertices[7] = 0f; vertices[8] = 1f; vertices[9] = 0f
+    vertices[7] = nx; vertices[8] = ny; vertices[9] = nz
     // Rim vertices on a unit circle, alpha=0 so the colour fades out.
     for (s in 0 until sectors) {
         val ang = (s.toDouble() * 2.0 * Math.PI / sectors).toFloat()
@@ -176,9 +201,9 @@ internal fun buildSoftDiskMesh(
         vertices[off + 4] = g
         vertices[off + 5] = b
         vertices[off + 6] = 0f  // transparent rim
-        vertices[off + 7] = 0f
-        vertices[off + 8] = 1f
-        vertices[off + 9] = 0f
+        vertices[off + 7] = nx
+        vertices[off + 8] = ny
+        vertices[off + 9] = nz
     }
     // Triangle fan: centre → rim[s] → rim[s+1]
     val indices = ShortArray(sectors * 3)
@@ -191,70 +216,79 @@ internal fun buildSoftDiskMesh(
 }
 
 /**
- * Wide flat shield arch. Vertices are placed in **world coordinates**
- * (pre-scaled to SHIELD_ARCH_HALF_W × SHIELD_ARCH_HALF_H), so the
- * SceneObject just needs scale=1 + a translation to platform top.
- * This avoids the directional thickness distortion that comes from
- * scaling a unit half-circle non-uniformly via SceneObject.scaleX/Z.
+ * 3D shield bubble — translucent half-dome rising above the platform's
+ * forward half. Footprint at y=0 is the upper half (z >= 0) of the
+ * superellipse |x/a|^n + |z/b|^n = 1; vertical profile is hemispherical
+ * (`scale = sqrt(1 - tv²)`) so each horizontal slice is a smaller
+ * superellipse, converging to a single point at the pole.
  *
- * Three concentric rings (inner / mid / outer) offset along the
- * outward ellipse normal by ±thickness/2, with per-vertex alpha
- * 0 / peak / 0 → smooth glow band of constant world-space thickness
- * around the arc. Same triangle-strip wiring as the legacy dome.
+ * Per-vertex alpha is **PEAK at the base ring, fading to 0 at the pole**
+ * — the densest visible band sits where the dome meets the deck (a
+ * glowing skirt), with the dome's upper surface increasingly transparent.
+ * That fakes a force-field-fresnel look without needing a real shader,
+ * and keeps the gameplay-significant rim (where asteroids break against
+ * the shield) the most readable feature.
+ *
+ * Mesh is pre-scaled in world units; the SceneObject just translates the
+ * dome onto the platform with scale=1.
  */
 internal fun buildShieldArchMesh(engine: EngineJni): Long {
-    val sectors  = 64
+    val slices = 48        // around the half-perimeter (theta in [0, π])
+    val stacks = 12        // vertical levels from base ring to pole
     val halfW    = DraftCombat.SHIELD_ARCH_HALF_W
     val halfH    = DraftCombat.SHIELD_ARCH_HALF_H
-    val tHalf    = DraftCombat.SHIELD_ARCH_THICKNESS * 0.5f
+    val height   = DraftCombat.SHIELD_DOME_HEIGHT
     val n        = DraftCombat.SHIELD_ARCH_SHARPNESS
-    val pExp     = 2.0f / n            // parametric exponent: |c|^(2/n)
-    val nExp     = 2.0f * (n - 1f) / n // gradient exponent for normal
+    val pExp     = 2.0f / n
     val r = 0.45f; val g = 0.75f; val b = 1.00f
-    val alphas   = floatArrayOf(0f, DraftCombat.SHIELD_ARCH_PEAK_ALPHA, 0f)
+    val peakAlpha = DraftCombat.SHIELD_ARCH_PEAK_ALPHA
 
-    val nVertsPerArc = sectors + 1
-    val nVerts = nVertsPerArc * 3
+    val nVertsPerLevel = slices + 1
+    val nVerts = (stacks + 1) * nVertsPerLevel
     val verts  = FloatArray(nVerts * 10)
-    for (ring in 0..2) {
-        val offMul = (ring - 1).toFloat()  // -1, 0, +1
-        for (s in 0..sectors) {
-            val ang = (s.toDouble() * Math.PI / sectors).toFloat()
-            val c  = kotlin.math.cos(ang)
-            val sV = kotlin.math.sin(ang)  // ≥ 0 on [0, π]
+
+    for (j in 0..stacks) {
+        val tv = j.toFloat() / stacks                 // 0 at base, 1 at pole
+        val scale = kotlin.math.sqrt((1f - tv * tv).coerceAtLeast(0f))
+        // Dome rises in +Y. Under our tilted camera, +Y projects upward on
+        // screen — the dome appears as a bubble *above* the ship, between
+        // descending asteroids (yPos > 0) and the deck (y=0). With -Y the
+        // dome would collapse visually below the deck.
+        val y = +height * tv
+        val alpha = peakAlpha * (1f - tv)             // linear fade base → pole
+        for (i in 0..slices) {
+            val theta = (i.toDouble() / slices * Math.PI).toFloat()
+            val c  = kotlin.math.cos(theta)
+            val sV = kotlin.math.sin(theta)
             val signC = if (c >= 0f) 1f else -1f
             val absC  = kotlin.math.abs(c)
-            // Superellipse parametric form on the upper half:
-            //   x/a = sign(cos θ) · |cos θ|^(2/n),  z/b = sin θ^(2/n).
             val ux = signC * absC.pow(pExp)
             val uz = sV.pow(pExp)
-            // Outward normal = gradient of |x/a|^n + |z/b|^n − 1
-            // ∝ (sign(x)·|x/a|^(n−1)/a, sign(z)·|z/b|^(n−1)/b)
-            val gx = signC * absC.pow(nExp) / halfW
-            val gz = sV.pow(nExp) / halfH
-            val gl = kotlin.math.sqrt(gx * gx + gz * gz).coerceAtLeast(1e-6f)
-            val nx = gx / gl
-            val nz = gz / gl
-            val px = ux * halfW + nx * tHalf * offMul
-            val pz = uz * halfH + nz * tHalf * offMul
-            val off = (ring * nVertsPerArc + s) * 10
+            val px = ux * halfW * scale
+            val pz = uz * halfH * scale
+            val off = (j * nVertsPerLevel + i) * 10
             verts[off + 0] = px
-            verts[off + 1] = 0f
+            verts[off + 1] = y
             verts[off + 2] = pz
             verts[off + 3] = r; verts[off + 4] = g; verts[off + 5] = b
-            verts[off + 6] = alphas[ring]
+            verts[off + 6] = alpha
             verts[off + 7] = 0f; verts[off + 8] = 1f; verts[off + 9] = 0f
         }
     }
-    val indices = ShortArray(2 * sectors * 6)
+
+    // Quad strip between each pair of adjacent stacks. The top stack's
+    // vertices all collapse to the pole point — the resulting "quads"
+    // there become degenerate triangles (zero area) which the rasterizer
+    // discards naturally; alpha=0 at the pole would hide them anyway.
+    val nTris = stacks * slices * 2
+    val indices = ShortArray(nTris * 3)
     var idx = 0
-    for (strip in 0..1) {
-        val r0 = strip; val r1 = strip + 1
-        for (s in 0 until sectors) {
-            val v0 = (r0 * nVertsPerArc + s    ).toShort()
-            val v1 = (r0 * nVertsPerArc + s + 1).toShort()
-            val v2 = (r1 * nVertsPerArc + s    ).toShort()
-            val v3 = (r1 * nVertsPerArc + s + 1).toShort()
+    for (j in 0 until stacks) {
+        for (i in 0 until slices) {
+            val v0 = (j * nVertsPerLevel + i    ).toShort()
+            val v1 = (j * nVertsPerLevel + i + 1).toShort()
+            val v2 = ((j + 1) * nVertsPerLevel + i    ).toShort()
+            val v3 = ((j + 1) * nVertsPerLevel + i + 1).toShort()
             indices[idx++] = v0; indices[idx++] = v1; indices[idx++] = v2
             indices[idx++] = v1; indices[idx++] = v3; indices[idx++] = v2
         }
@@ -263,12 +297,16 @@ internal fun buildShieldArchMesh(engine: EngineJni): Long {
 }
 
 /**
- * Static turret base — a chamfered slab sitting on the platform with a
+ * Static turret base — a chamfered armoured box sitting on the platform with a
  * brightly-coloured top accent stripe (red for central, blue for sides).
  * Origin at platform-top centre so a SceneObject just translates without
- * rotating. The slab's top edge is the rotation pivot of the matching
- * barrel mesh; both meshes share their X=0 line and the slab's top z = +height.
+ * rotating. Extruded vertically so the base reads as a real 3D plinth under
+ * the tilted camera; vents and accent stripe stay as flat overlays on the
+ * top face.
  */
+internal const val TURRET_BASE_Y_HEIGHT: Float = 0.06f
+internal const val TURRET_BARREL_Y_HEIGHT: Float = 0.05f
+
 internal fun buildTurretBaseMesh(
     engine: EngineJni,
     halfW: Float, height: Float,
@@ -276,24 +314,29 @@ internal fun buildTurretBaseMesh(
     accentR: Float, accentG: Float, accentB: Float,
 ): Long {
     val mb = MeshBuilder()
+    val yTop = -TURRET_BASE_Y_HEIGHT
     // Body — caller-supplied tint (steel-blue for central, dark-blue
-    // for sides). Chamfered footprint breaks the rectangle silhouette
-    // so the base reads as engineered hex plating rather than a brick.
-    mb.addChamferedRect(-halfW, 0f, halfW, height, halfW * 0.30f, bodyR, bodyG, bodyB)
-    // Vent slits on the bottom flanks (deep dark, layered above body).
+    // for sides). Chamfered footprint + vertical extrusion gives the
+    // base real volume; side walls auto-shaded darker by the helper.
+    mb.addExtrudedChamferedRect(
+        -halfW, 0f, halfW, height, halfW * 0.30f,
+        bodyR, bodyG, bodyB,
+        yTop = yTop, yBottom = 0f,
+    )
+    // Vent slits on the bottom flanks (deep dark, on top face above body).
     val ventDark = floatArrayOf(0.05f, 0.06f, 0.09f)
     val ventTop = height * 0.55f
     val ventBot = height * 0.18f
     val ventInset = halfW * 0.08f
     val ventThick = halfW * 0.05f
     mb.addRect(-halfW + ventInset, ventBot, -halfW + ventInset + ventThick, ventTop,
-               ventDark[0], ventDark[1], ventDark[2], y = -0.005f)
+               ventDark[0], ventDark[1], ventDark[2], y = yTop - 0.005f)
     mb.addRect( halfW - ventInset - ventThick, ventBot,  halfW - ventInset, ventTop,
-               ventDark[0], ventDark[1], ventDark[2], y = -0.005f)
+               ventDark[0], ventDark[1], ventDark[2], y = yTop - 0.005f)
     // Top accent stripe — colour-codes the turret type.
     mb.addRect(-halfW * 0.72f, height * 0.72f,
                 halfW * 0.72f, height * 0.88f,
-               accentR, accentG, accentB, y = -0.005f)
+               accentR, accentG, accentB, y = yTop - 0.005f)
     return mb.upload(engine)
 }
 
@@ -314,13 +357,25 @@ internal fun buildTurretBarrelMesh(
     accentR: Float, accentG: Float, accentB: Float,
 ): Long {
     val mb = MeshBuilder()
-    val barrelStart = housingLength
-    val muzzleStart = housingLength + barrelLength
-    val tipZ        = muzzleStart + muzzleLength
-    // Palette — body tint comes from caller (steel-blue for central,
-    // dark-red for side barrels). Ring (muzzle collar) ≈ 60% of body
-    // for a "machined" look; fin (cooling element) ≈ 130% (clamped) for
-    // a brighter highlight; slits stay near-black for definition.
+    val barrelStart  = housingLength
+    val muzzleStart  = housingLength + barrelLength
+    val tipZ         = muzzleStart + muzzleLength
+    val collarHalfW  = housingHalfW * 1.05f
+    val collarHalfH  = housingLength * 0.10f          // total Z-extent of collar
+    val mantletHalfW = housingHalfW * 0.55f
+    val mantletEnd   = barrelStart + barrelLength * 0.05f
+    // Chamfers — clamped so they never exceed the section's smaller half-extent.
+    // Collar's Z-extent is 0.020, mantlet's is 0.017 — both too small for any
+    // meaningful chamfer, so those two sections fall back to plain rects in the
+    // outline (no chamfer corners). Housing & muzzle ring are tall enough for a
+    // proper chamfer.
+    val chH  = (housingHalfW * 0.30f).coerceAtMost((housingLength - collarHalfH * 0.5f) * 0.4f)
+    val chMz = (muzzleHalfW * 0.20f).coerceAtMost(muzzleLength * 0.4f)
+
+    val yTop = -TURRET_BARREL_Y_HEIGHT
+    // Palette — body tint comes from caller; ring (collar / muzzle ring) ≈
+    // 60% of body for a "machined" look; fin (cooling element) ≈ 130% for a
+    // brighter highlight; slits stay near-black for definition.
     val darkR = 0.08f; val darkG = 0.09f; val darkB = 0.12f
     val ringR = (bodyR * 0.6f).coerceIn(0f, 1f)
     val ringG = (bodyG * 0.6f).coerceIn(0f, 1f)
@@ -328,65 +383,99 @@ internal fun buildTurretBarrelMesh(
     val finR  = (bodyR * 1.30f).coerceIn(0f, 1f)
     val finG  = (bodyG * 1.30f).coerceIn(0f, 1f)
     val finB  = (bodyB * 1.30f).coerceIn(0f, 1f)
-    // 1. Pivot collar — small dark band straddling the rotation axis.
-    //    Sits half below the housing front so it's mostly hidden until
-    //    the housing rotates off-axis, then reads as a turret ring.
-    val collarHalfW = housingHalfW * 1.05f
-    val collarHalfH = housingLength * 0.10f
-    mb.addChamferedRect(
+
+    // Single CCW outline of the union (collar ∪ housing ∪ mantlet ∪ barrel
+    // ∪ muzzle ring). One monolithic extruded polygon = no internal junction
+    // walls = no rotational z-fight. Section colour differentiation comes
+    // from flat 2D overlays on the top face below.
+    //
+    // Vertex order: starts at collar back-right, goes CCW (up the right
+    // side, across the muzzle front, down the left side, across the collar
+    // back). 28 verts total — concave at each inward step (collar→housing,
+    // housing→mantlet, mantlet→barrel) and at each outward step (back from
+    // muzzle, mantlet, housing, collar).
+    val outline = listOf(
+        // RIGHT side, going forward (back → bow)
+         collarHalfW         to -collarHalfH * 0.5f,                 //  0
+         collarHalfW         to  collarHalfH * 0.5f,                 //  1
+        (housingHalfW - chH) to  collarHalfH * 0.5f,                 //  2  inward step → housing
+         housingHalfW        to  collarHalfH * 0.5f + chH,           //  3
+         housingHalfW        to  housingLength - chH,                //  4
+        (housingHalfW - chH) to  housingLength,                      //  5
+         mantletHalfW        to  housingLength,                      //  6  inward step → mantlet
+         mantletHalfW        to  mantletEnd,                         //  7
+         barrelHalfW         to  mantletEnd,                         //  8  inward step → barrel
+         barrelHalfW         to  muzzleStart,                        //  9
+        (muzzleHalfW - chMz) to  muzzleStart,                        // 10  outward step → muzzle ring
+         muzzleHalfW         to  muzzleStart + chMz,                 // 11
+         muzzleHalfW         to  tipZ - chMz,                        // 12
+        (muzzleHalfW - chMz) to  tipZ,                               // 13
+        // FRONT edge (across muzzle tip)
+        (-muzzleHalfW + chMz) to  tipZ,                              // 14
+         -muzzleHalfW         to  tipZ - chMz,                       // 15
+        // LEFT side, going back (bow → stern)
+         -muzzleHalfW         to  muzzleStart + chMz,                // 16
+        (-muzzleHalfW + chMz) to  muzzleStart,                       // 17
+         -barrelHalfW         to  muzzleStart,                       // 18  inward step
+         -barrelHalfW         to  mantletEnd,                        // 19
+         -mantletHalfW        to  mantletEnd,                        // 20  outward step
+         -mantletHalfW        to  housingLength,                     // 21
+        (-housingHalfW + chH) to  housingLength,                     // 22  outward step → housing
+         -housingHalfW        to  housingLength - chH,               // 23
+         -housingHalfW        to  collarHalfH * 0.5f + chH,          // 24
+        (-housingHalfW + chH) to  collarHalfH * 0.5f,                // 25
+         -collarHalfW         to  collarHalfH * 0.5f,                // 26  outward step → collar
+         -collarHalfW         to -collarHalfH * 0.5f,                // 27
+        // BACK edge closes implicitly between vert 27 and vert 0.
+    )
+    mb.addExtrudedPolygon(outline, bodyR, bodyG, bodyB, yTop = yTop, yBottom = 0f)
+
+    // Top-face colour overlays — distinct sections paint over the body grey.
+    // ovY sits 0.005 above (camera-near of) the body's top face so the LESS
+    // depth test picks the overlay deterministically.
+    val ovY = yTop - 0.005f
+    // Collar tint — plain rect (its Z-extent is too short for a chamfer).
+    mb.addRect(
         -collarHalfW, -collarHalfH * 0.5f,
          collarHalfW,  collarHalfH * 0.5f,
-        collarHalfW * 0.25f,
-        ringR, ringG, ringB,
+        ringR, ringG, ringB, y = ovY,
     )
-    // 2. Housing — chamfered armoured box in accent colour.
+    // Housing accent.
     mb.addChamferedRect(
         -housingHalfW, collarHalfH * 0.5f,
          housingHalfW, housingLength,
-        housingHalfW * 0.30f,
-        accentR, accentG, accentB,
+        chH,
+        accentR, accentG, accentB, y = ovY,
     )
-    // 3. Two horizontal "vent slits" across the housing flanks.
-    val slitTop = housingLength * 0.30f
-    val slitBot = housingLength * 0.18f
+    // Muzzle ring tint.
+    mb.addChamferedRect(
+        -muzzleHalfW, muzzleStart,
+         muzzleHalfW, tipZ,
+        chMz,
+        ringR, ringG, ringB, y = ovY,
+    )
+
+    // Inner-detail overlays (slits, fin, bore). Slightly above the colour
+    // overlays so they win the LESS test.
+    val ovY2 = ovY - 0.001f
+    val slitTop  = housingLength * 0.30f
+    val slitBot  = housingLength * 0.18f
     val slit2Top = housingLength * 0.66f
     val slit2Bot = housingLength * 0.54f
     mb.addRect(-housingHalfW * 0.78f, slitBot,  housingHalfW * 0.78f, slitTop,
-               darkR, darkG, darkB, y = -0.005f)
+               darkR, darkG, darkB, y = ovY2)
     mb.addRect(-housingHalfW * 0.78f, slit2Bot, housingHalfW * 0.78f, slit2Top,
-               darkR, darkG, darkB, y = -0.005f)
-    // 4. Mantlet — short trapezoid-ish chunk where the barrel plugs into
-    //    the housing front. Rendered as a chamfered rect for sci-fi feel.
-    val mantletEnd = barrelStart + barrelLength * 0.05f
-    mb.addChamferedRect(
-        -housingHalfW * 0.55f, barrelStart,
-         housingHalfW * 0.55f, mantletEnd,
-        housingHalfW * 0.20f,
-        bodyR, bodyG, bodyB,
-    )
-    // 5. Barrel — narrow rectangle in body grey.
-    mb.addRect(-barrelHalfW, mantletEnd, barrelHalfW, muzzleStart,
-               bodyR, bodyG, bodyB)
-    // 6. Cooling fin — thin lighter band mid-barrel for visual interest.
+               darkR, darkG, darkB, y = ovY2)
     val finCenter = (mantletEnd + muzzleStart) * 0.5f
     val finHalfL  = barrelLength * 0.04f
     val finHalfW  = barrelHalfW * 1.6f
     mb.addRect(-finHalfW, finCenter - finHalfL,
                 finHalfW, finCenter + finHalfL,
-               finR, finG, finB, y = -0.005f)
-    // 7. Muzzle ring — flange at the tip, slightly wider than barrel.
-    mb.addChamferedRect(
-        -muzzleHalfW, muzzleStart,
-         muzzleHalfW, tipZ,
-        muzzleHalfW * 0.20f,
-        ringR, ringG, ringB,
-    )
-    // 8. Bore — dark inner core at the muzzle so the tip reads as a
-    //    barrel opening rather than a solid plug.
+               finR, finG, finB, y = ovY2)
     val boreHalfW = barrelHalfW * 0.75f
     mb.addRect(-boreHalfW, muzzleStart + muzzleLength * 0.22f,
                 boreHalfW, tipZ - muzzleLength * 0.10f,
-               darkR, darkG, darkB, y = -0.005f)
+               darkR, darkG, darkB, y = ovY2)
     return mb.upload(engine)
 }
 
@@ -399,27 +488,39 @@ internal fun buildTurretBarrelMesh(
  */
 internal fun buildLaserInstallationMesh(engine: EngineJni): Long {
     val mb = MeshBuilder()
-    // Sizes — 1.6× the original footprint for a more substantial dome.
     val baseHalfW  = 0.120f
-    val baseHeight = 0.056f
-    val domeRadius = 0.136f
+    val baseHeight = 0.056f          // Z-extent of the slab
+    val domeRadius = 0.110f          // base-ring radius of the hemispherical dome
+    val domeHeight = 0.110f          // Y-extent (apex height above slab top)
+    val yTop = -TURRET_BASE_Y_HEIGHT
     // Palette — cool grey-blue body with cyan seam accent.
     val baseR = 0.22f; val baseG = 0.26f; val baseB = 0.32f
     val domeR = 0.30f; val domeG = 0.36f; val domeB = 0.44f
     val accR  = 0.45f; val accG  = 0.85f; val accB  = 1.00f
-    // 1. Static slab base — chamfered for sci-fi feel.
-    mb.addChamferedRect(
+    // 1. Static slab base — extruded chamfered prism.
+    mb.addExtrudedChamferedRect(
         -baseHalfW, 0f, baseHalfW, baseHeight,
         baseHalfW * 0.30f,
         baseR, baseG, baseB,
+        yTop = yTop, yBottom = 0f,
     )
-    // 2. Dome — sealed half-disk sitting on the base top.
-    mb.addHalfDisk(0f, baseHeight, domeRadius, domeR, domeG, domeB, y = -0.002f)
-    // 3. Cyan accent stripe at the seam between base and dome.
+    // 2. Cyan accent stripe at the slab/dome seam — sits on the slab's
+    //    top face just behind the dome's base ring footprint.
     mb.addRect(
         -baseHalfW * 0.85f, baseHeight - 0.008f,
          baseHalfW * 0.85f, baseHeight + 0.005f,
-        accR, accG, accB, y = -0.004f,
+        accR, accG, accB, y = yTop - 0.004f,
+    )
+    // 3. 3D hemispherical dome — radar-style bulb sitting on the slab top.
+    //    Centred at the slab's z-mid and apex pointing toward camera. The
+    //    base ring sits a hair (0.001) above slab top so LESS-depth picks
+    //    the dome over the slab's chamfered top face along the seam.
+    mb.addHemisphere(
+        cx = 0f, cz = baseHeight * 0.5f,
+        radius = domeRadius,
+        baseY = yTop - 0.001f,
+        apexY = yTop - domeHeight,
+        r = domeR, g = domeG, b = domeB,
     )
     return mb.upload(engine)
 }
@@ -442,51 +543,61 @@ internal fun buildRocketSiloMesh(engine: EngineJni): Long {
     val rimHalfW  = 0.108f
     val rimTopZ   = 0.150f          // = ROCKET_SILO_MUZZLE_OFFSET + 0.02
     val openHalfW = 0.070f
-    // Palette — body grey-blue (matches turret bases), warm orange for
-    // warning stripes, very dark for the open launch tube.
-    val baseR = 0.22f; val baseG = 0.24f; val baseB = 0.30f
-    val midR  = 0.32f; val midG  = 0.34f; val midB  = 0.40f
-    val rimR  = 0.40f; val rimG  = 0.42f; val rimB  = 0.48f
+    // Palette — warm industrial steel (rust/bronze) so the silo reads
+    // distinctly against the cool grey-blue hull instead of blending in.
+    // Warm orange warning stripes flank the launch opening; very dark
+    // launch tube reads as a deep cavity.
+    val baseR = 0.42f; val baseG = 0.32f; val baseB = 0.22f
+    val midR  = 0.55f; val midG  = 0.42f; val midB  = 0.28f
+    val rimR  = 0.68f; val rimG  = 0.52f; val rimB  = 0.32f
     val warnR = 0.95f; val warnG = 0.55f; val warnB = 0.20f
     val darkR = 0.04f; val darkG = 0.05f; val darkB = 0.08f
-    // 1. Base/foundation — chamfered slab on the platform.
-    mb.addChamferedRect(
+    // Three Y tiers so the silo reads as stepped: foundation slab is the
+    // shortest, mid tower mid-height, rim collar tallest. Total height
+    // bumped up so the silo stands above the turret bases and is harder
+    // to lose against the deck under perspective.
+    val baseYTop = -TURRET_BASE_Y_HEIGHT * 0.85f         // foundation
+    val midYTop  = -TURRET_BASE_Y_HEIGHT - 0.040f        // mid tower
+    val rimYTop  = -TURRET_BASE_Y_HEIGHT - 0.080f        // rim/collar (tallest)
+    // 1. Base/foundation — extruded chamfered prism on the platform.
+    mb.addExtrudedChamferedRect(
         -baseHalfW, 0f, baseHalfW, baseTopZ,
         baseHalfW * 0.30f,
         baseR, baseG, baseB,
+        yTop = baseYTop, yBottom = 0f,
     )
-    // 2. Mid tower body — chamfered rect, slightly narrower than base.
-    mb.addChamferedRect(
+    // 2. Mid tower body — narrower box stepped above the foundation.
+    mb.addExtrudedChamferedRect(
         -midHalfW, baseTopZ, midHalfW, midTopZ,
         midHalfW * 0.22f,
         midR, midG, midB,
+        yTop = midYTop, yBottom = baseYTop,
     )
-    // 3. Rim/collar — wider band at the top giving the silo its mouth.
-    mb.addChamferedRect(
+    // 3. Rim/collar — widest at the top, tallest of the three tiers.
+    mb.addExtrudedChamferedRect(
         -rimHalfW, midTopZ, rimHalfW, rimTopZ,
         rimHalfW * 0.25f,
         rimR, rimG, rimB,
+        yTop = rimYTop, yBottom = midYTop,
     )
-    // 4. Two vertical warning stripes flanking the opening on the mid
-    //    body. Layered above body to clear the LESS depth test.
+    // 4. Two vertical warning stripes on the mid body's top face.
     val stripeHalfW = 0.012f
     val stripeMidX = midHalfW * 0.55f
     mb.addRect(
         -stripeMidX - stripeHalfW, baseTopZ + 0.010f,
         -stripeMidX + stripeHalfW, midTopZ - 0.010f,
-        warnR, warnG, warnB, y = -0.003f,
+        warnR, warnG, warnB, y = midYTop - 0.003f,
     )
     mb.addRect(
          stripeMidX - stripeHalfW, baseTopZ + 0.010f,
          stripeMidX + stripeHalfW, midTopZ - 0.010f,
-        warnR, warnG, warnB, y = -0.003f,
+        warnR, warnG, warnB, y = midYTop - 0.003f,
     )
-    // 5. Launch opening — dark rectangle cut into the top. Extends a bit
-    //    below the rim so the dark tube reads as deep, not just a slit.
+    // 5. Launch opening — dark rectangle cut into the rim's top face.
     mb.addRect(
         -openHalfW, midTopZ - 0.040f,
          openHalfW, rimTopZ - 0.005f,
-        darkR, darkG, darkB, y = -0.006f,
+        darkR, darkG, darkB, y = rimYTop - 0.003f,
     )
     return mb.upload(engine)
 }

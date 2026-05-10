@@ -347,6 +347,22 @@ internal class MissionRunner(
         centralTargetId = if (centralTargetId == picked.id) null else picked.id
     }
 
+    /**
+     * 3D-pivot Phase 2/3: priority-lock by stable asteroid id. The
+     * Activity touch handler asks the engine's pickable buffer which
+     * SceneObject is under the finger, decodes back to the asteroid id,
+     * and routes here. Toggle behaviour matches `handleWorldTap`:
+     * tapping the currently-locked asteroid releases the lock, tapping
+     * a different one switches.
+     */
+    fun handleAsteroidPickedById(asteroidId: Long) {
+        if (gameState != GameState.PLAYING) return
+        // Only honour live asteroids — defensive against the picking
+        // buffer being a frame stale and pointing at one that just died.
+        val live = asteroids.firstOrNull { it.id == asteroidId && it.hp > 0 } ?: return
+        centralTargetId = if (centralTargetId == live.id) null else live.id
+    }
+
     fun handleShieldDown() {
         if (gameState != GameState.PLAYING) return
         shieldRecharging = true
@@ -680,11 +696,22 @@ internal class MissionRunner(
                         aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
                     )
                 else PlainBulletBehavior()
+            // 3D-pivot Phase 2/3: aim the bullet at the target's full
+            // (x, y, z), not just (x, z). Muzzle stays on the deck
+            // plane (Y=0); velocity vector is the unit direction to the
+            // asteroid scaled by projectile speed.
+            val tdx = centralTarget.xPos - muzzleX
+            val tdy = centralTarget.yPos - 0f
+            val tdz = centralTarget.zPos - muzzleZ
+            val tlen = kotlin.math.sqrt(tdx * tdx + tdy * tdy + tdz * tdz).coerceAtLeast(1e-4f)
+            val pSpeed = weapon.projectileSpeed
             effects.add(Projectile(
                 x  = muzzleX,
+                y  = 0f,
                 z  = muzzleZ,
-                vx = sinA * weapon.projectileSpeed,
-                vz = cosA * weapon.projectileSpeed,
+                vx = tdx / tlen * pSpeed,
+                vy = tdy / tlen * pSpeed,
+                vz = tdz / tlen * pSpeed,
                 damage = weaponDamage,
                 halfW = weapon.projectileHalfW,
                 halfH = weapon.projectileHalfH,
@@ -748,10 +775,17 @@ internal class MissionRunner(
                 // they read as supporting artillery rather than a stream
                 // of small projectiles.
                 val sideDamage = (effectiveTurretDamage * DraftCombat.SIDE_DAMAGE_MUL).toInt()
+                // 3D-pivot Phase 2/3: aim at target's full (x, y, z).
+                val tdx = target.xPos - muzzleX
+                val tdy = target.yPos - 0f
+                val tdz = target.zPos - muzzleZ
+                val tlen = kotlin.math.sqrt(tdx * tdx + tdy * tdy + tdz * tdz).coerceAtLeast(1e-4f)
+                val sideSpeed = DraftCombat.SIDE_BULLET_SPEED
                 effects.add(Projectile(
-                    x  = muzzleX, z = muzzleZ,
-                    vx = nx * DraftCombat.SIDE_BULLET_SPEED,
-                    vz = nz * DraftCombat.SIDE_BULLET_SPEED,
+                    x  = muzzleX, y = 0f, z = muzzleZ,
+                    vx = tdx / tlen * sideSpeed,
+                    vy = tdy / tlen * sideSpeed,
+                    vz = tdz / tlen * sideSpeed,
                     damage     = sideDamage,
                     halfW      = DraftCombat.SIDE_BULLET_HALF_W,
                     halfH      = DraftCombat.SIDE_BULLET_HALF_H,
@@ -815,13 +849,13 @@ internal class MissionRunner(
                                 other.hp -= DraftCombat.EXPLOSIVE_AOE_DAMAGE
                             }
                         }
-                        vfx.spawnExplosion(a.xPos, a.zPos, DraftCombat.EXPLOSIVE_AOE_RADIUS)
+                        vfx.spawnExplosion(a.xPos, a.yPos, a.zPos, DraftCombat.EXPLOSIVE_AOE_RADIUS)
                     }
                     AsteroidType.ENERGY -> {
                         triggeredBuff = true
                         val et = DraftCombat.FLASH_TINT_ENERGY
                         flashes.add(Flash(
-                            x = a.xPos, z = a.zPos,
+                            x = a.xPos, y = a.yPos, z = a.zPos,
                             life = DraftCombat.FLASH_LIFE_SEC,
                             maxLife = DraftCombat.FLASH_LIFE_SEC,
                             halfMax = DraftCombat.FLASH_HALF * 1.5f,
@@ -833,7 +867,7 @@ internal class MissionRunner(
                     AsteroidType.HEAVY -> {
                         val dt2 = DraftCombat.FLASH_TINT_DEATH
                         flashes.add(Flash(
-                            x = a.xPos, z = a.zPos,
+                            x = a.xPos, y = a.yPos, z = a.zPos,
                             life = DraftCombat.FLASH_LIFE_SEC,
                             maxLife = DraftCombat.FLASH_LIFE_SEC,
                             tintR = dt2[0], tintG = dt2[1], tintB = dt2[2], tintA = dt2[3],
@@ -846,7 +880,7 @@ internal class MissionRunner(
                             AsteroidType.HEAVY -> floatArrayOf(0.85f, 0.55f, 0.50f)
                             else               -> floatArrayOf(0.95f, 0.92f, 0.88f)
                         }
-                        vfx.spawnAsteroidDeathFX(a.xPos, a.zPos, tint)
+                        vfx.spawnAsteroidDeathFX(a.xPos, a.yPos, a.zPos, tint)
                     }
                 }
             }
@@ -892,10 +926,14 @@ internal class MissionRunner(
         for (a in asteroids) {
             // E10.3 — snapshot prev z + rotation before mutating so the
             // motion-vector at this frame's render reads as one tick of
-            // fall + spin (correct delta for motion blur).
+            // fall + spin (correct delta for motion blur). 3D pivot
+            // Phase 1: also track prevY so motion-blur catches the
+            // depth approach.
             a.prevZ        = a.zPos
+            a.prevY        = a.yPos
             a.prevRotation = a.rotation
             a.zPos     -= a.speed * dt
+            a.yPos     -= a.depthSpeed * dt
             a.rotation += a.rotationSpeed * dt
         }
         // Asteroid hit detection — shield first (asteroid breaks ON the
@@ -906,46 +944,66 @@ internal class MissionRunner(
         val asteroidIter = asteroids.iterator()
         while (asteroidIter.hasNext()) {
             val a = asteroidIter.next()
-            // 1. Shield-arch contact (only if shield up + within X coverage).
-            //    Compute the arch Z at this asteroid's X via the same
-            //    superellipse used to author the mesh: |x/a|^n + |z/b|^n = 1.
+            // 1. Shield-dome contact — 3D check (asteroid centre inside the
+            //    dome's hemispherical volume). The dome's footprint at deck
+            //    level is the half-superellipse |x/a|^n + |z/b|^n ≤ 1, z≥0;
+            //    each height y within [0, SHIELD_DOME_HEIGHT] has a smaller
+            //    footprint scaled by sqrt(1 − (y/H)²). Asteroids descend
+            //    through y ∈ [0, ASTEROID_SPAWN_Y_DEPTH] in concert with
+            //    z ∈ [ASTEROID_SPAWN_Z, PLATFORM_TOP_Z], so their trajectory
+            //    pierces the dome surface mid-air rather than at deck level
+            //    — which is exactly what the visual demands now that the
+            //    dome is a real 3D bubble instead of a flat 2D arch.
             if (shieldHp > 0f) {
-                val xRatio = kotlin.math.abs(a.xPos) / DraftCombat.SHIELD_ARCH_HALF_W
-                if (xRatio < 1f) {
-                    val n = DraftCombat.SHIELD_ARCH_SHARPNESS
-                    val archBaseZ = DraftCombat.PLATFORM_TOP_Z +
-                                    DraftCombat.SHIELD_ARCH_LIFT_FRAC *
-                                        DraftCombat.SHIELD_ARCH_HALF_H
-                    val archZ = archBaseZ + DraftCombat.SHIELD_ARCH_HALF_H *
-                        (1f - xRatio.pow(n)).pow(1f / n)
-                    if (a.zPos - a.half <= archZ) {
-                        // Shield contact — asteroid breaks on the arch.
-                        // Full absorb when shield can soak it; partial
-                        // absorb spills overflow into the platform.
-                        // While the player is recharging, incoming damage
-                        // is reduced by the SHIELD_RECHARGE_DAMAGE_MUL
-                        // factor — explicit benefit for actively topping
-                        // up the shield mid-impact.
-                        val dmgF = a.platformDmg.toFloat() * (
-                            if (shieldRecharging) DraftCombat.SHIELD_RECHARGE_DAMAGE_MUL
-                            else 1f
-                        )
-                        if (shieldHp >= dmgF) {
-                            shieldHp -= dmgF
-                        } else {
-                            val overflow = (dmgF - shieldHp).toInt().coerceAtLeast(1)
-                            shieldHp = 0f
-                            platformDamage += overflow
+                val H = DraftCombat.SHIELD_DOME_HEIGHT
+                val baseZ = DraftCombat.PLATFORM_TOP_Z +
+                            DraftCombat.SHIELD_ARCH_LIFT_FRAC *
+                                DraftCombat.SHIELD_ARCH_HALF_H
+                // Dome SceneObject sits at world y = SHIELD_DOME_LIFT_Y so its
+                // base ring just clears the deck top. We undo that lift to
+                // get mesh-local Y for the cross-section formula.
+                val meshY = a.yPos - DraftCombat.SHIELD_DOME_LIFT_Y
+                if (meshY in 0f..H) {
+                    val tv = meshY / H
+                    val scale = kotlin.math.sqrt((1f - tv * tv).coerceAtLeast(0f))
+                    if (scale > 0f) {
+                        val halfW = DraftCombat.SHIELD_ARCH_HALF_W * scale
+                        val halfH = DraftCombat.SHIELD_ARCH_HALF_H * scale
+                        val zLocal = a.zPos - baseZ
+                        if (zLocal in 0f..halfH) {
+                            val xRatio = kotlin.math.abs(a.xPos) / halfW
+                            val zRatio = zLocal / halfH
+                            val n = DraftCombat.SHIELD_ARCH_SHARPNESS
+                            val inside = xRatio.pow(n) + zRatio.pow(n) <= 1f
+                            if (inside) {
+                                // Asteroid centre is inside the dome volume —
+                                // it pierced the outer surface this tick. Same
+                                // damage routing as before; flash now placed at
+                                // the asteroid's actual 3D contact position so
+                                // the explosion is anchored to the dome surface
+                                // it broke against (not at deck level).
+                                val dmgF = a.platformDmg.toFloat() * (
+                                    if (shieldRecharging) DraftCombat.SHIELD_RECHARGE_DAMAGE_MUL
+                                    else 1f
+                                )
+                                if (shieldHp >= dmgF) {
+                                    shieldHp -= dmgF
+                                } else {
+                                    val overflow = (dmgF - shieldHp).toInt().coerceAtLeast(1)
+                                    shieldHp = 0f
+                                    platformDamage += overflow
+                                }
+                                val sh = DraftCombat.FLASH_TINT_SHIELD
+                                flashes.add(Flash(
+                                    x = a.xPos, y = a.yPos, z = a.zPos,
+                                    life = DraftCombat.FLASH_LIFE_SEC,
+                                    maxLife = DraftCombat.FLASH_LIFE_SEC,
+                                    tintR = sh[0], tintG = sh[1], tintB = sh[2], tintA = sh[3],
+                                ))
+                                asteroidIter.remove()
+                                continue
+                            }
                         }
-                        val sh = DraftCombat.FLASH_TINT_SHIELD
-                        flashes.add(Flash(
-                            x = a.xPos, z = archZ,
-                            life = DraftCombat.FLASH_LIFE_SEC,
-                            maxLife = DraftCombat.FLASH_LIFE_SEC,
-                            tintR = sh[0], tintG = sh[1], tintB = sh[2], tintA = sh[3],
-                        ))
-                        asteroidIter.remove()
-                        continue
                     }
                 }
             }
@@ -1017,17 +1075,29 @@ internal class MissionRunner(
                         }
                         val hpVal = (mission.asteroidHp * type.hpMul).toInt()
                             .coerceAtLeast(1)
+                        // 3D-pivot Phase 1: pick depthSpeed so the
+                        // asteroid reaches yPos = 0 at the same instant
+                        // its zPos hits PLATFORM_TOP_Z. Spawn at
+                        // ASTEROID_SPAWN_Z (lower than SCREEN_TOP_Z —
+                        // see Combat.kt comment about FOV cone).
+                        val zPosSpawn = DraftCombat.ASTEROID_SPAWN_Z
+                        val zFall     = zPosSpawn - DraftCombat.PLATFORM_TOP_Z
+                        val yFall     = DraftCombat.ASTEROID_SPAWN_Y_DEPTH
+                        val asteroidSpeed = mission.asteroidSpeed * type.speedMul
+                        val depthSpeed = if (zFall > 0f) asteroidSpeed * yFall / zFall else 0f
                         asteroids.add(
                             Asteroid(
                                 id    = newAsteroidId(),
                                 xPos  = rx,
-                                zPos  = DraftCombat.SCREEN_TOP_Z - half,
+                                yPos  = DraftCombat.ASTEROID_SPAWN_Y_DEPTH,
+                                zPos  = zPosSpawn,
                                 hp    = hpVal,
                                 maxHp = hpVal,
                                 rotation      = phase,
                                 rotationSpeed = spin,
                                 type          = type,
-                                speed         = mission.asteroidSpeed * type.speedMul,
+                                speed         = asteroidSpeed,
+                                depthSpeed    = depthSpeed,
                                 half          = half,
                                 platformDmg   = (DraftCombat.PLATFORM_DMG_PER_HIT * type.platformDmgMul)
                                                    .toInt().coerceAtLeast(1),
@@ -1170,11 +1240,10 @@ internal class MissionRunner(
                     launchZ      = spawnZ,
                 ),
             ))
-            // Spring-launch puff at the silo opening — points straight up
-            // since the rocket leaves the tube vertically.
-            vfx.spawnMuzzleBlast(xPos, zPos, 0f, 1f,
-                             DraftCombat.ROCKET_HALF_W * 1.4f,
-                             DraftCombat.FLASH_TINT_MUZZLE)
+            // Spring-launch dust puff at the silo opening — radial smoke
+            // cloud, NOT a gunshot muzzle blast (rockets are mechanically
+            // ejected, ignition happens later in the FLYING phase).
+            vfx.spawnRocketLaunchPuff(xPos, 0f, zPos)
         }
     }
 

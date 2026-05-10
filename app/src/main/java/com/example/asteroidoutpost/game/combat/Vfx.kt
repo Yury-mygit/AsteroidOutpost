@@ -11,6 +11,12 @@ package com.example.asteroidoutpost.game.combat
  */
 internal data class Flash(
     val x: Float, val z: Float,
+    // 3D-pivot Phase 2/3: optional Y depth so flashes spawned at the
+    // asteroid's actual position (mid-flight hits, AoE explosions) sit
+    // on the asteroid, not on the deck plane. Default 0 keeps muzzle /
+    // shield-recharge / death-flash callers (which spawn at Y=0)
+    // unchanged.
+    val y: Float = 0f,
     var life: Float, val maxLife: Float,
     // Peak half-size at flash midpoint. Default = small per-asteroid death
     // flash; AoE impacts spawn larger flashes sized to the explosion radius.
@@ -57,6 +63,8 @@ internal data class Flash(
  */
 internal data class Fireball(
     val x: Float, val z: Float,
+    // 3D-pivot Phase 2/3 — see Flash.y above for the same rationale.
+    val y: Float = 0f,
     var life: Float, val maxLife: Float,
     val baseRadius: Float,
     val intensity: Float = 1f,

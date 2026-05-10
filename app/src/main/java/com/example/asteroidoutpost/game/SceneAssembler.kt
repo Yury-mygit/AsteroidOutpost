@@ -14,6 +14,18 @@ import com.example.asteroidoutpost.game.combat.Particle
 import com.example.asteroidoutpost.game.combat.Projectile
 import com.example.asteroidoutpost.game.combat.WeaponEffect
 import com.example.asteroidoutpost.game.combat.packParticles
+import com.example.asteroidoutpost.game.content.TURRET_BASE_Y_HEIGHT
+
+/**
+ * Asteroid SceneObject IDs are computed as [ASTEROID_PICK_ID_BASE] + the
+ * asteroid's stable `Long` id. The engine's pickable buffer (one int per
+ * pixel) returns this id when the player taps an asteroid; the touch
+ * handler decodes it via `pickedSceneId - ASTEROID_PICK_ID_BASE`. The
+ * base sits well above all other static IDs (platform = 100, projectiles
+ * = 300+i, HP-bars = 400/401+, fireballs = 800+i, nebulae = 2000+i) so
+ * decoding is unambiguous.
+ */
+internal const val ASTEROID_PICK_ID_BASE: Int = 100_000
 
 /**
  * Game → engine adapter. Reads game-side state (asteroids, projectiles,
@@ -110,11 +122,18 @@ internal class SceneAssembler(
             // mesh has its origin at the pivot atop the base and rotates
             // via SceneObject.rotationY around its own model origin, so
             // the offset trick used for the legacy quad isn't needed.
-            // Deck mounts use y = -0.02 so they pass the LESS depth test
-            // against the hull mesh (whose vertices are at y = 0 for the
-            // body, y = -0.005 for layered details). Without the nudge
-            // equal-depth fragments would be rejected and the turrets
-            // would render under the hull silhouette.
+            //
+            // Phase 4a: bases are 3D extruded chamfered prisms — mesh-local
+            // Y goes from yBottom=0 down to yTop=-TURRET_BASE_Y_HEIGHT
+            // (camera-near = more negative Y). Base sits at world y=-0.02
+            // so its bottom hovers a hair above the hull plane (no LESS
+            // z-fight). The rotating barrel mesh extends mesh-local
+            // y=0..-TURRET_BARREL_Y_HEIGHT and sits on the base top in
+            // world space, so its SceneObject y = base_y - base_height,
+            // less an extra 0.003 lift toward the camera so the barrel
+            // wall's bottom edge isn't exactly coplanar with the base top
+            // face (otherwise the rotating barrel sweeps an LESS-rejected
+            // ring across the base top — reads as a heat-shimmer artifact).
             SceneObject(
                 id         = 109,
                 meshHandle = centralBaseMeshHandle,
@@ -127,7 +146,7 @@ internal class SceneAssembler(
                 id         = 119,
                 meshHandle = centralBarrelMeshHandle,
                 x          = DraftCombat.CENTRAL_TURRET_X,
-                y          = -0.03f,
+                y          = -0.02f - TURRET_BASE_Y_HEIGHT - 0.003f,
                 z          = DraftCombat.CENTRAL_TURRET_BASE_Z,
                 rotationY  = centralTurretAngle,
                 scale      = 1f,
@@ -142,7 +161,9 @@ internal class SceneAssembler(
             SceneObject(
                 id         = 120,
                 meshHandle = sideBarrelMeshHandle,
-                x          = turretXs[0], y = -0.03f, z = DraftCombat.TURRET_TOP_Z,
+                x          = turretXs[0],
+                y          = -0.02f - TURRET_BASE_Y_HEIGHT - 0.003f,
+                z          = DraftCombat.TURRET_TOP_Z,
                 rotationY  = sideTurretAngles[0],
                 scale      = 1f,
             ),
@@ -156,7 +177,9 @@ internal class SceneAssembler(
             SceneObject(
                 id         = 121,
                 meshHandle = sideBarrelMeshHandle,
-                x          = turretXs[1], y = -0.03f, z = DraftCombat.TURRET_TOP_Z,
+                x          = turretXs[1],
+                y          = -0.02f - TURRET_BASE_Y_HEIGHT - 0.003f,
+                z          = DraftCombat.TURRET_TOP_Z,
                 rotationY  = sideTurretAngles[1],
                 scale      = 1f,
             ),
@@ -184,47 +207,83 @@ internal class SceneAssembler(
             // Per-asteroid mesh chosen at spawn (5 distinct .glbs across 5 types
             // + grey variant pool). Roughly unit bbox; scale by `half` so FAST
             // asteroids look small and HEAVY ones look chunky.
-            // E10.3 — build prev_model from prevZ + prevRotation cached at the
-            // top of the asteroid movement step. xPos doesn't change so we
-            // reuse it for both matrices; the prev SceneObject is a temporary
-            // we only ever ask `modelMatrix()` of.
+            //
+            // 3D-pivot Phase 2/3: SceneObject.id uses ASTEROID_PICK_ID_BASE +
+            // a.id.toInt() (stable across frames) instead of the
+            // list-index-based 200+i. The engine's pickable buffer
+            // returns this id when the player taps an asteroid; we
+            // decode the asteroid.id back from it on the touch side.
+            //
+            // E10.3 — prev_model from prevZ/prevY/prevRotation cached at
+            // the top of the asteroid movement step.
+            val sceneId = ASTEROID_PICK_ID_BASE + a.id.toInt()
             val prev = SceneObject(
-                id         = 200 + i,
+                id         = sceneId,
                 meshHandle = 0L,
-                x          = a.xPos, y = 0f, z = a.prevZ,
+                x          = a.xPos, y = a.prevY, z = a.prevZ,
                 rotationZ  = a.prevRotation,
                 scale      = a.half,
             ).modelMatrix()
             SceneObject(
-                id              = 200 + i,
+                id              = sceneId,
                 meshHandle      = if (a.meshHandle != 0L) a.meshHandle else asteroidMeshGrey1,
-                x               = a.xPos, y = 0f, z = a.zPos,
+                x               = a.xPos, y = a.yPos, z = a.zPos,
                 rotationZ       = a.rotation,
                 scale           = a.half,
                 prevModelMatrix = prev,
             )
         } + effects.filterIsInstance<Projectile>().mapIndexed { i, b ->
-            // Projectile model — long axis aligned with velocity. Y-rotation =
-            // atan2(vx, vz) maps the model's local +Z to the velocity vector,
-            // plus BULLET_MODEL_YAW_OFFSET so we can correct if the .glb's
-            // forward axis turns out not to be +Z.
-            // E10.3 — prev_model from prevX/prevZ; rotation is constant for
-            // a projectile (fixed velocity vector), so reuse current rotationY.
+            // Projectile orientation in 3D — full Euler angles so the
+            // bullet's long axis points along the actual velocity
+            // vector, not just its horizontal projection. Two model
+            // conventions, two formulas:
+            //
+            //   +Z-forward (procedural rocket, modelYawOffset == 0):
+            //     decompose with Rz · Ry · Rx applied to (0,0,1).
+            //     yaw  Ry = atan2(vx, vz)              — horizontal heading
+            //     pitch Rx = -atan2(vy, sqrt(vx²+vz²)) — nose up/down
+            //
+            //   +X-forward (legacy .glb bullets, modelYawOffset == -π/2):
+            //     Rx around world-X is a no-op for the +X axis, so
+            //     can't use it for pitch. Instead decompose into yaw
+            //     (Ry) + roll-as-pitch (Rz): rotate +X first to the
+            //     correct (x, y) direction in the xy-plane via Rz,
+            //     then rotate around Y to add the vz component.
+            //     yaw  Ry = atan2(-vz, sqrt(vx²+vy²))
+            //     roll Rz = atan2(vy, vx)
+            //
+            // E10.3 — prev_model reuses the current angles since
+            // velocity is effectively constant tick-to-tick.
             val mesh   = if (b.meshHandle != 0L) b.meshHandle else quadMeshHandle
-            val rotY   = kotlin.math.atan2(b.vx, b.vz) + b.modelYawOffset
             val bScale = b.modelScale
+            val rotX: Float; val rotY: Float; val rotZ: Float
+            if (b.modelYawOffset == 0f) {
+                val horiz = kotlin.math.sqrt(b.vx * b.vx + b.vz * b.vz)
+                rotX = -kotlin.math.atan2(b.vy, horiz)
+                rotY = kotlin.math.atan2(b.vx, b.vz)
+                rotZ = 0f
+            } else {
+                val xyMag = kotlin.math.sqrt(b.vx * b.vx + b.vy * b.vy)
+                rotX = 0f
+                rotY = kotlin.math.atan2(-b.vz, xyMag)
+                rotZ = kotlin.math.atan2(b.vy, b.vx)
+            }
             val prev   = SceneObject(
                 id         = 300 + i,
                 meshHandle = 0L,
-                x          = b.prevX, y = 0f, z = b.prevZ,
+                x          = b.prevX, y = b.prevY, z = b.prevZ,
+                rotationX  = rotX,
                 rotationY  = rotY,
+                rotationZ  = rotZ,
                 scale      = bScale,
             ).modelMatrix()
             SceneObject(
                 id              = 300 + i,
                 meshHandle      = mesh,
-                x               = b.x, y = 0f, z = b.z,
+                x               = b.x, y = b.y, z = b.z,
+                rotationX       = rotX,
                 rotationY       = rotY,
+                rotationZ       = rotZ,
                 scale           = bScale,
                 prevModelMatrix = prev,
             )
@@ -245,7 +304,7 @@ internal class SceneAssembler(
             // quadFlashHandle. Rotation is plumbed straight through; default
             // 0 leaves quads axis-aligned as before.
             val mesh = if (f.meshHandle != 0L) f.meshHandle else quadFlashHandle
-            BillboardDraw(mesh, f.x, 0f, f.z, s, f.tintR, f.tintG, f.tintB, f.tintA,
+            BillboardDraw(mesh, f.x, f.y, f.z, s, f.tintR, f.tintG, f.tintB, f.tintA,
                           scaleV = sV,
                           rotation = f.rotation, lightningSeed = f.lightningSeed)
         }
@@ -336,13 +395,13 @@ internal class SceneAssembler(
                 val prev = SceneObject(
                     id         = 800 + i,
                     meshHandle = 0L,
-                    x          = fb.x, y = 0f, z = fb.z,
+                    x          = fb.x, y = fb.y, z = fb.z,
                     scale      = prevS,
                 ).modelMatrix()
                 SceneObject(
                     id               = 800 + i,
                     meshHandle       = fireballMeshHandle,
-                    x                = fb.x, y = 0f, z = fb.z,
+                    x                = fb.x, y = fb.y, z = fb.z,
                     scale            = s,
                     tintR            = tintR, tintG = tintG, tintB = tintB, tintA = brightness,
                     additiveMaterial = EngineJni.ADDITIVE_FIRE,
@@ -383,6 +442,11 @@ internal fun buildHpBars(
         if (a.hp <= 0 || a.hp >= a.maxHp) return@forEachIndexed
         val frac      = (a.hp.toFloat() / a.maxHp.toFloat()).coerceIn(0f, 1f)
         val barCx     = a.xPos
+        // 3D-pivot Phase 2/3: HP-bar follows the asteroid into depth so
+        // it sits above the asteroid silhouette under perspective. Y
+        // matches asteroid; foreground fill nudged forward by 0.01
+        // (camera-near) so it passes the LESS-depth test against the bg.
+        val barCy     = a.yPos
         val barCz     = a.zPos + a.half + DraftCombat.HP_BAR_PADDING
         val barHalfW  = a.half * DraftCombat.HP_BAR_HALF_W_MUL
         val fillHalfW = barHalfW * frac
@@ -390,7 +454,7 @@ internal fun buildHpBars(
         out.add(SceneObject(
             id         = 400 + i * 2,
             meshHandle = bgHandle,
-            x          = barCx, y = 0f, z = barCz,
+            x          = barCx, y = barCy, z = barCz,
             scaleX     = barHalfW,
             scaleY     = 1f,
             scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
@@ -398,7 +462,7 @@ internal fun buildHpBars(
         out.add(SceneObject(
             id         = 401 + i * 2,
             meshHandle = fgHandle,
-            x          = fillCx, y = -0.01f, z = barCz,
+            x          = fillCx, y = barCy - 0.01f, z = barCz,
             scaleX     = fillHalfW,
             scaleY     = 1f,
             scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
@@ -428,7 +492,7 @@ internal fun buildShieldDome(shieldHp: Float, archHandle: Long): List<SceneObjec
         SceneObject(
             id         = 700,
             meshHandle = archHandle,
-            x          = 0f, y = -0.05f, z = baseZ,
+            x          = 0f, y = DraftCombat.SHIELD_DOME_LIFT_Y, z = baseZ,
             scale      = 1f,
         ),
     )

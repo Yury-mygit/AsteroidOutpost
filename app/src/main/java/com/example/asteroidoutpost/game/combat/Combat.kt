@@ -31,6 +31,27 @@ internal object DraftCombat {
     const val BULLET_HALF_W:     Float = 0.04f   // ~1.6% screen width
     const val BULLET_HALF_H:     Float = 0.18f   // ~3.3% screen height
     const val SCREEN_TOP_Z:      Float = 9.49f
+    // 3D-pivot Phase 1 — Y is depth into the screen. Asteroids spawn at
+    // ASTEROID_SPAWN_Y_DEPTH (ahead of the ship in depth) and close to
+    // yPos = 0 (ship plane) in sync with their Z-fall, so they visually
+    // grow as they approach the camera. depthSpeed = speed × Y/Z fall
+    // ratio so Y reaches 0 at the same moment Z reaches PLATFORM_TOP_Z,
+    // and existing X/Z collision against shield/platform fires
+    // correctly.
+    //
+    // Z spawn is intentionally LOWER than SCREEN_TOP_Z — under the
+    // tilted 3D-pivot camera (fovY=28°), spawning at Z=SCREEN_TOP_Z
+    // with non-zero Y puts the asteroid above the vertical FOV cone
+    // and it's invisible. ASTEROID_SPAWN_Z and ASTEROID_SPAWN_Y_DEPTH
+    // are tuned together so the spawn point sits comfortably inside the
+    // frustum at all expected Y depths.
+    // E16 — asteroid trajectory tweaked from the steep 8/5.94 ratio (53° from
+    // horizontal, "falling straight down") to a more diagonal 6/5.94 ratio
+    // (~45° from horizontal, "diagonal attack from upper-front"). Y/Z still
+    // > 0.685 so asteroids approach the camera under the tilted view (per
+    // memory: project_asteroid_trajectory_constraint).
+    const val ASTEROID_SPAWN_Y_DEPTH: Float = 6f
+    const val ASTEROID_SPAWN_Z:       Float = 6f
     const val ASTEROID_HALF:     Float = 0.1235f
     const val DAMAGE_PER_HIT:    Int   = 10
     const val ASTEROID_SPEED:    Float = 1.0f   // units/sec downward
@@ -360,12 +381,20 @@ internal object DraftCombat {
     const val SHIELD_RECHARGE_SPARK_SPEED_MAX: Float = 1.0f
     const val SHIELD_RECHARGE_SPARK_DRAG:     Float = 4f
     val SHIELD_RECHARGE_SPARK_TINT = floatArrayOf(0.55f, 0.85f, 1.00f)
-    // Arch geometry — wide flat ellipse over the full platform width.
-    // halfW ≈ screen-half-width; halfH controls how high the arch
-    // peaks above the platform top.
+    // 3D dome geometry — half-superellipse footprint on the deck (z >= 0
+    // half), extruded vertically into a hemispherical translucent bubble.
+    // halfW = X-extent of the dome's footprint at deck level (≈ ship width).
+    // halfH = Z-depth of the footprint (how far forward of platform top).
     const val SHIELD_ARCH_HALF_W:    Float = 2.40f
     const val SHIELD_ARCH_HALF_H:    Float = 1.00f
-    const val SHIELD_ARCH_THICKNESS: Float = 0.06f
+    /** Y-extent of the shield dome above the deck — how high the bubble
+     *  rises from its base ring. Roughly hemispherical relative to halfH
+     *  so the dome reads as a real protective bubble, not a paint stripe. */
+    const val SHIELD_DOME_HEIGHT:    Float = 0.70f
+    /** Tiny -Y nudge for the dome SceneObject so its base ring sits a hair
+     *  above the deck (camera-near) and clears the LESS depth test against
+     *  the hull's top face. Negative = closer to camera. */
+    const val SHIELD_DOME_LIFT_Y:    Float = -0.05f
     const val SHIELD_ARCH_PEAK_ALPHA: Float = 0.85f
     // Superellipse exponent for the arch profile: |x/a|^n + |z/b|^n = 1.
     // n=2 is the legacy half-ellipse; n>2 flattens the top and sharpens

@@ -23,6 +23,7 @@ import com.example.asteroidoutpost.game.overlay.buildUpgrades
 import com.example.asteroidoutpost.game.overlay.buildWeaponSelect
 import com.example.asteroidoutpost.game.overlay.setMenuBody
 import com.example.asteroidoutpost.game.ProgressRepository
+import com.example.asteroidoutpost.game.ASTEROID_PICK_ID_BASE
 import com.example.asteroidoutpost.game.SceneAssembler
 import com.example.asteroidoutpost.game.UpgradeCatalog
 import com.example.asteroidoutpost.game.Weapon
@@ -43,6 +44,11 @@ import com.example.asteroidoutpost.game.content.buildTurretBaseMesh
 import com.example.asteroidoutpost.game.content.generateDebrisTexture
 import com.example.asteroidoutpost.game.content.generateSmokeTexture
 import com.example.asteroidoutpost.game.ui.HudView
+
+/** 3D-pivot camera tilt — orbit angle applied to the engine on surface
+ *  ready, also used for any geometry that needs to be rotated to face the
+ *  tilted camera (e.g. nebula billboards in `setupBackgroundNebulae`). */
+private const val CAMERA_TILT_RAD: Float = -0.6f
 
 class MainActivity : AppCompatActivity() {
 
@@ -254,16 +260,17 @@ class MainActivity : AppCompatActivity() {
         engineView.setOnTouchListener { _, event ->
             if (missionRunner.gameState == GameState.PLAYING &&
                 event.actionMasked == MotionEvent.ACTION_DOWN) {
-                val w = engineView.width.toFloat()
-                val h = engineView.height.toFloat()
-                if (w > 0f && h > 0f) {
-                    val worldX = (event.x / w - 0.5f) *
-                                 (DraftCombat.SCREEN_HALF_W * 2f)
-                    val zSpan  = DraftCombat.SCREEN_TOP_Z -
-                                 DraftCombat.SCREEN_BOTTOM_Z
-                    val worldZ = DraftCombat.SCREEN_TOP_Z -
-                                 (event.y / h) * zSpan
-                    missionRunner.handleWorldTap(worldX, worldZ)
+                // 3D-pivot Phase 2/3: ask the engine's pickable buffer
+                // which SceneObject sits under the finger — works under
+                // arbitrary camera orientation. Asteroid ids start at
+                // ASTEROID_PICK_ID_BASE (see SceneAssembler), so we
+                // decode back to the stable asteroid.id and route to
+                // the runner. Tap on empty space / non-asteroid returns
+                // a non-asteroid id and is silently ignored.
+                val pickedSceneId = engineView.engine.pickObject(event.x, event.y, -1)
+                if (pickedSceneId >= ASTEROID_PICK_ID_BASE) {
+                    val asteroidId = (pickedSceneId - ASTEROID_PICK_ID_BASE).toLong()
+                    missionRunner.handleAsteroidPickedById(asteroidId)
                 }
             }
             true
@@ -370,7 +377,15 @@ class MainActivity : AppCompatActivity() {
 
         // Game starts on the main menu — every overlay is built on demand
         // by [renderTop] when its Screen lands on the stack.
-        engineView.onSurfaceReady = { loadAssets() }
+        engineView.onSurfaceReady = {
+            loadAssets()
+            // 3D pivot — tilt the camera off the strict side-view.
+            // Engine starts at pitch = π/2 (camera looking horizontally,
+            // gameplay plane viewed perpendicular). We orbit -0.6 rad
+            // (~34°) so it ends at pitch ≈ 56° — a "from above and
+            // behind" angle that reads as a real 3D POV from the bridge.
+            engineView.engine.orbitCamera(0f, CAMERA_TILT_RAD)
+        }
         resetStack(Screen.Menu)
     }
 
@@ -553,23 +568,29 @@ class MainActivity : AppCompatActivity() {
         for (i in tints.indices) {
             nebulaHandles[i] = buildSoftDiskMesh(engine, tints[i][0], tints[i][1], tints[i][2])
         }
-        // Hand-placed positions for visual variety. y=+1 puts the nebulae
-        // behind the y=0 gameplay plane (LESS depth test rejects them at any
-        // pixel covered by gameplay geometry).
-        data class N(val tint: Int, val x: Float, val z: Float, val scale: Float)
+        // Phase 6 — under the tilted 3D camera, flat xz disks at y=1 used
+        // to sit on the deck plane like paint splatters. Now each nebula
+        // SceneObject carries `rotationX = CAMERA_TILT_RAD`, which orients
+        // the disk perpendicular to the tilted view direction — they read
+        // as proper background billboards floating in the void instead of
+        // textures painted on the floor. Positions pushed deep behind the
+        // asteroid spawn plane (z > 8, y > 6) so they recede into the
+        // distance and don't compete with foreground gameplay.
+        data class N(val tint: Int, val x: Float, val y: Float, val z: Float, val scale: Float)
         val placements = listOf(
-            N(0, -1.7f, 6.2f, 3.6f),  // purple, upper-left
-            N(1,  1.5f, 4.0f, 3.0f),  // cyan, mid-right
-            N(2, -0.9f, 1.4f, 2.4f),  // crimson, lower-left
-            N(3,  1.9f, 7.6f, 2.8f),  // twilight blue, top-right
-            N(4,  0.0f, 2.8f, 2.0f),  // warm dust, mid-centre
+            N(0, -1.7f, 4f, 6.2f, 3.6f),   // purple, upper-left
+            N(1,  1.5f, 3f, 4.0f, 3.0f),   // cyan, mid-right
+            N(2, -0.9f, 5f, 1.4f, 2.4f),   // crimson, lower-left
+            N(3,  1.9f, 4f, 7.6f, 2.8f),   // twilight blue, top-right
+            N(4,  0.0f, 4f, 2.8f, 2.0f),   // warm dust, mid-centre
         )
         nebulaeTranslucent = placements.mapIndexed { i, p ->
             SceneObject(
                 id         = 2000 + i,
                 meshHandle = nebulaHandles[p.tint],
-                x          = p.x, y = 1f, z = p.z,
+                x          = p.x, y = p.y, z = p.z,
                 scale      = p.scale,
+                rotationX  = CAMERA_TILT_RAD,
                 // E3.2 — fragment shader applies FBM-noise alpha modulation
                 // for this material → soft-disk turns into wispy clouds.
                 material   = EngineJni.MATERIAL_NEBULA,

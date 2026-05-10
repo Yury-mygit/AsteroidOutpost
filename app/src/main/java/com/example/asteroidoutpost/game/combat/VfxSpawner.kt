@@ -35,7 +35,7 @@ internal class VfxSpawner(
      * with no preferred direction. Tinted by `tintRgb` so callers can
      * recolour per-event (default forge-orange aligns with fireball).
      */
-    fun spawnSparkBurst(cx: Float, cz: Float, tintRgb: FloatArray = DraftCombat.FIREBALL_TINT_START) {
+    fun spawnSparkBurst(cx: Float, cy: Float, cz: Float, tintRgb: FloatArray = DraftCombat.FIREBALL_TINT_START) {
         val n = (DraftCombat.SPARK_AOE_COUNT_MIN..DraftCombat.SPARK_AOE_COUNT_MAX).random()
         for (i in 0 until n) {
             val theta = (Math.random() * 2.0 * Math.PI).toFloat()
@@ -46,7 +46,7 @@ internal class VfxSpawner(
             val size = DraftCombat.SPARK_AOE_SIZE_MIN +
                        Math.random().toFloat() * (DraftCombat.SPARK_AOE_SIZE_MAX - DraftCombat.SPARK_AOE_SIZE_MIN)
             sparkParticles.add(Particle(
-                x = cx, y = 0f, z = cz,
+                x = cx, y = cy, z = cz,
                 vx = kotlin.math.cos(theta) * sp,
                 vy = 0f,
                 vz = kotlin.math.sin(theta) * sp,
@@ -261,7 +261,7 @@ internal class VfxSpawner(
      * EXPLOSIVE = warmer); defaults to a neutral asteroid tone.
      */
     fun spawnAsteroidDeathFX(
-        cx: Float, cz: Float,
+        cx: Float, cy: Float, cz: Float,
         colorTint: FloatArray = floatArrayOf(0.95f, 0.92f, 0.88f),
     ) {
         val nDebris = (DraftCombat.DEBRIS_COUNT_MIN..DraftCombat.DEBRIS_COUNT_MAX).random()
@@ -274,7 +274,7 @@ internal class VfxSpawner(
             val size = DraftCombat.DEBRIS_SIZE_MIN +
                        Math.random().toFloat() * (DraftCombat.DEBRIS_SIZE_MAX - DraftCombat.DEBRIS_SIZE_MIN)
             debrisParticles.add(Particle(
-                x = cx, y = 0f, z = cz,
+                x = cx, y = cy, z = cz,
                 vx = kotlin.math.cos(theta) * sp,
                 vy = 0f,
                 vz = kotlin.math.sin(theta) * sp,
@@ -294,7 +294,7 @@ internal class VfxSpawner(
             val size = DraftCombat.SMOKE_DEATH_SIZE_MIN +
                        Math.random().toFloat() * (DraftCombat.SMOKE_DEATH_SIZE_MAX - DraftCombat.SMOKE_DEATH_SIZE_MIN)
             smokeParticles.add(Particle(
-                x = cx, y = 0f, z = cz,
+                x = cx, y = cy, z = cz,
                 vx = kotlin.math.cos(theta) * sp,
                 vy = 0f,
                 vz = kotlin.math.sin(theta) * sp,
@@ -370,10 +370,10 @@ internal class VfxSpawner(
      * (non-AoE) projectile hits. Sized by the projectile's half-width so
      * a chunky cannon shell pops bigger than an automatic round.
      */
-    fun spawnHitFlash(x: Float, z: Float, halfW: Float) {
+    fun spawnHitFlash(x: Float, y: Float, z: Float, halfW: Float) {
         val tint = DraftCombat.FLASH_TINT_HIT
         flashes.add(Flash(
-            x = x, z = z,
+            x = x, y = y, z = z,
             life = DraftCombat.HIT_FLASH_LIFE,
             maxLife = DraftCombat.HIT_FLASH_LIFE,
             halfMax = halfW * DraftCombat.HIT_FLASH_SIZE_MUL,
@@ -387,10 +387,10 @@ internal class VfxSpawner(
      * Larger and brighter than per-frame jet pulses; standard plasma flash
      * with warm-orange tint and a short fade.
      */
-    fun spawnRocketIgnition(x: Float, z: Float) {
+    fun spawnRocketIgnition(x: Float, y: Float, z: Float) {
         val tint = DraftCombat.FLASH_TINT_MUZZLE
         flashes.add(Flash(
-            x = x, z = z,
+            x = x, y = y, z = z,
             life    = DraftCombat.ROCKET_IGNITION_LIFE,
             maxLife = DraftCombat.ROCKET_IGNITION_LIFE,
             halfMax = DraftCombat.ROCKET_IGNITION_HALF,
@@ -405,15 +405,16 @@ internal class VfxSpawner(
      * vector by ~half a body length, so the flame sits at the engine bell
      * regardless of orientation.
      */
-    fun spawnRocketJet(x: Float, z: Float, vx: Float, vz: Float) {
-        val speed = kotlin.math.sqrt(vx * vx + vz * vz)
+    fun spawnRocketJet(x: Float, y: Float, z: Float, vx: Float, vy: Float, vz: Float) {
+        val speed = kotlin.math.sqrt(vx * vx + vy * vy + vz * vz)
         val nx = if (speed > 1e-4f) vx / speed else 0f
+        val ny = if (speed > 1e-4f) vy / speed else 0f
         val nz = if (speed > 1e-4f) vz / speed else 1f
         val off = DraftCombat.ROCKET_BODY_LENGTH *
                   DraftCombat.ROCKET_JET_TAIL_OFFSET_FRAC
         val tint = DraftCombat.FLASH_TINT_MUZZLE
         flashes.add(Flash(
-            x = x - nx * off, z = z - nz * off,
+            x = x - nx * off, y = y - ny * off, z = z - nz * off,
             life    = DraftCombat.ROCKET_JET_LIFE,
             maxLife = DraftCombat.ROCKET_JET_LIFE,
             halfMax = DraftCombat.ROCKET_JET_HALF,
@@ -427,9 +428,13 @@ internal class VfxSpawner(
      * textured smoke pool. Tints slightly cooler / more grey than asteroid-
      * death smoke so a rocket trail reads as exhaust, not debris.
      */
-    fun spawnRocketTrail(rocketX: Float, rocketZ: Float, vx: Float, vz: Float) {
-        val speed = kotlin.math.sqrt(vx * vx + vz * vz)
+    fun spawnRocketTrail(
+        rocketX: Float, rocketY: Float, rocketZ: Float,
+        vx: Float, vy: Float, vz: Float,
+    ) {
+        val speed = kotlin.math.sqrt(vx * vx + vy * vy + vz * vz)
         val nx = if (speed > 1e-4f) vx / speed else 0f
+        val ny = if (speed > 1e-4f) vy / speed else 0f
         val nz = if (speed > 1e-4f) vz / speed else 1f
         val drift = DraftCombat.ROCKET_TRAIL_DRIFT
         val rng = Math.random().toFloat()
@@ -441,12 +446,37 @@ internal class VfxSpawner(
                        (DraftCombat.ROCKET_TRAIL_SIZE_MAX -
                         DraftCombat.ROCKET_TRAIL_SIZE_MIN)
         smokeParticles.add(Particle(
-            x = rocketX, y = 0f, z = rocketZ,
-            vx = -nx * drift, vy = 0f, vz = -nz * drift,
+            x = rocketX, y = rocketY, z = rocketZ,
+            vx = -nx * drift, vy = -ny * drift, vz = -nz * drift,
             age = 0f, life = life, size = size,
             r = 0.78f, g = 0.78f, b = 0.80f, a = 0.55f,
             drag = DraftCombat.ROCKET_TRAIL_DRAG,
         ))
+    }
+
+    /**
+     * Spring-launch dust puff at the silo opening — radial cloud of smoke
+     * particles drifting outward, simulating displaced air/dust as the
+     * rocket pops out of the tube. Distinct from `spawnMuzzleBlast` (which
+     * is the gunshot trefoil cone) — rockets aren't gunshots; they're
+     * mechanically ejected, then the engine ignites mid-flight.
+     */
+    fun spawnRocketLaunchPuff(x: Float, y: Float, z: Float) {
+        repeat(6) {
+            val angle = (Math.random() * 2.0 * Math.PI).toFloat()
+            val speed = 0.5f + Math.random().toFloat() * 0.7f
+            val vx = kotlin.math.cos(angle) * speed
+            val vz = kotlin.math.sin(angle) * speed
+            val life = 0.45f + Math.random().toFloat() * 0.30f
+            val size = 0.07f + Math.random().toFloat() * 0.05f
+            smokeParticles.add(Particle(
+                x = x, y = y, z = z,
+                vx = vx, vy = 0f, vz = vz,
+                age = 0f, life = life, size = size,
+                r = 0.80f, g = 0.78f, b = 0.75f, a = 0.55f,
+                drag = 3.5f,
+            ))
+        }
     }
 
     /**
@@ -456,9 +486,9 @@ internal class VfxSpawner(
      * Fresnel-soft silhouette, heat ramp from white-hot core to orange edge,
      * and animated FBM turbulence. Plus a complementary radial spark fan.
      */
-    fun spawnExplosion(cx: Float, cz: Float, radius: Float) {
+    fun spawnExplosion(cx: Float, cy: Float, cz: Float, radius: Float) {
         fireballs.add(Fireball(
-            x = cx, z = cz,
+            x = cx, y = cy, z = cz,
             life = DraftCombat.FIREBALL_LIFE_SEC,
             maxLife = DraftCombat.FIREBALL_LIFE_SEC,
             baseRadius = radius,
@@ -466,6 +496,6 @@ internal class VfxSpawner(
         // E9 — radial spark fan complementing the 3D fireball. Reads as
         // ejecta flying out of the blast core; sparks fade fast (≤0.55s)
         // so they punctuate the moment without obscuring the fireball.
-        spawnSparkBurst(cx, cz)
+        spawnSparkBurst(cx, cy, cz)
     }
 }

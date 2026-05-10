@@ -13,7 +13,11 @@ namespace station {
         // pitch=π/2 rotates the camera so it looks horizontally instead of top-down.
         using namespace math;
         m_target   = {0.0f, 0.0f, 4.0f};
-        m_radius   = 22.0f;
+        // E16 — closer camera (was 22) compensates for the wider 55° FOV
+        // (was 28°) so the ship occupies similar screen coverage, but the
+        // depth ratio between near/far objects ~doubles → asteroids visibly
+        // grow from spawn to impact (was 12% growth, now ~23%).
+        m_radius   = 11.0f;
         m_normCounter = 0;
         Quat pitch = Quat::fromAxisAngle(1, 0, 0, 1.5707963f); // 90°
         m_rotation = pitch.normalized();

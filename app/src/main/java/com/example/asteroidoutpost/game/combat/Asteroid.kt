@@ -20,6 +20,13 @@ internal data class Asteroid(
     // because the list compacts on death.
     val id: Long,
     val xPos: Float,
+    // 3D-pivot Phase 1: Y is depth into the screen. Asteroids spawn far
+    // (high yPos) and approach yPos = 0 in sync with their Z-fall — so
+    // they visually grow as they get close, while the existing
+    // X/Z-based collision against shield arch and platform top still
+    // triggers at the right moment (Y reaches 0 simultaneously with Z
+    // reaching PLATFORM_TOP_Z).
+    var yPos: Float = 0f,
     var zPos: Float,
     var hp: Int,
     // Captured at spawn from `hp` so the HP-bar fill can read fraction =
@@ -30,7 +37,10 @@ internal data class Asteroid(
     val type: AsteroidType = AsteroidType.NORMAL,
     // Per-asteroid effective values, derived from mission baseline × type
     // multipliers at spawn. Cached so the tick doesn't recompute every frame.
-    val speed: Float = 0f,            // units/sec downward
+    val speed: Float = 0f,            // units/sec along -Z (screen-down)
+    // 3D-pivot Phase 1: rate of approach toward camera along -Y, set so
+    // yPos reaches 0 simultaneously with zPos reaching PLATFORM_TOP_Z.
+    val depthSpeed: Float = 0f,       // units/sec along -Y (toward camera)
     val half:  Float = DraftCombat.ASTEROID_HALF,
     val platformDmg: Int = DraftCombat.PLATFORM_DMG_PER_HIT,
     // Picked at spawn from the per-type mesh pool (NORMAL/FAST randomize
@@ -43,5 +53,6 @@ internal data class Asteroid(
     // BEFORE applying the per-frame movement so the next frame's render
     // has the matrix-pair that produced the current visible motion.
     var prevZ: Float = zPos,
+    var prevY: Float = yPos,
     var prevRotation: Float = rotation,
 )

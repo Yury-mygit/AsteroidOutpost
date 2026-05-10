@@ -74,22 +74,31 @@ internal class Projectile(
     // Default = legacy −π/2 for the +X-forward .glb bullet meshes;
     // procedural meshes authored with +Z forward pass `0f`.
     val modelYawOffset: Float = DraftCombat.BULLET_MODEL_YAW_OFFSET,
+    // 3D-pivot Phase 2/3: Y is depth into the screen. Projectiles fire
+    // toward the asteroid's full 3D position, then travel along a 3D
+    // velocity. Default Y = 0 / vy = 0 keeps legacy 2D-only callers
+    // (test cases, future rules-engine) working unchanged.
+    var y: Float = 0f,
+    var vy: Float = 0f,
     // E10.3 — previous-frame position for motion-vector tracking.
-    var prevX: Float = x, var prevZ: Float = z,
+    var prevX: Float = x, var prevY: Float = y, var prevZ: Float = z,
     val behaviour: ProjectileBehavior,
 ) : WeaponEffect {
     override fun tick(dt: Float, ctx: WeaponEffectContext): Boolean {
-        prevX = x; prevZ = z
+        prevX = x; prevY = y; prevZ = z
         behaviour.tick(this, dt, ctx)
-        x += vx * dt; z += vz * dt
+        x += vx * dt; y += vy * dt; z += vz * dt
         if (z > DraftCombat.SCREEN_TOP_Z + 1f ||
             z < DraftCombat.SCREEN_BOTTOM_Z - 1f ||
             x < -DraftCombat.SCREEN_HALF_W - 1f ||
-            x >  DraftCombat.SCREEN_HALF_W + 1f) return true
-        // AABB collision against the first live asteroid we touch.
+            x >  DraftCombat.SCREEN_HALF_W + 1f ||
+            y < -2f ||                                // passed the camera plane
+            y >  DraftCombat.ASTEROID_SPAWN_Y_DEPTH + 2f) return true
+        // 3D-AABB collision against the first live asteroid we touch.
         for (a in ctx.asteroids) {
             if (a.hp <= 0) continue
             if (kotlin.math.abs(x - a.xPos) < a.half + halfW &&
+                kotlin.math.abs(y - a.yPos) < a.half + halfH &&
                 kotlin.math.abs(z - a.zPos) < a.half + halfH) {
                 return behaviour.onImpact(this, a, ctx)
             }
@@ -146,30 +155,38 @@ internal class Beam(
             dmgAccum = 0f       // don't carry over fractional damage from idle frames
             return false
         }
+        // 3D-pivot Phase 2/3: ray-cast in 3D. Beam direction includes
+        // Y so it actually points at the asteroid's current depth, not
+        // at the X/Z projection on the deck plane.
         val dx = target.xPos - src.x
+        val dy = target.yPos - src.y
         val dz = target.zPos - src.z
-        val len = kotlin.math.sqrt(dx * dx + dz * dz)
+        val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
         if (len < 1e-3f) {
             endPos = src
             return false
         }
         val nx = dx / len
+        val ny = dy / len
         val nz = dz / len
-        // Find the asteroid closest to the source along the aim line.
+        // Find the asteroid closest to the source along the aim line in 3D.
         var bestT = Float.MAX_VALUE
         var bestAst: Asteroid? = null
         for (a in ctx.asteroids) {
             if (a.hp <= 0) continue
             val rx = a.xPos - src.x
+            val ry = a.yPos - src.y
             val rz = a.zPos - src.z
-            val t  = rx * nx + rz * nz
+            val t  = rx * nx + ry * ny + rz * nz
             if (t < 0f) continue
             val px = src.x + nx * t
+            val py = src.y + ny * t
             val pz = src.z + nz * t
             val hx = a.xPos - px
+            val hy = a.yPos - py
             val hz = a.zPos - pz
             val r  = a.half + pad
-            if (hx * hx + hz * hz <= r * r && t < bestT) {
+            if (hx * hx + hy * hy + hz * hz <= r * r && t < bestT) {
                 bestT = t
                 bestAst = a
             }
@@ -184,7 +201,11 @@ internal class Beam(
             }
         }
         val beamLen = if (bestAst != null) bestT else len
-        endPos = Vec3(src.x + nx * beamLen, src.y, src.z + nz * beamLen)
+        endPos = Vec3(
+            src.x + nx * beamLen,
+            src.y + ny * beamLen,
+            src.z + nz * beamLen,
+        )
         return false
     }
 }
@@ -195,7 +216,7 @@ internal class Beam(
 internal class PlainBulletBehavior : ProjectileBehavior {
     override fun onImpact(p: Projectile, hit: Asteroid, ctx: WeaponEffectContext): Boolean {
         hit.hp -= p.damage
-        ctx.vfx.spawnHitFlash(hit.xPos, hit.zPos, p.halfW)
+        ctx.vfx.spawnHitFlash(hit.xPos, hit.yPos, hit.zPos, p.halfW)
         return true
     }
 }
@@ -211,8 +232,8 @@ internal class HeavyShellBehavior(
 ) : ProjectileBehavior {
     override fun onImpact(p: Projectile, hit: Asteroid, ctx: WeaponEffectContext): Boolean {
         hit.hp -= p.damage
-        applySplashDamage(ctx.asteroids, hit.xPos, hit.zPos, aoeRadius, aoeDamage, hit)
-        ctx.vfx.spawnExplosion(hit.xPos, hit.zPos, aoeRadius)
+        applySplashDamage(ctx.asteroids, hit.xPos, hit.yPos, hit.zPos, aoeRadius, aoeDamage, hit)
+        ctx.vfx.spawnExplosion(hit.xPos, hit.yPos, hit.zPos, aoeRadius)
         return true
     }
 }
@@ -258,50 +279,51 @@ internal class HomingRocketBehavior(
                 // Constant straight-up rise — spring push only, engine
                 // is OFF, so no smoke trail and no reactive jet emit
                 // this phase. The rocket reads as inert ordnance still
-                // riding the spring's momentum.
+                // riding the spring's momentum. Y stays at the silo
+                // (y=0); ascent is purely along Z.
                 p.vx = 0f
+                p.vy = 0f
                 p.vz = ascentSpeed
                 if (p.z - launchZ >= ascentHeight) {
                     phase = RocketPhase.FLYING
-                    // One-shot bright burst at the rocket's current
-                    // position so the player visibly sees the engine
-                    // ignite — punchier than the per-frame jet pulses.
-                    ctx.vfx.spawnRocketIgnition(p.x, p.z)
+                    ctx.vfx.spawnRocketIgnition(p.x, p.y, p.z)
                 }
             }
             RocketPhase.FLYING -> {
-                // Boost along current heading.
-                val curSpeed = kotlin.math.sqrt(p.vx * p.vx + p.vz * p.vz)
+                // 3D-pivot Phase 2/3: boost + steer in 3D so the rocket
+                // climbs in Y to chase asteroids that are still up the
+                // depth column.
+                val curSpeed = kotlin.math.sqrt(
+                    p.vx * p.vx + p.vy * p.vy + p.vz * p.vz)
                 if (curSpeed < cruiseSpeed && curSpeed > 1e-4f) {
                     val nx = p.vx / curSpeed
+                    val ny = p.vy / curSpeed
                     val nz = p.vz / curSpeed
                     val newSpeed =
                         (curSpeed + boostAccel * dt).coerceAtMost(cruiseSpeed)
                     p.vx = nx * newSpeed
+                    p.vy = ny * newSpeed
                     p.vz = nz * newSpeed
                 }
-                // Steer toward live target.
                 val target = ctx.asteroids.firstOrNull { it.id == targetId && it.hp > 0 }
                 if (target != null) steerProjectileTowards(p, target, turnRate, dt)
-                // Engine on — bright reactive jet at the nozzle plus a
-                // dispersing smoke trail behind. Both gated to FLYING.
                 jetTimer -= dt
                 while (jetTimer <= 0f) {
                     jetTimer += DraftCombat.ROCKET_JET_INTERVAL
-                    ctx.vfx.spawnRocketJet(p.x, p.z, p.vx, p.vz)
+                    ctx.vfx.spawnRocketJet(p.x, p.y, p.z, p.vx, p.vy, p.vz)
                 }
                 trailTimer -= dt
                 while (trailTimer <= 0f) {
                     trailTimer += DraftCombat.ROCKET_TRAIL_INTERVAL
-                    ctx.vfx.spawnRocketTrail(p.x, p.z, p.vx, p.vz)
+                    ctx.vfx.spawnRocketTrail(p.x, p.y, p.z, p.vx, p.vy, p.vz)
                 }
             }
         }
     }
     override fun onImpact(p: Projectile, hit: Asteroid, ctx: WeaponEffectContext): Boolean {
         hit.hp -= p.damage
-        applySplashDamage(ctx.asteroids, hit.xPos, hit.zPos, aoeRadius, aoeDamage, hit)
-        ctx.vfx.spawnExplosion(hit.xPos, hit.zPos, aoeRadius)
+        applySplashDamage(ctx.asteroids, hit.xPos, hit.yPos, hit.zPos, aoeRadius, aoeDamage, hit)
+        ctx.vfx.spawnExplosion(hit.xPos, hit.yPos, hit.zPos, aoeRadius)
         return true
     }
 }
@@ -318,34 +340,42 @@ internal fun steerProjectileTowards(
     p: Projectile, target: Asteroid,
     turnRate: Float, dt: Float,
 ) {
+    // 3D-pivot Phase 2/3: steer in 3D — rotate the velocity vector
+    // around the perpendicular axis between current heading and desired
+    // heading, clamped by `turnRate * dt`. Speed preserved.
     val tdx = target.xPos - p.x
+    val tdy = target.yPos - p.y
     val tdz = target.zPos - p.z
-    if (tdx * tdx + tdz * tdz < 1e-6f) return
-    val speed = kotlin.math.sqrt(p.vx * p.vx + p.vz * p.vz)
+    val tlen = kotlin.math.sqrt(tdx * tdx + tdy * tdy + tdz * tdz)
+    if (tlen < 1e-3f) return
+    val speed = kotlin.math.sqrt(p.vx * p.vx + p.vy * p.vy + p.vz * p.vz)
     if (speed < 1e-4f) return
-    val curAng     = kotlin.math.atan2(p.vx, p.vz)
-    val desiredAng = kotlin.math.atan2(tdx, tdz)
-    val twoPi      = (2.0 * Math.PI).toFloat()
-    val piF        = Math.PI.toFloat()
-    var delta = desiredAng - curAng
-    while (delta >  piF) delta -= twoPi
-    while (delta < -piF) delta += twoPi
+
+    val cx = p.vx / speed; val cy = p.vy / speed; val cz = p.vz / speed
+    val dx = tdx / tlen;  val dy = tdy / tlen;  val dz = tdz / tlen
+    val cosAng = (cx * dx + cy * dy + cz * dz).coerceIn(-1f, 1f)
+    val angle  = kotlin.math.acos(cosAng)
+    if (angle < 1e-4f) return
     val maxStep = turnRate * dt
-    val clamped = delta.coerceIn(-maxStep, maxStep)
-    val newAng  = curAng + clamped
-    p.vx = kotlin.math.sin(newAng) * speed
-    p.vz = kotlin.math.cos(newAng) * speed
+    val step    = kotlin.math.min(angle, maxStep)
+    // Slerp from current to desired direction by `step`.
+    val sinA = kotlin.math.sin(angle)
+    val a = kotlin.math.sin(angle - step) / sinA
+    val b = kotlin.math.sin(step)         / sinA
+    p.vx = (cx * a + dx * b) * speed
+    p.vy = (cy * a + dy * b) * speed
+    p.vz = (cz * a + dz * b) * speed
 }
 
 /**
  * Apply splash damage to every live asteroid within `radius` of
- * `(cx, cz)`, excluding `centre` (the asteroid that absorbed the direct
- * impact above). Used by AoE-class behaviours after the direct hit's
- * full damage has already landed on `centre`.
+ * `(cx, cy, cz)` (3D), excluding `centre` (the asteroid that absorbed
+ * the direct impact above). Used by AoE-class behaviours after the
+ * direct hit's full damage has already landed on `centre`.
  */
 internal fun applySplashDamage(
     asteroids: List<Asteroid>,
-    cx: Float, cz: Float, radius: Float,
+    cx: Float, cy: Float, cz: Float, radius: Float,
     damage: Int, centre: Asteroid?,
 ) {
     if (radius <= 0f || damage <= 0) return
@@ -353,8 +383,9 @@ internal fun applySplashDamage(
     for (a in asteroids) {
         if (a === centre || a.hp <= 0) continue
         val dx = a.xPos - cx
+        val dy = a.yPos - cy
         val dz = a.zPos - cz
-        val d2 = dx * dx + dz * dz
+        val d2 = dx * dx + dy * dy + dz * dz
         if (d2 > 1e-6f && d2 <= r2) a.hp -= damage
     }
 }
