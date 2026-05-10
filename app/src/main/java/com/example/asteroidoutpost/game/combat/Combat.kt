@@ -42,54 +42,61 @@ internal object DraftCombat {
     const val PLATFORM_HP_INIT:  Int   = 100
     const val PLATFORM_DMG_PER_HIT: Int = 20
     const val TURRET_HALF:       Float = 0.10f  // legacy — bbox of old square; kept for back-compat with existing collision math
-    // Side turret pivot — top of the static base. Rotating mesh extends
-    // upward from here; barrel tip is at TURRET_TOP_Z + SIDE_TOTAL_LEN.
-    const val TURRET_TOP_Z:      Float = -0.90f
     const val TURRET_DMG:        Int   = 5      // half of DAMAGE_PER_HIT (legacy)
     // Central turret — main weapon. Now split into a static base sitting on
-    // the platform and a rotating housing+barrel that pivots at base-top.
-    // CENTRAL_TURRET_BASE_Z is the pivot location (base-top), and the
-    // rotating mesh extends from the pivot upward along +Z (forward in
-    // model space) by CENTRAL_HOUSING_LENGTH + CENTRAL_BARREL_LENGTH +
-    // CENTRAL_MUZZLE_LENGTH = 2 × CENTRAL_TURRET_HALF_H so the muzzle Z
-    // formula `BASE_Z + 2 × HALF_H` keeps working for bullet spawn.
+    // the deck and a rotating housing+barrel that pivots at base-top.
+    // The bow gun sits on the centerline near the prow tip; side turrets
+    // flank it aft. CENTRAL_BASE_Z is where the static base mesh is
+    // mounted on the deck; CENTRAL_TURRET_BASE_Z is the pivot Z (top of
+    // the base, where the barrel rotates around). Rotating mesh extends
+    // forward (+Z) from the pivot.
     const val CENTRAL_TURRET_X:        Float = 0f
-    const val CENTRAL_TURRET_BASE_Z:   Float = -0.90f // platform top + CENTRAL_BASE_HEIGHT
-    const val CENTRAL_TURRET_HALF_W:   Float = 0.10f  // legacy — = housing half-W
-    const val CENTRAL_TURRET_HALF_H:   Float = 0.30f  // half of total rotating-part length
-
-    // Static base (collar between platform top and turret pivot).
+    const val CENTRAL_BASE_Z:          Float = -1.04f
+    // Static base (collar between deck and turret pivot). Sized up vs
+    // legacy quad-platform values so the turret reads clearly against
+    // the dark hull plating.
     const val CENTRAL_BASE_HEIGHT:     Float = 0.04f
-    const val CENTRAL_BASE_HALF_W:     Float = 0.13f
+    const val CENTRAL_BASE_HALF_W:     Float = 0.20f
+    const val CENTRAL_TURRET_BASE_Z:   Float = CENTRAL_BASE_Z + CENTRAL_BASE_HEIGHT
+    const val CENTRAL_TURRET_HALF_W:   Float = 0.15f  // legacy — = housing half-W
+    const val CENTRAL_TURRET_HALF_H:   Float = 0.30f  // half of total rotating-part length
     // Rotating housing + barrel + muzzle ring (origin at pivot, +Z forward).
-    const val CENTRAL_HOUSING_HALF_W:  Float = 0.10f
-    const val CENTRAL_HOUSING_LENGTH:  Float = 0.18f
-    const val CENTRAL_BARREL_HALF_W:   Float = 0.035f
-    const val CENTRAL_BARREL_LENGTH:   Float = 0.36f
-    const val CENTRAL_MUZZLE_HALF_W:   Float = 0.050f
+    const val CENTRAL_HOUSING_HALF_W:  Float = 0.15f
+    const val CENTRAL_HOUSING_LENGTH:  Float = 0.20f
+    const val CENTRAL_BARREL_HALF_W:   Float = 0.045f
+    const val CENTRAL_BARREL_LENGTH:   Float = 0.34f
+    const val CENTRAL_MUZZLE_HALF_W:   Float = 0.065f
     const val CENTRAL_MUZZLE_LENGTH:   Float = 0.06f
 
     // Side turret base + rotating part (smaller scale — housing≈0.09,
-    // barrel≈0.10, muzzle≈0.04 → total ≈ 0.23 ≈ old TURRET_HALF*2).
+    // barrel≈0.10, muzzle≈0.04 → total ≈ 0.23 ≈ old TURRET_HALF*2). Both
+    // side turrets share the same Z (amidships); they only differ in X
+    // (port vs starboard, see `MissionRunner.turretXs`).
+    const val SIDE_BASE_Z:             Float = -1.24f
     const val SIDE_BASE_HEIGHT:        Float = 0.04f
-    const val SIDE_BASE_HALF_W:        Float = 0.10f
-    const val SIDE_HOUSING_HALF_W:     Float = 0.075f
-    const val SIDE_HOUSING_LENGTH:     Float = 0.09f
-    const val SIDE_BARREL_HALF_W:      Float = 0.025f
-    const val SIDE_BARREL_LENGTH:      Float = 0.10f
-    const val SIDE_MUZZLE_HALF_W:      Float = 0.040f
-    const val SIDE_MUZZLE_LENGTH:      Float = 0.04f
+    // Side turret pivot — top of the static base. Rotating mesh extends
+    // forward (+Z) from here; barrel tip is at TURRET_TOP_Z + SIDE_TOTAL_LEN.
+    const val TURRET_TOP_Z:            Float = SIDE_BASE_Z + SIDE_BASE_HEIGHT
+    const val SIDE_BASE_HALF_W:        Float = 0.30f
+    const val SIDE_HOUSING_HALF_W:     Float = 0.220f
+    const val SIDE_HOUSING_LENGTH:     Float = 0.20f
+    const val SIDE_BARREL_HALF_W:      Float = 0.070f
+    const val SIDE_BARREL_LENGTH:      Float = 0.20f
+    const val SIDE_MUZZLE_HALF_W:      Float = 0.110f
+    const val SIDE_MUZZLE_LENGTH:      Float = 0.08f
     const val SIDE_TOTAL_LEN: Float =
         SIDE_HOUSING_LENGTH + SIDE_BARREL_LENGTH + SIDE_MUZZLE_LENGTH
 
-    // Laser installation — small ground-telescope dome between the
-    // central turret and the right side turret. Static (no rotation).
-    const val LASER_INSTALL_X: Float = 0.9f
+    // Laser installation — small dome on the deck, just starboard of
+    // the centerline between the two side turrets. Static (no
+    // rotation), aimed by the beam's source/aim closures.
+    const val LASER_INSTALL_X: Float = 0.25f
+    const val LASER_INSTALL_Z: Float = -1.20f
     // Rocket silo — open hatch with a dark launch tube, mirrors the
-    // laser installation on the LEFT side of the central turret.
-    // Rockets emerge from MUZZLE_OFFSET above the platform top (centre
-    // of the silo opening).
-    const val ROCKET_SILO_X:             Float = -0.9f
+    // laser dome on the port side between the side turrets. Rockets
+    // emerge from MUZZLE_OFFSET above the silo opening.
+    const val ROCKET_SILO_X:             Float = -0.25f
+    const val ROCKET_SILO_Z:             Float = -1.20f
     const val ROCKET_SILO_MUZZLE_OFFSET: Float =  0.13f
     // Aim-alignment threshold for the central turret. The turret only
     // fires once it's rotated essentially onto the target angle (within

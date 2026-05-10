@@ -11,6 +11,11 @@ import com.example.asteroidoutpost.game.AbilityId
 import com.example.asteroidoutpost.game.AbilitySlot
 import com.example.asteroidoutpost.game.UiHelpers
 import com.example.asteroidoutpost.game.UiTheme
+import com.example.asteroidoutpost.game.ui.icons.IconDrawable
+import com.example.asteroidoutpost.game.ui.icons.ShieldFillDrawable
+import com.example.asteroidoutpost.game.ui.icons.makeLaserIcon
+import com.example.asteroidoutpost.game.ui.icons.makeRocketIcon
+import com.example.asteroidoutpost.game.ui.icons.makeShieldIcon
 
 /**
  * Owns every in-game HUD widget — top mission/wave/score/HP/energy panel,
@@ -170,20 +175,7 @@ internal class HudView(
      * top row so it shares visibility with the HUD.
      */
     fun buildAbortButton(): TextView {
-        val btn = TextView(activity).apply {
-            text = "✕"
-            textSize = UiTheme.SP_HEADING
-            setTextColor(UiTheme.COL_TEXT_DIM)
-            gravity = Gravity.CENTER
-            isAllCaps = false
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = UiTheme.dp(activity, UiTheme.DP_BUTTON_RADIUS).toFloat()
-                setColor(UiTheme.COL_PANEL_BG)
-                setStroke(UiTheme.dp(activity, UiTheme.DP_BORDER_WIDTH), UiTheme.COL_BORDER)
-            }
-            setOnClickListener { callbacks.onAbortMission() }
-        }
+        val btn = UiHelpers.buildGlyphTile(activity, "✕") { callbacks.onAbortMission() }
         abortButton = btn
         return btn
     }

@@ -1,15 +1,19 @@
 *.iml
 .gradle
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+
+# IDE-locals: full IDEA folder is local config noise (was partially listed).
+.idea/
+
+# Tooling state — Claude Code session state, not project content.
+.claude/
+
+# Player-side screenshot output (script writes here, not source content).
+Screens/
+.tmp_screens/

@@ -64,6 +64,7 @@ internal class SceneAssembler(
 
     // ---- Mesh / texture handles (set once at engine init) ----
     private val quadGreyHandle: Long,
+    private val shipHullMeshHandle: Long,
     private val quadFlashHandle: Long,
     private val quadMeshHandle: Long,
     private val quadHpBgHandle: Long,
@@ -85,70 +86,48 @@ internal class SceneAssembler(
      * Build one frame's draw commands. Per-frame scalars are passed in;
      * everything else is read from the references baked at construction.
      *
-     * @param reloadProgress ∈ [0, 1] — reload-bar fill ratio (1 = ready).
      * @param centralTurretAngle radians (atan2(dx, dz) convention,
      *        clamped to weapon arc by the tick before this is called).
      * @param shieldHp current shield HP (0 hides the arch).
      */
     fun assemble(
-        reloadProgress: Float,
         centralTurretAngle: Float,
         shieldHp: Float,
     ): SceneFrame {
-        val reloadHalfW     = DraftCombat.RELOAD_BAR_HALF_W
-        val reloadFillHalfW = reloadHalfW * reloadProgress
-        // Fill is anchored to the LEFT edge of the backing so it grows L→R.
-        val reloadFillCenterX = -reloadHalfW * (1f - reloadProgress)
-
         val opaque = listOf(
-            // Platform — full width, 5% screen height, pinned to bottom.
+            // Ship hull — replaces the legacy gray quad platform. Mesh is
+            // authored in world units (X half = 2.47, Z half = 0.275),
+            // so the SceneObject just translates it onto the platform
+            // position with scale = 1.
             SceneObject(
                 id         = 100,
-                meshHandle = quadGreyHandle,
+                meshHandle = shipHullMeshHandle,
                 x          = 0f, y = 0f, z = -1.215f,
-                scaleX     = 2.47f,
-                scaleY     = 1f,
-                scaleZ     = 0.275f,
-            ),
-            // Reload bar — backing (dim grey, full width).
-            SceneObject(
-                id         = 107,
-                meshHandle = quadGreyHandle,
-                x          = 0f, y = 0f, z = DraftCombat.RELOAD_BAR_Z,
-                scaleX     = reloadHalfW,
-                scaleY     = 1f,
-                scaleZ     = DraftCombat.RELOAD_BAR_HALF_THICK,
-            ),
-            // Reload bar — fill (yellow, width = progress * full). Nudged
-            // slightly forward in Y so it passes the LESS depth test against
-            // the backing (both share the y=0 plane otherwise, and the regular
-            // scene pipeline rejects equal-depth fragments).
-            SceneObject(
-                id         = 108,
-                meshHandle = quadFlashHandle,
-                x          = reloadFillCenterX, y = -0.01f, z = DraftCombat.RELOAD_BAR_Z,
-                scaleX     = reloadFillHalfW,
-                scaleY     = 1f,
-                scaleZ     = DraftCombat.RELOAD_BAR_HALF_THICK,
+                scale      = 1f,
             ),
             // Central turret — split into static base + rotating barrel.
             // Base sits on the platform (no rotation); the housing+barrel
             // mesh has its origin at the pivot atop the base and rotates
             // via SceneObject.rotationY around its own model origin, so
             // the offset trick used for the legacy quad isn't needed.
+            // Deck mounts use y = -0.02 so they pass the LESS depth test
+            // against the hull mesh (whose vertices are at y = 0 for the
+            // body, y = -0.005 for layered details). Without the nudge
+            // equal-depth fragments would be rejected and the turrets
+            // would render under the hull silhouette.
             SceneObject(
                 id         = 109,
                 meshHandle = centralBaseMeshHandle,
                 x          = DraftCombat.CENTRAL_TURRET_X,
-                y          = 0f,
-                z          = DraftCombat.PLATFORM_TOP_Z,
+                y          = -0.02f,
+                z          = DraftCombat.CENTRAL_BASE_Z,
                 scale      = 1f,
             ),
             SceneObject(
                 id         = 119,
                 meshHandle = centralBarrelMeshHandle,
                 x          = DraftCombat.CENTRAL_TURRET_X,
-                y          = 0f,
+                y          = -0.03f,
                 z          = DraftCombat.CENTRAL_TURRET_BASE_Z,
                 rotationY  = centralTurretAngle,
                 scale      = 1f,
@@ -157,13 +136,13 @@ internal class SceneAssembler(
             SceneObject(
                 id         = 110,
                 meshHandle = sideBaseMeshHandle,
-                x          = turretXs[0], y = 0f, z = DraftCombat.PLATFORM_TOP_Z,
+                x          = turretXs[0], y = -0.02f, z = DraftCombat.SIDE_BASE_Z,
                 scale      = 1f,
             ),
             SceneObject(
                 id         = 120,
                 meshHandle = sideBarrelMeshHandle,
-                x          = turretXs[0], y = 0f, z = DraftCombat.TURRET_TOP_Z,
+                x          = turretXs[0], y = -0.03f, z = DraftCombat.TURRET_TOP_Z,
                 rotationY  = sideTurretAngles[0],
                 scale      = 1f,
             ),
@@ -171,36 +150,34 @@ internal class SceneAssembler(
             SceneObject(
                 id         = 111,
                 meshHandle = sideBaseMeshHandle,
-                x          = turretXs[1], y = 0f, z = DraftCombat.PLATFORM_TOP_Z,
+                x          = turretXs[1], y = -0.02f, z = DraftCombat.SIDE_BASE_Z,
                 scale      = 1f,
             ),
             SceneObject(
                 id         = 121,
                 meshHandle = sideBarrelMeshHandle,
-                x          = turretXs[1], y = 0f, z = DraftCombat.TURRET_TOP_Z,
+                x          = turretXs[1], y = -0.03f, z = DraftCombat.TURRET_TOP_Z,
                 rotationY  = sideTurretAngles[1],
                 scale      = 1f,
             ),
-            // Laser installation — small dome with a vertical barrel between
-            // the central turret and the right side turret. Single static
-            // mesh, mesh authored in world units so scale=1.
+            // Laser installation — small dome amidships, just starboard of
+            // the centerline between the side turrets. Static.
             SceneObject(
                 id         = 131,
                 meshHandle = laserInstallMeshHandle,
                 x          = DraftCombat.LASER_INSTALL_X,
-                y          = 0f,
-                z          = DraftCombat.PLATFORM_TOP_Z,
+                y          = -0.02f,
+                z          = DraftCombat.LASER_INSTALL_Z,
                 scale      = 1f,
             ),
-            // Rocket silo — open hatch on the LEFT side of the central
-            // turret. Rockets emerge from its launch opening (see
-            // launchRocketStrike). Static, no rotation.
+            // Rocket silo — port mirror of the laser dome on the same
+            // amidships row. Rockets emerge from its launch opening.
             SceneObject(
                 id         = 132,
                 meshHandle = rocketSiloMeshHandle,
                 x          = DraftCombat.ROCKET_SILO_X,
-                y          = 0f,
-                z          = DraftCombat.PLATFORM_TOP_Z,
+                y          = -0.02f,
+                z          = DraftCombat.ROCKET_SILO_Z,
                 scale      = 1f,
             ),
         ) + asteroids.mapIndexed { i, a ->

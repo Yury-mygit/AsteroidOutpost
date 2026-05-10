@@ -1,65 +1,34 @@
 package com.example.asteroidoutpost
 
-import android.content.Intent
-import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
-import android.os.HandlerThread
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.Gravity
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.ImageButton
-import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.activity.result.contract.ActivityResultContracts
+import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
-import kotlin.math.pow
-import com.example.asteroidoutpost.game.Ability
-import com.example.asteroidoutpost.game.AbilityCatalog
-import com.example.asteroidoutpost.game.AbilitySlot
-import com.example.asteroidoutpost.game.SceneAssembler
-import com.example.asteroidoutpost.game.buildHpBars
-import com.example.asteroidoutpost.game.buildShieldDome
-import com.example.asteroidoutpost.game.AbilityId
-import com.example.asteroidoutpost.game.AsteroidType
-import com.example.asteroidoutpost.game.GameProgress
+import com.example.asteroidoutpost.game.GameState
 import com.example.asteroidoutpost.game.MissionConfig
-import com.example.asteroidoutpost.game.MissionRun
+import com.example.asteroidoutpost.game.MissionRunner
 import com.example.asteroidoutpost.game.Missions
-import com.example.asteroidoutpost.game.OverlayFactory
+import com.example.asteroidoutpost.game.overlay.addMenuButton
+import com.example.asteroidoutpost.game.overlay.buildEndOfMission
+import com.example.asteroidoutpost.game.overlay.buildMenu
+import com.example.asteroidoutpost.game.overlay.buildMissionList
+import com.example.asteroidoutpost.game.overlay.buildUpgrades
+import com.example.asteroidoutpost.game.overlay.buildWeaponSelect
+import com.example.asteroidoutpost.game.overlay.setMenuBody
 import com.example.asteroidoutpost.game.ProgressRepository
+import com.example.asteroidoutpost.game.SceneAssembler
 import com.example.asteroidoutpost.game.UpgradeCatalog
 import com.example.asteroidoutpost.game.Weapon
 import com.example.asteroidoutpost.game.WeaponCatalog
-import com.example.asteroidoutpost.game.WeaponId
-import com.example.asteroidoutpost.game.combat.Asteroid
 import com.example.asteroidoutpost.game.combat.DraftCombat
-import com.example.asteroidoutpost.game.combat.Fireball
-import com.example.asteroidoutpost.game.combat.Flash
-import com.example.asteroidoutpost.game.combat.Particle
-import com.example.asteroidoutpost.game.combat.RocketPhase
-import com.example.asteroidoutpost.game.combat.Vec3
-import com.example.asteroidoutpost.game.combat.Beam
-import com.example.asteroidoutpost.game.combat.HeavyShellBehavior
-import com.example.asteroidoutpost.game.combat.HomingRocketBehavior
-import com.example.asteroidoutpost.game.combat.PlainBulletBehavior
-import com.example.asteroidoutpost.game.combat.Projectile
-import com.example.asteroidoutpost.game.combat.ProjectileBehavior
 import com.example.asteroidoutpost.game.combat.VfxSpawner
-import com.example.asteroidoutpost.game.combat.WeaponEffect
-import com.example.asteroidoutpost.game.combat.WeaponEffectContext
-import com.example.asteroidoutpost.game.combat.tickParticles
-import com.example.asteroidoutpost.game.combat.bestHpTargetInArc
-import com.example.asteroidoutpost.game.combat.centralWeaponHalfArc
-import com.example.asteroidoutpost.game.combat.isWithinArc
-import com.example.asteroidoutpost.game.combat.nearestAsteroidInArc
-import com.example.asteroidoutpost.game.combat.pickAsteroidAt
-import com.example.asteroidoutpost.game.combat.pickAsteroidType
 import com.example.asteroidoutpost.game.content.buildFireballSphereMesh
 import com.example.asteroidoutpost.game.content.buildLaserInstallationMesh
 import com.example.asteroidoutpost.game.content.buildMuzzleConeMesh
@@ -67,6 +36,7 @@ import com.example.asteroidoutpost.game.content.buildParticleQuadMesh
 import com.example.asteroidoutpost.game.content.buildRocketMesh
 import com.example.asteroidoutpost.game.content.buildRocketSiloMesh
 import com.example.asteroidoutpost.game.content.buildShieldArchMesh
+import com.example.asteroidoutpost.game.content.buildShipHullMesh
 import com.example.asteroidoutpost.game.content.buildSoftDiskMesh
 import com.example.asteroidoutpost.game.content.buildTurretBarrelMesh
 import com.example.asteroidoutpost.game.content.buildTurretBaseMesh
@@ -76,28 +46,7 @@ import com.example.asteroidoutpost.game.ui.HudView
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var engineView:         EngineView
-    private lateinit var selectionOverlay:   SelectionOverlayView
-    private lateinit var axisIndicator:      AxisIndicatorView
-    private lateinit var btnSettings:        ImageButton
-    private lateinit var settingsPullTab:    TextView
-    private lateinit var axisPanel:          LinearLayout
-    private lateinit var btnCommands:        ImageButton
-    private lateinit var commandsDrawer:     GridLayout
-    private lateinit var btnBuild:           ImageButton
-    private lateinit var buildDrawer:        GridLayout
-    private lateinit var btnBuildFighter:    ImageButton
-    private lateinit var btnAttack:          ImageButton
-    private lateinit var btnDefend:          ImageButton
-    private lateinit var btnFlyAround:       ImageButton
-    private lateinit var btnPatrol:          ImageButton
-    private lateinit var btnHome:            ImageButton
-    private lateinit var btnMic:             ImageButton
-    private lateinit var cameraJoystick:     CameraJoystickView
-    private lateinit var shipCard:           LinearLayout
-    private lateinit var shipCardTitle:      TextView
-    private lateinit var shipCardSubtitle:   TextView
-    private lateinit var shipCardHint:       TextView
+    private lateinit var engineView: EngineView
 
     // ---------------------------------------------------------------------------
     // Scene meshes — owned by Kotlin, submitted to engine each frame
@@ -110,6 +59,9 @@ class MainActivity : AppCompatActivity() {
     // base meshes are oriented sitting on the platform, the barrel meshes have
     // their origin at the pivot and extend along +Z so a SceneObject's
     // rotationY pivots the housing in-place.
+    // Ship hull replaces the legacy gray-quad platform — long horizontal
+    // silhouette with a tapered prow (right) and engine block (left).
+    private var shipHullMeshHandle:       Long = 0L
     private var centralBaseMeshHandle:    Long = 0L
     private var centralBarrelMeshHandle:  Long = 0L
     private var sideBaseMeshHandle:       Long = 0L
@@ -117,10 +69,6 @@ class MainActivity : AppCompatActivity() {
     private var laserInstallMeshHandle:   Long = 0L
     private var rocketSiloMeshHandle:     Long = 0L
     private var rocketMeshHandle:         Long = 0L
-    // Side turret aim angles — independent of the firing routine, smoothed
-    // every tick toward the nearest asteroid so the rotating barrel mesh
-    // tracks a target visually rather than snapping at fire-time only.
-    private val sideTurretAngles = floatArrayOf(0f, 0f)
     // Per-type asteroid meshes. NORMAL/FAST randomize across two grey variants
     // at spawn so common waves don't look like clones; HEAVY/EXPLOSIVE/ENERGY
     // each get their own silhouette + tint so the type is readable at a glance.
@@ -171,151 +119,46 @@ class MainActivity : AppCompatActivity() {
     // dynamic translucent objects (currently just the shield dome).
     private var nebulaeTranslucent: List<SceneObject> = emptyList()
 
-    // Aim state. Player drags on the screen to aim the central turret; while the
-    // finger is down, the turret fires along the aim direction at fire-rate.
-    // Central turret runs auto-aim with a sticky lock — once it picks a
-    // target (auto-rule or player tap), it stays on that target until the
-    // asteroid dies, then re-picks. Without stickiness, two HEAVYs at near-
-    // equal HP cause the turret to jitter between them as bullets land. The
-    // player taps an asteroid to override the auto-pick at any time.
-    @Volatile private var centralTargetId: Long? = null
-    // Smoothed aim angle of the central turret (radians, atan2(dx,dz)). Tracks
-    // the touch position; used to orient the turret model and bullet spawn.
-    private var centralTurretAngle: Float = 0f
-
-    private val flashes: MutableList<Flash> = mutableListOf()
-
-    private val fireballs: MutableList<Fireball> = mutableListOf()
-
-    // Two pools, one per pipeline. Capped at engine kMaxParticles (4096)
-    // each; runaway emitters are limited at the engine boundary too.
-    private val sparkParticles:  MutableList<Particle> = mutableListOf()
-    private val smokeParticles:  MutableList<Particle> = mutableListOf()  // alpha-textured smoke
-    private val debrisParticles: MutableList<Particle> = mutableListOf()  // alpha-textured chunks
-    // Active combat effects — projectiles (Projectile) and beams (Beam).
-    // Owned/mutated only by the tick thread; `tick()` per effect each frame,
-    // consumed effects are removed; buildScene queries by type to compose
-    // SceneObjects (projectiles) and BeamDraws (beams).
-    private val effects: MutableList<WeaponEffect> = mutableListOf()
-    private val asteroids:  MutableList<Asteroid> = mutableListOf(
-        Asteroid(id = 1L, xPos = -1.5f, zPos = 8.5f, hp = 100),
-        Asteroid(id = 2L, xPos =  1.0f, zPos = 8.0f, hp = 100),
-    )
-    private var nextAsteroidId: Long = 3L
-    private fun newAsteroidId(): Long = nextAsteroidId++
-    // VFX side of combat — appends to the lists above. Initialised at the
-    // end of `setupBackgroundNebulae` once mesh handles (muzzleCone, quadFlash)
-    // are loaded; safe to use from the tick from the moment PLAYING starts.
-    private lateinit var vfx: VfxSpawner
-    // Per-tick context handed to every WeaponEffect.tick() call. Exposes the
-    // bits of world state effects need (asteroids for collision/aiming, vfx
-    // for impact/jet/trail flashes) without coupling the effect classes to
-    // MainActivity. Initialised alongside `vfx`.
-    private val weaponCtx: WeaponEffectContext = object : WeaponEffectContext {
-        override val asteroids: List<Asteroid> get() = this@MainActivity.asteroids
-        override val vfx: VfxSpawner            get() = this@MainActivity.vfx
-    }
-    // Game → engine adapter. Reads game state (asteroids, projectiles, beams,
-    // flashes, fireballs, particles) and produces a per-frame `SceneFrame` the
-    // engine consumes. Constructed at the end of `setupBackgroundNebulae`
-    // (after all mesh handles are loaded); used from `buildScene` each frame.
+    // Game → engine adapter. Reads the runner's gameplay state (asteroids,
+    // effects, flashes, fireballs, particles) by ref + per-frame scalars
+    // (centralTurretAngle, shieldHp, reloadProgress) and produces a
+    // `SceneFrame` the engine consumes. Constructed at the end of
+    // setupBackgroundNebulae once mesh handles + the runner are ready.
     private lateinit var sceneAssembler: SceneAssembler
-    // Central turret fire cooldown — counts DOWN regardless of touch state.
-    // A new shot is allowed only when this hits 0; on fire it's reset to the
-    // weapon's `fireIntervalSec`. This ensures rapid taps can't bypass the
-    // weapon's intended rate of fire (the previous `fireTimer` was primed on
-    // every ACTION_DOWN, which made tap-spam fire one shot per tap).
-    private var centralFireCooldown: Float = 0f
-    private var spawnTimer: Float = 0f
-    // Wave runtime state (set by startMission, advanced by tick).
-    private var currentMission:    MissionConfig? = null
-    private var currentWaveIndex:  Int   = 0
-    private var currentWaveSpawned: Int  = 0
-    private var waveBreakTimer:    Float = 0f
-    // Effective per-run combat values, derived from upgrade levels at startMission.
-    // Central turret = main weapon (player-controlled). Side turrets = automatic
-    // support (~50% damage of the central turret at the same upgrade level).
-    private var effectiveMainWeaponDamage: Int = UpgradeCatalog.mainWeaponDamageAt(1)
-    private var effectiveTurretDamage:     Int = UpgradeCatalog.sideTurretDamageAt(1)
-    // Active weapon equipped on the central turret. Single-weapon for now;
-    // M2.3 will introduce a pre-mission weapon-select screen that sets this.
-    @Volatile private var currentWeapon: Weapon = WeaponCatalog.AUTOMATIC
 
-    // Shield — permanent barrier with HP. Asteroids that touch the platform
-    // chip its HP first; only when shield HP runs out does the platform take
-    // damage. The player holds the shield button to recharge — energy
-    // drains while pressed, shield HP refills proportionally. No on/off
-    // toggle; the arch is rendered whenever shieldHp > 0.
-    @Volatile private var shieldHp:         Float   = DraftCombat.SHIELD_MAX_HP
-    @Volatile private var shieldRecharging: Boolean = false
-    private var shieldUiPctLast: Int = -1   // last shown HP percentage (UI throttle)
+    // Mission runner — owns gameplay state, tick loop, ability framework,
+    // RocketSilo, target selection, win/lose detection. Constructed in
+    // onCreate; assets/HUD/VFX attached in setupBackgroundNebulae once
+    // they're loaded. Activity drives lifecycle (startMission/stopMission/
+    // destroy) and forwards UI events (taps, ability presses, shield holds).
+    private lateinit var missionRunner: MissionRunner
 
-    // Buff system (single slot). When `activeBuffTimer > 0`, the central
-    // turret's per-shot damage is multiplied by `activeBuffDamageMul`. Set by
-    // ENERGY-asteroid kills; ticked down each frame.
-    @Volatile private var activeBuffTimer:       Float = 0f
-    @Volatile private var activeBuffDamageMul:   Float = 1f
-    private var buffUiSecLast: Int = -1
-    // Energy resource (M8.3) — fuel for active abilities (rocket strike,
-    // laser strike, future ones). Regenerates passively in-mission;
-    // between missions the player will be able to upgrade ENERGY_MAX and
-    // ENERGY_REGEN_PER_SEC for metal (separate milestone).
-    @Volatile private var energy: Float = DraftCombat.ENERGY_MAX
-    private var energyUiLast: Int = -1
-
-    private val abilitySlots: List<AbilitySlot> = listOf(
-        AbilitySlot(AbilityCatalog.ROCKET_STRIKE),
-        AbilitySlot(AbilityCatalog.LASER_STRIKE),
-    )
-    // DRAFT — turret state. Two static blue squares on the platform; each fires
-    // at the nearest asteroid. Kept simple (per-turret fire timer only).
-    private val turretXs       = floatArrayOf(-1.8f, 1.8f)
-    // Weapon-installation owners — tied to specific projectile types via
-    // their fire() methods. RocketSilo can ONLY produce HomingRocketBehavior
-    // projectiles (see class definition); the structural binding prevents
-    // accidental "rocket silo fires bullets" regressions.
-    private val rocketSilo: RocketSilo = RocketSilo(
-        xPos = DraftCombat.ROCKET_SILO_X,
-        zPos = DraftCombat.PLATFORM_TOP_Z + DraftCombat.ROCKET_SILO_MUZZLE_OFFSET,
-    )
-    private val turretFireT    = floatArrayOf(0f, 0f)
-
-    @Volatile private var platformHP: Int = 100
     // Persistent player state. Loaded from SharedPreferences in onCreate.
     private lateinit var progressRepo: ProgressRepository
-    // In-flight stats for the current mission attempt. Reset on each game start.
-    private val missionRun: MissionRun = MissionRun()
-    private lateinit var abilityBar:        LinearLayout
+
     // HUD action-bar widgets (shield button, ability buttons, buff indicator,
     // abort ✕). Owns its own Drawables and refresh logic; we expose the views
     // as `hud.shieldButton` / `hud.abortButton` etc. for layout mounting.
     private lateinit var hud: HudView
+    private lateinit var abilityBar: LinearLayout
+
     private val hudCallbacks: HudView.Callbacks = object : HudView.Callbacks {
-        override fun onShieldDown() {
-            if (gameState != GameState.PLAYING) return
-            shieldRecharging = true
-            hud.refreshShield(shieldHp, DraftCombat.SHIELD_MAX_HP)
-        }
-        override fun onShieldUp() {
-            shieldRecharging = false
-            hud.refreshShield(shieldHp, DraftCombat.SHIELD_MAX_HP)
-        }
-        override fun onAbilityTap(slotIndex: Int) {
-            if (gameState != GameState.PLAYING) return
-            if (slotIndex !in abilitySlots.indices) return
-            val slot = abilitySlots[slotIndex]
-            if (slot.currentCd > 0f) return
-            if (energy < slot.ability.cost) return
-            // Marshal to the tick thread so the spawn lands between two ticks
-            // atomically with the rest of the simulation (effects/asteroids
-            // are mutated on DraftTickThread; activateAbility appends to them).
-            missionHandler?.post { activateAbility(slot) }
-        }
-        override fun onAbortMission() {
-            if (gameState != GameState.PLAYING) return
-            showMissionSelect()
+        override fun onShieldDown()    { missionRunner.handleShieldDown() }
+        override fun onShieldUp()      { missionRunner.handleShieldUp() }
+        override fun onAbilityTap(slotIndex: Int) { missionRunner.handleAbilityTap(slotIndex) }
+        override fun onAbortMission()  {
+            if (missionRunner.gameState != GameState.PLAYING) return
+            // Abort returns the player to mission select, with menu underneath
+            // for the "Назад" path.
+            resetStack(Screen.Menu, Screen.MissionSelect)
         }
     }
+
+    private val missionRunnerHost: MissionRunner.Host = object : MissionRunner.Host {
+        override fun onMissionWon()  { replaceTop(Screen.Win) }
+        override fun onMissionLost() { replaceTop(Screen.Lose) }
+    }
+
     private lateinit var fpsLabel:          TextView
     private val fpsHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val fpsUpdater = object : Runnable {
@@ -325,42 +168,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // DRAFT — game state machine. MENU on launch; PLAYING starts on Play tap;
-    // WON/LOST when conditions hit. Tick only advances when PLAYING.
-    private enum class GameState { MENU, PLAYING, WON, LOST }
-    @Volatile private var gameState: GameState = GameState.MENU
-    private lateinit var menuOverlay:          View
-    private lateinit var missionSelectOverlay: View
-    // Rebuilt each time it is shown — content depends on the picked mission and
-    // the current weapon (to highlight the active card).
-    private var weaponSelectOverlay: View? = null
-    // Rebuilt on each show — content depends on currentMission and missionRun.
-    private var winOverlay:        View? = null
-    private var loseOverlay:       View? = null
-    private var upgradesOverlay:   View? = null
-    private var upgradesReturnTo:  (() -> Unit)? = null
-    // ---------------------------------------------------------------------------
-    // Settings
-    // ---------------------------------------------------------------------------
-    private val settingsLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { _ ->
-        applySettings()
+    // ---------------------------------------------------------------------
+    // Navigation stack — single source of truth for which overlay is on
+    // screen. `enterScreen` pushes (Back will pop), `popScreen` pops one
+    // (empty stack closes the app), `replaceTop` swaps the visible screen
+    // without changing depth (used when the runner reports win/lose →
+    // Playing replaced by Win/Lose), `resetStack` rebuilds the entire
+    // history (used by "К выбору миссий" and abort).
+    //
+    // Each entry is a [Screen] sealed object — parametrized variants
+    // (e.g. WeaponSelect carries the picked mission) keep all per-screen
+    // context inside the stack instead of scattered fields.
+    // ---------------------------------------------------------------------
+    private sealed class Screen {
+        object Menu : Screen()
+        object MissionSelect : Screen()
+        data class WeaponSelect(val mission: MissionConfig) : Screen()
+        object Base : Screen()
+        object Win : Screen()
+        object Lose : Screen()
+        /** No overlay — gameplay running. HUD visible. */
+        object Playing : Screen()
     }
 
-    // ---------------------------------------------------------------------------
-    // Ticking
-    // ---------------------------------------------------------------------------
-    private var missionThread:  HandlerThread? = null
-    private var missionHandler: Handler?       = null
+    private val backStack = ArrayDeque<Screen>()
+    private var currentOverlay: View? = null
 
     // Background music. SFX (engine drone / shoot) belonged to the g3 fleet
     // sim and have been retired with that subsystem.
     private var bgMusic: MediaPlayer? = null
-
-    companion object {
-        private const val TICK_MS = 20L
-    }
 
     // ---------------------------------------------------------------------------
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -375,28 +211,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         setContentView(R.layout.activity_main)
-        engineView       = findViewById(R.id.engineView)
-        selectionOverlay = findViewById(R.id.selectionOverlay)
-        axisPanel        = findViewById(R.id.axisPanel)
-        axisIndicator    = findViewById(R.id.axisIndicator)
-        settingsPullTab  = findViewById(R.id.settingsPullTab)
-        btnSettings      = findViewById(R.id.btnSettings)
-        btnCommands      = findViewById(R.id.btnCommands)
-        commandsDrawer   = findViewById(R.id.commandsDrawer)
-        btnBuild         = findViewById(R.id.btnBuild)
-        buildDrawer      = findViewById(R.id.buildDrawer)
-        btnBuildFighter  = findViewById(R.id.btnBuildFighter)
-        btnAttack        = findViewById(R.id.btnAttack)
-        btnDefend        = findViewById(R.id.btnDefend)
-        btnFlyAround     = findViewById(R.id.btnFlyAround)
-        btnPatrol        = findViewById(R.id.btnPatrol)
-        btnHome          = findViewById(R.id.btnHome)
-        btnMic           = findViewById(R.id.btnMic)
-        cameraJoystick   = findViewById(R.id.cameraJoystick)
-        shipCard         = findViewById(R.id.shipCard)
-        shipCardTitle    = findViewById(R.id.shipCardTitle)
-        shipCardSubtitle = findViewById(R.id.shipCardSubtitle)
-        shipCardHint     = findViewById(R.id.shipCardHint)
+        engineView = findViewById(R.id.engineView)
 
         // Load persistent player progress (metal, upgrades, etc.).
         progressRepo = ProgressRepository(this)
@@ -414,16 +229,22 @@ class MainActivity : AppCompatActivity() {
         engineView.initialize()
         loadShaders()
 
-        btnSettings.setOnClickListener { settingsLauncher.launch(Intent(this, SettingsActivity::class.java)) }
-        // All other g3-inherited buttons (commands drawer, build menu, mic, fleet
-        // missions) have no Outpost-side action — they're hidden by the visibility
-        // sweep below and unwired so the inflated layout doesn't ship dead handlers.
+        // Mission runner — built early so HudView can reference its
+        // `abilitySlots` at construction time. HUD/VFX/mesh handles are
+        // attached later (in setupBackgroundNebulae) once asset load
+        // completes; the runner doesn't tick until startMission anyway.
+        missionRunner = MissionRunner(
+            uiHandler    = Handler(mainLooper),
+            progressRepo = progressRepo,
+            onRender     = ::buildScene,
+            host         = missionRunnerHost,
+        )
 
         // DRAFT — camera locked. The central turret runs auto-aim: it picks the
         // most dangerous asteroid (highest current HP, ties broken by nearest
         // to the turret) and fires at it whenever the cooldown allows. The
         // player taps an asteroid to override the auto-pick with a priority
-        // lock — the turret then prefers that asteroid until it dies or
+        // lock — the runner then prefers that asteroid until it dies or
         // leaves the screen. Tap on empty space is a no-op (so accidental
         // misses don't release a deliberate lock).
         engineView.onCameraOrbited = { _, _ -> }
@@ -431,7 +252,7 @@ class MainActivity : AppCompatActivity() {
         engineView.onCameraReset   = { }
         engineView.onTap = { _, _ -> }
         engineView.setOnTouchListener { _, event ->
-            if (gameState == GameState.PLAYING &&
+            if (missionRunner.gameState == GameState.PLAYING &&
                 event.actionMasked == MotionEvent.ACTION_DOWN) {
                 val w = engineView.width.toFloat()
                 val h = engineView.height.toFloat()
@@ -442,33 +263,17 @@ class MainActivity : AppCompatActivity() {
                                  DraftCombat.SCREEN_BOTTOM_Z
                     val worldZ = DraftCombat.SCREEN_TOP_Z -
                                  (event.y / h) * zSpan
-                    val picked = pickAsteroidAt(asteroids, worldX, worldZ)
-                    if (picked != null) {
-                        // Re-tapping the same locked asteroid releases the
-                        // priority lock — auto-pick takes over within the
-                        // central's arc. Tap on a different asteroid sets
-                        // a new lock.
-                        centralTargetId = if (centralTargetId == picked.id) null
-                                          else picked.id
-                    }
+                    missionRunner.handleWorldTap(worldX, worldZ)
                 }
             }
             true
         }
 
-        // DRAFT — hide all g3 inherited UI overlays so only the scene is visible.
-        listOf(
-            cameraJoystick, btnSettings, btnCommands, commandsDrawer,
-            btnBuild, buildDrawer, btnMic, shipCard,
-            axisPanel, axisIndicator, settingsPullTab,
-            findViewById<View>(R.id.statusText),
-        ).forEach { it?.visibility = View.GONE }
-
         // Single sci-fi HUD anchored at top: left = mission + wave, right = score + HP,
         // ✕ embedded as the rightmost child (no separate floating button). Background
         // intentionally absent — HUD shouldn't compete visually with gameplay.
         val root = engineView.parent as FrameLayout
-        hud = HudView(this, abilitySlots, hudCallbacks)
+        hud = HudView(this, missionRunner.abilitySlots, hudCallbacks)
         val sideMargin = com.example.asteroidoutpost.game.UiTheme.dp(this, 12f)
         val topMargin  = com.example.asteroidoutpost.game.UiTheme.dp(this, 16f)
         val hudParams = FrameLayout.LayoutParams(
@@ -485,35 +290,37 @@ class MainActivity : AppCompatActivity() {
         // Each button has its own state machine (shield: READY/ACTIVE/
         // COOLING; ability: READY/COOLING/INSUFFICIENT-ENERGY/ARMED).
         val theme = com.example.asteroidoutpost.game.UiTheme
-        // Icon-sized bar — buttons are now icon-only most of the time
-        // (cooldown text on ability buttons swaps in via refresh, replacing
-        // the icon rather than stacking under it). Height = icon (22dp) +
-        // ~5dp slack to breathe.
-        val barH        = theme.dp(this, 32f)
-        val btnW        = theme.dp(this, 96f)
+        // Vertical column at bottom-right — thumb-reachable on portrait
+        // phones. Buttons are square icon-tiles (~46dp side) stacked with a
+        // small gap; cooldown text swaps in for the icon via refresh when
+        // it has to show.
+        val btnSide     = theme.dp(this, 46f)
         val btnGapDp    = theme.dp(this, 8f)
-        val btnLp = LinearLayout.LayoutParams(btnW, barH)
-        val btnLpGap = LinearLayout.LayoutParams(btnW, barH).apply {
-            marginStart = btnGapDp
+        val btnLp = LinearLayout.LayoutParams(btnSide, btnSide)
+        val btnLpGap = LinearLayout.LayoutParams(btnSide, btnSide).apply {
+            setMargins(0, btnGapDp, 0, 0)
         }
         abilityBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
         }
         abilityBar.addView(hud.buildShieldButton(), btnLp)
         // Build one button per slot, sharing the same dimensions as the
-        // shield button so the row reads as a uniform diegetic control bar.
+        // shield button so the column reads as a uniform diegetic control stack.
         for (btn in hud.buildAbilityButtons()) {
             abilityBar.addView(btn, btnLpGap)
         }
         val barParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL,
-        ).apply { bottomMargin = theme.dp(this@MainActivity, 12f) }
+            android.view.Gravity.BOTTOM or android.view.Gravity.END,
+        ).apply {
+            bottomMargin = theme.dp(this@MainActivity, 16f)
+            marginEnd    = theme.dp(this@MainActivity, 16f)
+        }
         root.addView(abilityBar, barParams)
-        hud.refreshShield(shieldHp, DraftCombat.SHIELD_MAX_HP)
-        hud.refreshAllAbilities(energy)
+        hud.refreshShield(missionRunner.shieldHp, DraftCombat.SHIELD_MAX_HP)
+        hud.refreshAllAbilities(DraftCombat.ENERGY_MAX)
 
         // Abort ✕ button is built and added inside buildHudPanel() so it
         // shares the HUD's row and visibility — no separate FrameLayout
@@ -561,33 +368,10 @@ class MainActivity : AppCompatActivity() {
         root.addView(fpsLabel, fpsParams)
         fpsHandler.post(fpsUpdater)
 
-        // DRAFT — full-screen overlays for menu / mission select / win / lose.
-        menuOverlay          = OverlayFactory.build(this, "Asteroid Outpost", "Играть")    { showMissionSelect() }
-        missionSelectOverlay = OverlayFactory.buildMissionList(
-            this,
-            Missions.ALL,
-            onStart = { showWeaponSelect(it) },
-            onBack  = { goToMenu() },
-        )
-        OverlayFactory.setBody(menuOverlay, "Всего металла: ${progressRepo.current.metal}")
-        // "Улучшения" button on menu — opens the upgrades overlay.
-        // Win/lose overlays are built on demand in present*Overlay() and include
-        // their own Upgrades button, so we don't add it here.
-        OverlayFactory.addButton(menuOverlay, "Улучшения") { showUpgrades { menuOverlay.visibility = View.VISIBLE } }
-        val fullScreen = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-        )
-        root.addView(menuOverlay,          fullScreen)
-        root.addView(missionSelectOverlay, fullScreen)
-        missionSelectOverlay.visibility = View.GONE
-        // Game starts in MENU — hide HUD until Play tapped.
-        hud.setHudVisible(false)
-        abilityBar.visibility = View.GONE     // hidden outside PLAYING
-        hud.abortButton.visibility = View.GONE
-        selectionOverlay.visibility = View.GONE   // selection feature disabled
+        // Game starts on the main menu — every overlay is built on demand
+        // by [renderTop] when its Screen lands on the stack.
         engineView.onSurfaceReady = { loadAssets() }
-        applySettings()
+        resetStack(Screen.Menu)
     }
 
     // ---------------------------------------------------------------------------
@@ -700,11 +484,16 @@ class MainActivity : AppCompatActivity() {
      */
     private fun buildTurretMeshes() {
         val engine = engineView.engine
+        // Central — steel-blue body + saturated cyan accent (primary
+        // armament reads cool/bright). Side bases — dark navy body,
+        // side barrels — dark red body (per the "blue base, red gun"
+        // contrast brief).
         centralBaseMeshHandle = buildTurretBaseMesh(
             engine,
             halfW   = DraftCombat.CENTRAL_BASE_HALF_W,
             height  = DraftCombat.CENTRAL_BASE_HEIGHT,
-            accentR = 0.85f, accentG = 0.30f, accentB = 0.30f,
+            bodyR   = 0.42f, bodyG = 0.50f, bodyB = 0.62f,
+            accentR = 0.40f, accentG = 0.78f, accentB = 1.00f,
         )
         centralBarrelMeshHandle = buildTurretBarrelMesh(
             engine,
@@ -714,13 +503,15 @@ class MainActivity : AppCompatActivity() {
             barrelLength = DraftCombat.CENTRAL_BARREL_LENGTH,
             muzzleHalfW  = DraftCombat.CENTRAL_MUZZLE_HALF_W,
             muzzleLength = DraftCombat.CENTRAL_MUZZLE_LENGTH,
-            accentR = 0.90f, accentG = 0.32f, accentB = 0.32f,
+            bodyR   = 0.50f, bodyG = 0.58f, bodyB = 0.72f,
+            accentR = 0.45f, accentG = 0.82f, accentB = 1.00f,
         )
         sideBaseMeshHandle = buildTurretBaseMesh(
             engine,
             halfW   = DraftCombat.SIDE_BASE_HALF_W,
             height  = DraftCombat.SIDE_BASE_HEIGHT,
-            accentR = 0.30f, accentG = 0.55f, accentB = 1.00f,
+            bodyR   = 0.10f, bodyG = 0.16f, bodyB = 0.42f,
+            accentR = 0.35f, accentG = 0.55f, accentB = 0.90f,
         )
         sideBarrelMeshHandle = buildTurretBarrelMesh(
             engine,
@@ -730,7 +521,8 @@ class MainActivity : AppCompatActivity() {
             barrelLength = DraftCombat.SIDE_BARREL_LENGTH,
             muzzleHalfW  = DraftCombat.SIDE_MUZZLE_HALF_W,
             muzzleLength = DraftCombat.SIDE_MUZZLE_LENGTH,
-            accentR = 0.35f, accentG = 0.60f, accentB = 1.00f,
+            bodyR   = 0.50f, bodyG = 0.10f, bodyB = 0.12f,
+            accentR = 0.85f, accentG = 0.30f, accentB = 0.30f,
         )
         laserInstallMeshHandle = buildLaserInstallationMesh(engine)
         rocketSiloMeshHandle   = buildRocketSiloMesh(engine)
@@ -743,6 +535,11 @@ class MainActivity : AppCompatActivity() {
      * so menu / mission select / game / win-lose all share the same backdrop.
      * Also builds the shield-dome half-disk meshes (E2.2) — they're loaded
      * here because they share `loadMeshRaw` and the translucent pipeline.
+     *
+     * Tail of this function attaches the runner's late-bound deps (HUD,
+     * VfxSpawner, mesh handles) and constructs the SceneAssembler that
+     * reads from the runner's collections — runner must be live and the
+     * mesh handles must already be loaded by the time this runs.
      */
     private fun setupBackgroundNebulae() {
         val engine = engineView.engine
@@ -788,6 +585,8 @@ class MainActivity : AppCompatActivity() {
         // hex-dome). Vertices live in world coordinates so the SceneObject
         // just needs a translation to platform top.
         domeMembraneHandle = buildShieldArchMesh(engine)
+        // Ship hull mesh — replaces the legacy gray-quad platform.
+        shipHullMeshHandle = buildShipHullMesh(engine)
         // E7.1 — load the fireball UV-sphere once. Drawn through the additive
         // pipeline with ADDITIVE_FIRE material in spawnAoeRing.
         fireballMeshHandle = buildFireballSphereMesh(engine)
@@ -801,34 +600,52 @@ class MainActivity : AppCompatActivity() {
         smokeTextureHandle  = generateSmokeTexture(engine)
         debrisTextureHandle = generateDebrisTexture(engine)
         // Initial assignment so menu / mission-select scenes (which don't run
-        // buildScene) still show the nebulae backdrop.
+        // buildScene from the tick) still show the nebulae backdrop.
         engineView.translucentObjects = nebulaeTranslucent
-        // All mesh handles ready — wire up the VFX spawner. Used by tick /
-        // projectile behaviours / RocketSilo for muzzle blasts, fireballs,
-        // hit flashes, asteroid death, shield recharge sparks, etc.
-        vfx = VfxSpawner(
-            flashes          = flashes,
-            fireballs        = fireballs,
-            sparkParticles   = sparkParticles,
-            smokeParticles   = smokeParticles,
-            debrisParticles  = debrisParticles,
+
+        // VFX spawner — appends to the runner's collections (passed by ref).
+        // Used by tick / projectile behaviours / RocketSilo for muzzle blasts,
+        // fireballs, hit flashes, asteroid death, shield recharge sparks, etc.
+        val vfx = VfxSpawner(
+            flashes          = missionRunner.flashes,
+            fireballs        = missionRunner.fireballs,
+            sparkParticles   = missionRunner.sparkParticles,
+            smokeParticles   = missionRunner.smokeParticles,
+            debrisParticles  = missionRunner.debrisParticles,
             muzzleConeMeshHandle = muzzleConeMeshHandle,
             quadFlashHandle      = quadFlashHandle,
         )
-        // game → engine adapter. Reads the same lists VfxSpawner appends to,
-        // composes one `SceneFrame` per call to `assemble(...)` from the tick.
+        // Hand HUD/VFX/projectile mesh handles to the runner so it can spawn
+        // bullets/rockets/beams. From this call onward startMission is safe.
+        missionRunner.attachAssets(
+            hud                   = hud,
+            vfx                   = vfx,
+            rocketMeshHandle      = rocketMeshHandle,
+            bulletMeshHandle      = bulletMeshHandle,
+            bulletHeavyMeshHandle = bulletHeavyMeshHandle,
+            asteroidMeshGrey1     = asteroidMeshGrey1,
+            asteroidMeshGrey2     = asteroidMeshGrey2,
+            asteroidMeshHeavy     = asteroidMeshHeavy,
+            asteroidMeshExplosive = asteroidMeshExplosive,
+            asteroidMeshEnergy    = asteroidMeshEnergy,
+        )
+        // game → engine adapter. Reads the runner's collections (asteroids,
+        // effects, flashes, fireballs, particles) and per-frame scalars
+        // (centralTurretAngle, shieldHp, reloadProgress) to compose one
+        // `SceneFrame` per call to `assemble(...)`.
         sceneAssembler = SceneAssembler(
-            asteroids          = asteroids,
-            effects            = effects,
-            flashes            = flashes,
-            fireballs          = fireballs,
-            sparkParticles     = sparkParticles,
-            smokeParticles     = smokeParticles,
-            debrisParticles    = debrisParticles,
-            turretXs           = turretXs,
-            sideTurretAngles   = sideTurretAngles,
+            asteroids          = missionRunner.asteroids,
+            effects            = missionRunner.effects,
+            flashes            = missionRunner.flashes,
+            fireballs          = missionRunner.fireballs,
+            sparkParticles     = missionRunner.sparkParticles,
+            smokeParticles     = missionRunner.smokeParticles,
+            debrisParticles    = missionRunner.debrisParticles,
+            turretXs           = missionRunner.turretXs,
+            sideTurretAngles   = missionRunner.sideTurretAngles,
             nebulaeTranslucent = nebulaeTranslucent,
             quadGreyHandle           = quadGreyHandle,
+            shipHullMeshHandle       = shipHullMeshHandle,
             quadFlashHandle          = quadFlashHandle,
             quadMeshHandle           = quadMeshHandle,
             quadHpBgHandle           = quadHpBgHandle,
@@ -851,21 +668,24 @@ class MainActivity : AppCompatActivity() {
     // ---------------------------------------------------------------------------
     // Scene building
     /**
-     * Per-frame scene push. Computes the small set of per-frame scalars
-     * (reload progress) and delegates the heavy lifting to `sceneAssembler`.
-     * The assembler reads game state (asteroids, effects, flashes, fireballs,
-     * particles) via the references baked into its constructor and returns a
-     * `SceneFrame`; we copy the lists onto `engineView`.
+     * Per-frame scene push. Reads the runner's per-frame scalars (reload
+     * progress, central turret angle, shield HP) and delegates the heavy
+     * lifting to `sceneAssembler`. The assembler reads game state via the
+     * collection refs baked into its constructor and returns a `SceneFrame`;
+     * we copy the lists onto `engineView`. Wired as the runner's `onRender`
+     * callback so it fires once per tick during PLAYING; also called from
+     * `loadAssets` and `goToMenu` so the menu / win-lose scenes are
+     * composed even while the runner is idle.
      */
     private fun buildScene() {
-        val reloadInterval = currentWeapon.fireIntervalSec
-        val reloadProgress = if (reloadInterval > 0f)
-            (1f - centralFireCooldown / reloadInterval).coerceIn(0f, 1f)
-        else 1f
+        // Guard against the early-mount path. `resetStack(Screen.Menu)` at
+        // the end of onCreate fires before `engineView.onSurfaceReady`, so
+        // the assembler isn't built yet — `loadAssets` will populate the
+        // first frame itself once the Vulkan surface is up.
+        if (!::sceneAssembler.isInitialized) return
         val frame = sceneAssembler.assemble(
-            reloadProgress     = reloadProgress,
-            centralTurretAngle = centralTurretAngle,
-            shieldHp           = shieldHp,
+            centralTurretAngle = missionRunner.centralTurretAngle,
+            shieldHp           = missionRunner.shieldHp,
         )
         engineView.scene              = frame.scene
         engineView.plasmaBillboards   = frame.plasmaBillboards
@@ -875,442 +695,151 @@ class MainActivity : AppCompatActivity() {
         engineView.particleBatches    = frame.particleBatches
     }
 
-    // M8.5 — rocket strike helpers.
-
-    /**
-     * Top N most dangerous asteroids the rocket silo can engage — descending
-     * current HP, tiebreak nearest, filtered to the silo's 95% firing arc.
-     * Origin is the silo opening, not the central pivot, so a target the
-     * central turret can't reach (outside its 80-90% arc) may still be
-     * launchable as long as it's inside the silo's wider 95° cone.
-     */
-    private fun findRocketTargets(maxN: Int): List<Asteroid> {
-        if (asteroids.isEmpty() || maxN <= 0) return emptyList()
-        val sx = DraftCombat.ROCKET_SILO_X
-        val sz = DraftCombat.PLATFORM_TOP_Z + DraftCombat.ROCKET_SILO_MUZZLE_OFFSET
-        val halfArc = DraftCombat.ARC_ROCKET_HALF_RAD
-        return asteroids
-            .filter { it.hp > 0 && isWithinArc(it, sx, sz, halfArc) }
-            .sortedWith(compareByDescending<Asteroid> { it.hp }.thenBy {
-                val ax = it.xPos - sx; val az = it.zPos - sz
-                ax * ax + az * az
-            })
-            .take(maxN)
-    }
-
-    /**
-     * Rocket silo weapon — type-bound to the homing-rocket Projectile.
-     * fire() always constructs Projectiles with HomingRocketBehavior; there
-     * is no path through this class to fire a non-rocket. Future weapon
-     * classes (LaserDome, EmpEmitter, ...) will follow the same pattern —
-     * each one's fire() locks in its own projectile/effect type.
-     *
-     * Lives as an inner class so it captures MainActivity for `effects`,
-     * helpers (spawnMuzzleBlast), and current upgrade state
-     * (effectiveMainWeaponDamage / activeBuffDamageMul read at fire time,
-     * not at construction).
-     */
-    /**
-     * Spring-launched rocket silo. fire() doesn't immediately spawn rockets;
-     * it queues them. Each tick, if no rocket is currently in the tube
-     * (i.e. nothing in ASCENDING phase), the next queued target is
-     * launched: the rocket emerges from the silo opening rising straight
-     * up. Once the rocket has climbed by ROCKET_ASCENT_HEIGHT it transitions
-     * to FLYING (engine ignites, homing kicks in) — and only then does the
-     * next rocket pop from the queue. Sequential, never two rockets
-     * sharing the tube.
-     */
-    private inner class RocketSilo(val xPos: Float, val zPos: Float) {
-        // Queue holds target IDs (not Asteroid refs) so dead targets are
-        // detected at launch time; a rocket whose target died before it
-        // popped just launches and coasts (HomingRocketBehavior handles
-        // missing target gracefully).
-        private val pending: ArrayDeque<Long> = ArrayDeque()
-
-        fun fire(targets: List<Asteroid>) {
-            for (t in targets) pending.addLast(t.id)
-        }
-
-        fun tick() {
-            if (pending.isEmpty()) return
-            if (tubeBlocked()) return
-            val targetId = pending.removeFirst()
-            launchOne(targetId)
-        }
-
-        /** True if there's a rocket still inside the tube (ASCENDING phase). */
-        private fun tubeBlocked(): Boolean {
-            for (e in effects) {
-                if (e is Projectile) {
-                    val bh = e.behaviour
-                    if (bh is HomingRocketBehavior &&
-                        bh.phase == RocketPhase.ASCENDING) {
-                        return true
-                    }
-                }
-            }
-            return false
-        }
-
-        private fun launchOne(targetId: Long) {
-            val baseDmg = effectiveMainWeaponDamage *
-                          DraftCombat.ROCKET_DAMAGE_MUL *
-                          activeBuffDamageMul
-            val rocketDmg = baseDmg.toInt().coerceAtLeast(1)
-            val aoeDmg    = (rocketDmg * DraftCombat.ROCKET_AOE_DAMAGE_MUL)
-                              .toInt().coerceAtLeast(1)
-            // Spawn with the rocket's BASE at the silo opening; mesh is
-            // origin-at-centre so we offset the spawn Z by half-length.
-            val spawnZ = zPos + DraftCombat.ROCKET_BODY_LENGTH * 0.5f
-            effects.add(Projectile(
-                x = xPos, z = spawnZ,
-                vx = 0f,
-                vz = DraftCombat.ROCKET_ASCENT_SPEED,
-                damage     = rocketDmg,
-                halfW      = DraftCombat.ROCKET_HALF_W,
-                halfH      = DraftCombat.ROCKET_HALF_H,
-                meshHandle = rocketMeshHandle,
-                modelScale = 1f,                // procedural, world-unit authored
-                modelYawOffset = 0f,            // +Z = forward, no offset
-                behaviour = HomingRocketBehavior(
-                    targetId     = targetId,
-                    turnRate     = DraftCombat.ROCKET_TURN_RATE_RAD_PER_SEC,
-                    aoeRadius    = DraftCombat.ROCKET_AOE_RADIUS,
-                    aoeDamage    = aoeDmg,
-                    cruiseSpeed  = DraftCombat.ROCKET_CRUISE_SPEED,
-                    boostAccel   = DraftCombat.ROCKET_BOOST_ACCEL,
-                    ascentHeight = DraftCombat.ROCKET_ASCENT_HEIGHT,
-                    ascentSpeed  = DraftCombat.ROCKET_ASCENT_SPEED,
-                    launchZ      = spawnZ,
-                ),
-            ))
-            // Spring-launch puff at the silo opening — points straight up
-            // since the rocket leaves the tube vertically.
-            vfx.spawnMuzzleBlast(xPos, zPos, 0f, 1f,
-                             DraftCombat.ROCKET_HALF_W * 1.4f,
-                             DraftCombat.FLASH_TINT_MUZZLE)
-        }
-    }
-
-    private fun applySettings() {
-        val prefs = getSharedPreferences(SettingsActivity.PREF_FILE, MODE_PRIVATE)
-        val musicVolume = prefs.getFloat(SettingsActivity.KEY_MUSIC_VOLUME, 0.25f)
-        bgMusic?.setVolume(musicVolume, musicVolume)
-        // mic button forced off — the g3 voice-command path is not used by Outpost.
-        btnMic.visibility = View.GONE
-    }
-
     // ---------------------------------------------------------------------------
-    // Tick loop
+    // Navigation — stack of [Screen]s. `enterScreen` pushes, `popScreen` pops
+    // (closes the app on empty stack), `replaceTop` swaps the visible
+    // screen without changing depth, `resetStack` rebuilds history. Each
+    // change ends in [renderTop], which removes whatever overlay is mounted
+    // and builds a fresh one for the new top of the stack.
     // ---------------------------------------------------------------------------
-    private fun ensureTicking() {
-        if (missionThread == null) {
-            missionThread  = HandlerThread("DraftTickThread").also { it.start() }
-            missionHandler = Handler(missionThread!!.looper)
-        }
+
+    private fun enterScreen(screen: Screen) {
+        backStack.addLast(screen)
+        renderTop()
     }
 
-    // DRAFT — game state transitions.
-
-
-    // Central-turret target selection. Sticky lock: if the current target
-    // is still alive, keep firing at it. Otherwise re-pick using the
-    // "highest current HP" rule (the asteroid that takes longest to kill
-    // is the most pressing sustained threat), tiebreak nearest to pivot.
-    // Side effect: stores the new pick into centralTargetId so subsequent
-    // frames stay on it until it dies. Clears centralTargetId when the
-    // locked asteroid has died and no live targets remain.
-    private fun centralTurretTarget(): Asteroid? {
-        val px = DraftCombat.CENTRAL_TURRET_X
-        val pz = DraftCombat.CENTRAL_TURRET_BASE_Z
-        val halfArc = centralWeaponHalfArc(currentWeapon.id)
-        // Sticky lock — when the player has priority-locked an asteroid
-        // (via tap), it's the master target for BOTH the central turret and
-        // any active laser beam, regardless of the central's arc. The
-        // central turret will still track and fire only when the target
-        // happens to be in arc; the laser (95% arc) may engage even targets
-        // outside the central's arc. Lock is released only when the
-        // asteroid dies; tapping the same asteroid again toggles it off
-        // (handled by the touch listener).
-        val tid = centralTargetId
-        if (tid != null) {
-            for (a in asteroids) {
-                if (a.id == tid && a.hp > 0) return a
-            }
-            centralTargetId = null
-        }
-        // Auto-pick (no priority lock): highest-current-HP candidate inside
-        // the central's own arc, tiebreak nearest. Auto-picks are gated by
-        // arc — a sticky auto-lock won't form on something the central
-        // can't engage.
-        val best = bestHpTargetInArc(asteroids, px, pz, halfArc)
-        if (best != null) centralTargetId = best.id
-        return best
+    private fun popScreen() {
+        if (backStack.isNotEmpty()) backStack.removeLast()
+        if (backStack.isEmpty()) finish() else renderTop()
     }
 
-    private fun startGame() {
-        startMission(Missions.ALL[0])
+    private fun replaceTop(screen: Screen) {
+        if (backStack.isNotEmpty()) backStack.removeLast()
+        backStack.addLast(screen)
+        renderTop()
     }
 
-    private fun showMissionSelect() {
-        gameState = GameState.MENU
-        hud.setHudVisible(false)
-        abilityBar.visibility   = View.GONE
-        hud.abortButton.visibility = View.GONE
-        menuOverlay.visibility          = View.GONE
-        removeWinLoseOverlays()
-        removeWeaponSelectOverlay()
-        missionSelectOverlay.visibility = View.VISIBLE
+    private fun resetStack(vararg screens: Screen) {
+        backStack.clear()
+        backStack.addAll(screens)
+        renderTop()
     }
 
-    private fun showWeaponSelect(mission: MissionConfig) {
-        gameState = GameState.MENU
-        missionSelectOverlay.visibility = View.GONE
-        menuOverlay.visibility          = View.GONE
-        removeWinLoseOverlays()
-        removeWeaponSelectOverlay()
+    private fun renderTop() {
         val root = engineView.parent as FrameLayout
-        val overlay = OverlayFactory.buildWeaponSelect(
-            context         = this,
-            weapons         = WeaponCatalog.ALL,
-            currentWeaponId = currentWeapon.id,
-            onChoose = { picked ->
-                currentWeapon = picked
-                removeWeaponSelectOverlay()
-                startMission(mission)
-            },
-            onBack = {
-                removeWeaponSelectOverlay()
-                missionSelectOverlay.visibility = View.VISIBLE
-            },
-        )
-        weaponSelectOverlay = overlay
-        root.addView(overlay, FrameLayout.LayoutParams(
+        currentOverlay?.let { root.removeView(it) }
+        currentOverlay = null
+        // HUD is shown only during gameplay; reset to off and let the
+        // gameplay branch turn it back on if needed.
+        hud.setHudVisible(false)
+        abilityBar.visibility      = View.GONE
+        hud.abortButton.visibility = View.GONE
+
+        when (val top = backStack.lastOrNull() ?: return) {
+            Screen.Menu          -> mountMenu(root)
+            Screen.MissionSelect -> mountMissionSelect(root)
+            is Screen.WeaponSelect -> mountWeaponSelect(root, top.mission)
+            Screen.Base          -> mountBase(root)
+            Screen.Win           -> mountWin(root)
+            Screen.Lose          -> mountLose(root)
+            Screen.Playing       -> mountPlaying()
+        }
+    }
+
+    private fun mountAt(root: FrameLayout, view: View) {
+        currentOverlay = view
+        root.addView(view, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT,
         ))
     }
 
-    private fun removeWeaponSelectOverlay() {
-        val root = engineView.parent as? FrameLayout ?: return
-        weaponSelectOverlay?.let { root.removeView(it); weaponSelectOverlay = null }
-    }
-
-    private fun showUpgrades(returnTo: () -> Unit) {
-        upgradesReturnTo = returnTo
-        // Hide whatever overlay called us; build a fresh upgrades view.
-        menuOverlay.visibility          = View.GONE
-        missionSelectOverlay.visibility = View.GONE
-        removeWinLoseOverlays()
-        removeWeaponSelectOverlay()
-        rebuildUpgrades()
-    }
-
-    private fun removeWinLoseOverlays() {
-        val root = engineView.parent as FrameLayout
-        winOverlay?.let { root.removeView(it); winOverlay = null }
-        loseOverlay?.let { root.removeView(it); loseOverlay = null }
-    }
-
-    private fun rebuildUpgrades() {
-        val root = engineView.parent as FrameLayout
-        upgradesOverlay?.let { root.removeView(it) }
-        val newOverlay = OverlayFactory.buildUpgrades(
-            this, progressRepo.current,
-            onPurchase = { type, cost ->
-                progressRepo.update { UpgradeCatalog.applyPurchase(it, type, cost) }
-                rebuildUpgrades()   // refresh in place
-            },
-            onBack = {
-                upgradesOverlay?.let { root.removeView(it) }
-                upgradesOverlay = null
-                upgradesReturnTo?.invoke()
-                upgradesReturnTo = null
-                // If returning to menu, refresh its metal counter.
-                if (menuOverlay.visibility == View.VISIBLE) {
-                    OverlayFactory.setBody(menuOverlay, "Всего металла: ${progressRepo.current.metal}")
-                }
-            },
+    private fun mountMenu(root: FrameLayout) {
+        // Returning to menu wipes the in-flight scene so the player sees
+        // the empty platform again, not frozen mid-mission projectiles.
+        missionRunner.stopMission(clearScene = true)
+        val view = buildMenu(
+            this, "Asteroid Outpost", "Миссии",
+            onClose = { finish() },
+            onClick = { enterScreen(Screen.MissionSelect) },
         )
-        upgradesOverlay = newOverlay
-        root.addView(newOverlay, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-        ))
-    }
-
-    private fun startMission(mission: MissionConfig) {
-        currentMission     = mission
-        currentWaveIndex   = 0
-        currentWaveSpawned = 0
-        waveBreakTimer     = 0f
-        flashes.clear()
-        fireballs.clear()
-        sparkParticles.clear()
-        smokeParticles.clear()
-        debrisParticles.clear()
-        // Apply upgrade levels — values frozen for the duration of this run.
-        effectiveMainWeaponDamage = UpgradeCatalog.mainWeaponDamageAt(progressRepo.current.mainWeaponDamageLevel)
-        effectiveTurretDamage     = UpgradeCatalog.sideTurretDamageAt(progressRepo.current.sideTurretDamageLevel)
-        val effectiveBaseHp   = mission.baseHp + UpgradeCatalog.baseHpBonusAt(progressRepo.current.baseHpLevel)
-        missionRun.score              = 0
-        missionRun.asteroidsDestroyed = 0
-        missionRun.metalEarned        = 0
-        missionRun.winBonus           = 0
-        missionRun.currentWaveDisplay = 1
-        missionRun.totalWaves         = mission.waves.size
-        missionRun.missionName        = mission.name
-        platformHP    = effectiveBaseHp
-        // Reset aim to straight up. With no live asteroids the turret idles
-        // vertical until the first wave spawns.
-        centralTurretAngle = 0f
-        centralTargetId    = null
-        effects.clear()
-        asteroids.clear()
-        centralFireCooldown = 0f
-        spawnTimer    = 0f
-        turretFireT[0] = 0f
-        turretFireT[1] = 0f
-        // Energy starts the run full so the first ability is immediately
-        // available for early waves.
-        energy        = DraftCombat.ENERGY_MAX
-        energyUiLast  = -1
-        // Reset all ability cooldowns to READY for a clean run.
-        abilitySlots.forEach { it.currentCd = 0f; it.cdUiLast = -1 }
-        hud.refreshAllAbilities(energy)
-        hud.refreshScore(0)
-        hud.refreshHp(effectiveBaseHp)
-        hud.refreshEnergy(energy, DraftCombat.ENERGY_MAX)
-        hud.refreshMissionLabel(mission.name)
-        hud.refreshWaveLabel("Волна 1/${mission.waves.size}")
-        // Reset shield to READY so the new run starts with the ability available.
-        shieldHp         = DraftCombat.SHIELD_MAX_HP
-        shieldRecharging = false
-        shieldUiPctLast  = -1
-        hud.refreshShield(shieldHp, DraftCombat.SHIELD_MAX_HP)
-        // Reset any active buff from the previous run.
-        activeBuffTimer     = 0f
-        activeBuffDamageMul = 1f
-        buffUiSecLast       = -1
-        hud.refreshBuff(activeBuffTimer, activeBuffDamageMul)
-        hud.setHudVisible(true)
-        abilityBar.visibility   = View.VISIBLE
-        hud.abortButton.visibility = View.VISIBLE
-        menuOverlay.visibility          = View.GONE
-        missionSelectOverlay.visibility = View.GONE
-        removeWinLoseOverlays()
-        removeWeaponSelectOverlay()
-        gameState = GameState.PLAYING
-        ensureTicking()
-        scheduleDraftTick()
-        hud.announceWave(1, mission.waves.size)
-    }
-
-    private fun goToMenu() {
-        gameState = GameState.MENU
-        currentMission = null
-        effects.clear()
-        asteroids.clear()
-        hud.setHudVisible(false)
-        abilityBar.visibility   = View.GONE
-        hud.abortButton.visibility = View.GONE
-        missionSelectOverlay.visibility = View.GONE
-        removeWinLoseOverlays()
-        removeWeaponSelectOverlay()
-        OverlayFactory.setBody(menuOverlay, "Всего металла: ${progressRepo.current.metal}")
-        menuOverlay.visibility = View.VISIBLE
+        setMenuBody(view, "Всего металла: ${progressRepo.current.metal}")
+        addMenuButton(view, "База") { enterScreen(Screen.Base) }
+        mountAt(root, view)
         buildScene()
     }
 
-    private fun showWin() {
-        gameState = GameState.WON
-        // Win bonus: +20 metal, awarded once per victory.
-        missionRun.winBonus = 20
-        missionRun.metalEarned += missionRun.winBonus
-        progressRepo.update { it.copy(metal = it.metal + missionRun.winBonus) }
-        runOnUiThread { presentWinOverlay() }
+    private fun mountMissionSelect(root: FrameLayout) {
+        // Don't clear the in-flight scene — if we're aborting from PLAYING,
+        // gameplay state freezes once the runner flips to MENU; it's wiped
+        // wholesale on the next startMission anyway.
+        missionRunner.stopMission(clearScene = false)
+        val view = buildMissionList(
+            this,
+            Missions.ALL,
+            onStart = { enterScreen(Screen.WeaponSelect(it)) },
+            onBack  = { popScreen() },
+        )
+        mountAt(root, view)
     }
 
-    private fun showLose() {
-        gameState = GameState.LOST
-        runOnUiThread { presentLoseOverlay() }
+    private fun mountWeaponSelect(root: FrameLayout, mission: MissionConfig) {
+        missionRunner.stopMission(clearScene = false)
+        val view = buildWeaponSelect(
+            context         = this,
+            weapons         = WeaponCatalog.ALL,
+            currentWeaponId = missionRunner.currentWeapon.id,
+            onChoose = { picked ->
+                resetStack(Screen.Playing)
+                missionRunner.startMission(mission, picked)
+            },
+            onBack = { popScreen() },
+        )
+        mountAt(root, view)
     }
 
-    // ---- Ability activation -----------------------------------------------
-
-    /**
-     * Dispatch effect first, then spend energy + start cooldown. The
-     * dispatch can fail silently (e.g. rocket strike with no asteroids on
-     * screen — refund the spend so the player keeps the resource for when
-     * targets are available). Returns true if the ability fired.
-     */
-    private fun activateAbility(slot: AbilitySlot): Boolean {
-        val a = slot.ability
-        val fired = when (a.id) {
-            AbilityId.ROCKET_STRIKE -> {
-                val targets = findRocketTargets(DraftCombat.ROCKET_COUNT)
-                if (targets.isEmpty()) false
-                else { rocketSilo.fire(targets); true }
-            }
-            AbilityId.LASER_STRIKE  -> {
-                // Beam follows the SAME priority target as the central
-                // turret. The dome has a wider arc (95% vs 80-90%), so it
-                // may engage flank targets the central can't fire at — but
-                // both share the master pick. canEngage gates rendering /
-                // damage to the laser's own arc, with a slight duration
-                // skew if the target sits out of arc for a stretch.
-                // Refund only if there's no master target at all.
-                if (centralTurretTarget() == null) false
-                else {
-                    val sx = DraftCombat.LASER_INSTALL_X
-                    val sz = DraftCombat.PLATFORM_TOP_Z +
-                             DraftCombat.LASER_DOME_TOP_OFFSET
-                    effects.add(Beam(
-                        source = { Vec3(sx, 0f, sz) },
-                        aimSelector  = { centralTurretTarget() },
-                        durationSec  = DraftCombat.LASER_BEAM_DURATION_SEC,
-                        dps          = DraftCombat.LASER_BEAM_DPS,
-                        width        = DraftCombat.LASER_BEAM_WIDTH,
-                        color        = DraftCombat.LASER_TINT,
-                        canEngage    = { a ->
-                            isWithinArc(a, sx, sz, DraftCombat.ARC_LASER_HALF_RAD)
-                        },
-                    ))
-                    true
-                }
-            }
-        }
-        if (!fired) return false
-        energy         = (energy - a.cost).coerceAtLeast(0f)
-        energyUiLast   = -1                    // force HUD energy refresh next tick
-        slot.currentCd = a.cooldownSec
-        slot.cdUiLast  = -1
-        runOnUiThread {
-            hud.refreshEnergy(energy, DraftCombat.ENERGY_MAX)
-            hud.refreshAllAbilities(energy)
-        }
-        return true
+    private fun mountBase(root: FrameLayout) {
+        // База shows the live base scene as a backdrop — same draw list as
+        // gameplay, but with combat off and no enemies. Wipe asteroids /
+        // projectiles / VFX (without touching mission state, so Win/Lose
+        // ↔ База round-trips don't lose context) and refresh the scene.
+        missionRunner.clearCombatScene()
+        buildScene()
+        val view = buildUpgrades(
+            this, progressRepo.current,
+            onPurchase = { type, cost ->
+                progressRepo.update { UpgradeCatalog.applyPurchase(it, type, cost) }
+                renderTop()   // refresh in place
+            },
+            onBack = { popScreen() },
+        )
+        mountAt(root, view)
     }
 
-    private fun presentWinOverlay() {
-        val mission = currentMission ?: return
-        val root = engineView.parent as FrameLayout
-        winOverlay?.let { root.removeView(it) }
+    private fun mountWin(root: FrameLayout) {
+        val mission = missionRunner.currentMission ?: return
+        val run = missionRunner.missionRun
         val stats = listOf(
-            "Уничтожено астероидов" to missionRun.asteroidsDestroyed.toString(),
-            "Очки"                  to missionRun.score.toString(),
-            "Получено металла"      to "${missionRun.metalEarned} (+${missionRun.winBonus} бонус)",
+            "Уничтожено астероидов" to run.asteroidsDestroyed.toString(),
+            "Очки"                  to run.score.toString(),
+            "Получено металла"      to "${run.metalEarned} (+${run.winBonus} бонус)",
             "Всего металла"         to progressRepo.current.metal.toString(),
         )
         val buttons = mutableListOf<Pair<String, () -> Unit>>()
         val nextIdx = Missions.ALL.indexOf(mission) + 1
         if (nextIdx in Missions.ALL.indices) {
-            buttons += "Следующая миссия" to { startMission(Missions.ALL[nextIdx]) }
+            buttons += "Следующая миссия" to {
+                resetStack(Screen.Playing)
+                missionRunner.startMission(Missions.ALL[nextIdx], missionRunner.currentWeapon)
+            }
         }
-        buttons += "Повторить"       to { startMission(mission) }
-        buttons += "Улучшения"       to { showUpgrades { presentWinOverlay() } }
-        buttons += "К выбору миссий" to { showMissionSelect() }
-        val view = OverlayFactory.buildEndOfMission(
+        buttons += "Повторить"       to {
+            resetStack(Screen.Playing)
+            missionRunner.startMission(mission, missionRunner.currentWeapon)
+        }
+        buttons += "База"            to { enterScreen(Screen.Base) }
+        buttons += "К выбору миссий" to { resetStack(Screen.Menu, Screen.MissionSelect) }
+        val view = buildEndOfMission(
             context  = this,
             title    = "МИССИЯ ВЫПОЛНЕНА",
             subtitle = mission.name,
@@ -1318,30 +847,28 @@ class MainActivity : AppCompatActivity() {
             accent   = com.example.asteroidoutpost.game.UiTheme.COL_ACCENT_GREEN,
             buttons  = buttons,
         )
-        winOverlay = view
-        root.addView(view, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-        ))
+        mountAt(root, view)
     }
 
-    private fun presentLoseOverlay() {
-        val mission = currentMission ?: return
-        val root = engineView.parent as FrameLayout
-        loseOverlay?.let { root.removeView(it) }
+    private fun mountLose(root: FrameLayout) {
+        val mission = missionRunner.currentMission ?: return
+        val run = missionRunner.missionRun
         val stats = listOf(
-            "Пройдено волн"         to "${missionRun.currentWaveDisplay - 1}/${missionRun.totalWaves}",
-            "Уничтожено астероидов" to missionRun.asteroidsDestroyed.toString(),
-            "Очки"                  to missionRun.score.toString(),
-            "Получено металла"      to missionRun.metalEarned.toString(),
+            "Пройдено волн"         to "${run.currentWaveDisplay - 1}/${run.totalWaves}",
+            "Уничтожено астероидов" to run.asteroidsDestroyed.toString(),
+            "Очки"                  to run.score.toString(),
+            "Получено металла"      to run.metalEarned.toString(),
             "Всего металла"         to progressRepo.current.metal.toString(),
         )
         val buttons = listOf<Pair<String, () -> Unit>>(
-            "Повторить миссию" to { startMission(mission) },
-            "Улучшения"        to { showUpgrades { presentLoseOverlay() } },
-            "К выбору миссий"  to { showMissionSelect() },
+            "Повторить миссию" to {
+                resetStack(Screen.Playing)
+                missionRunner.startMission(mission, missionRunner.currentWeapon)
+            },
+            "База"             to { enterScreen(Screen.Base) },
+            "К выбору миссий"  to { resetStack(Screen.Menu, Screen.MissionSelect) },
         )
-        val view = OverlayFactory.buildEndOfMission(
+        val view = buildEndOfMission(
             context    = this,
             title      = "БАЗА РАЗРУШЕНА",
             subtitle   = mission.name,
@@ -1350,574 +877,17 @@ class MainActivity : AppCompatActivity() {
             accent     = com.example.asteroidoutpost.game.UiTheme.COL_ACCENT_RED,
             buttons    = buttons,
         )
-        loseOverlay = view
-        root.addView(view, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-        ))
+        mountAt(root, view)
     }
 
-    private fun scheduleDraftTick() {
-        missionHandler?.postDelayed({
-            if (gameState != GameState.PLAYING) return@postDelayed
-            val dt = TICK_MS / 1000f
-
-            // Shield: hold-to-recharge. While the player holds the shield
-            // button AND has energy AND HP isn't capped, energy drains at
-            // SHIELD_RECHARGE_ENERGY_PER_SEC and HP rises proportionally.
-            // The ratio is fixed (4× HP per energy point) — easier to read
-            // than two separate rates the player has to model. UI refresh
-            // is throttled to integer-percent transitions to avoid spam.
-            if (shieldRecharging &&
-                energy > 0f &&
-                shieldHp < DraftCombat.SHIELD_MAX_HP) {
-                val maxEnergyDrain = DraftCombat.SHIELD_RECHARGE_ENERGY_PER_SEC * dt
-                val maxHpFill      = DraftCombat.SHIELD_MAX_HP - shieldHp
-                val maxHpFromEnergy = (DraftCombat.SHIELD_RECHARGE_HP_PER_SEC /
-                                       DraftCombat.SHIELD_RECHARGE_ENERGY_PER_SEC) * energy
-                val hpAdd  = kotlin.math.min(
-                    DraftCombat.SHIELD_RECHARGE_HP_PER_SEC * dt,
-                    kotlin.math.min(maxHpFill, maxHpFromEnergy)
-                )
-                val energyCost = hpAdd / DraftCombat.SHIELD_RECHARGE_HP_PER_SEC *
-                                 DraftCombat.SHIELD_RECHARGE_ENERGY_PER_SEC
-                shieldHp += hpAdd
-                energy   -= energyCost
-                if (energy < 0f) energy = 0f
-                energyUiLast = -1   // force HUD refresh
-            }
-            // Recharge VFX — while the button is held AND the shield is
-            // up (visible to anchor the sparks against), emit a stream of
-            // tangential sparks along the arch. Independent of energy /
-            // HP state: the visual cue tells the player "I'm actively
-            // shielding right now", which is also when the damage-mul
-            // reduction kicks in inside the asteroid-shield collision.
-            if (shieldRecharging && shieldHp > 0f) {
-                vfx.emitShieldRechargeSparks(dt)
-            }
-            // Shield-HP UI throttle (separate from recharge — also catches
-            // damage absorbs): refresh button text when integer-percent
-            // changes.
-            run {
-                val pct = ((shieldHp / DraftCombat.SHIELD_MAX_HP) * 100f).toInt()
-                if (pct != shieldUiPctLast) {
-                    shieldUiPctLast = pct
-                    runOnUiThread { hud.refreshShield(shieldHp, DraftCombat.SHIELD_MAX_HP) }
-                }
-            }
-
-            // Auto-aim. The turret picks the most dangerous live asteroid
-            // (with optional priority override from a tap) and rotates to
-            // face it. With no targets the barrel returns to vertical.
-            val pivotX = DraftCombat.CENTRAL_TURRET_X
-            val pivotZ = DraftCombat.CENTRAL_TURRET_BASE_Z
-            val centralTarget = centralTurretTarget()
-            val centralHalfArc = centralWeaponHalfArc(currentWeapon.id)
-            // Raw target angle = where the turret WOULD point at the target
-            // if the arc were unbounded. Clamped angle = where it's actually
-            // allowed to rotate (within ±halfArc). Aim-alignment compares
-            // against raw, so a target that's locked but out of arc never
-            // counts as "aligned" → fire gate naturally fails.
-            val targetAngleRaw = if (centralTarget != null) {
-                val tx = centralTarget.xPos - pivotX
-                val tz = kotlin.math.max(0f, centralTarget.zPos - pivotZ)
-                if (tx == 0f && tz == 0f) centralTurretAngle
-                else kotlin.math.atan2(tx, tz)
-            } else 0f
-            val targetAngleClamped = targetAngleRaw.coerceIn(-centralHalfArc, centralHalfArc)
-            // Smooth tracking toward the CLAMPED angle — turret rotates as
-            // far as its arc allows and then sits at the edge, visibly
-            // tracking but unable to fire on out-of-arc targets.
-            centralTurretAngle += (targetAngleClamped - centralTurretAngle) * 16f * dt
-
-            // Side turret aim — each one tracks the asteroid nearest its
-            // own pivot, holds the last angle when the field is empty.
-            for (i in turretXs.indices) {
-                val tx = turretXs[i]
-                val tz = DraftCombat.TURRET_TOP_Z
-                val target = nearestAsteroidInArc(
-                    asteroids, tx, tz, DraftCombat.ARC_SIDE_CANNON_HALF_RAD,
-                )
-                val sideTargetAng = if (target != null) {
-                    val dx = target.xPos - tx
-                    val dz = kotlin.math.max(0f, target.zPos - tz)
-                    if (dx == 0f && dz == 0f) sideTurretAngles[i]
-                    else kotlin.math.atan2(dx, dz)
-                } else 0f
-                sideTurretAngles[i] +=
-                    (sideTargetAng - sideTurretAngles[i]) * 16f * dt
-            }
-
-            // Energy regen. UI text updates only when the integer-floor
-            // value changes (regen of 10/sec → ~10 UI updates per second
-            // tops, not 60). On ability activation the spend will trigger
-            // a UI refresh directly.
-            if (energy < DraftCombat.ENERGY_MAX) {
-                energy = kotlin.math.min(DraftCombat.ENERGY_MAX,
-                                         energy + DraftCombat.ENERGY_REGEN_PER_SEC * dt)
-                val ei = energy.toInt()
-                if (ei != energyUiLast) {
-                    energyUiLast = ei
-                    runOnUiThread {
-                        hud.refreshEnergy(energy, DraftCombat.ENERGY_MAX)
-                        // Refresh ability buttons too — energy may have just
-                        // crossed a cost threshold (disabled→ready transition).
-                        hud.refreshAllAbilities(energy)
-                    }
-                }
-            }
-
-            // Ability cooldowns. Refresh the button only when the displayed
-            // ceiling-second changes, or on the final tick that crosses 0
-            // (so the button text flips back to its READY label).
-            abilitySlots.forEachIndexed { i, slot ->
-                if (slot.currentCd > 0f) {
-                    slot.currentCd = kotlin.math.max(0f, slot.currentCd - dt)
-                    val sec = if (slot.currentCd > 0f)
-                        kotlin.math.ceil(slot.currentCd.toDouble()).toInt()
-                    else 0
-                    if (sec != slot.cdUiLast) {
-                        slot.cdUiLast = sec
-                        runOnUiThread { hud.refreshAbility(i, energy) }
-                    }
-                }
-            }
-
-            // Active buff (single slot) — countdown + auto-clear.
-            if (activeBuffTimer > 0f) {
-                activeBuffTimer -= dt
-                if (activeBuffTimer <= 0f) {
-                    activeBuffTimer = 0f
-                    activeBuffDamageMul = 1f
-                    buffUiSecLast = -1
-                    runOnUiThread { hud.refreshBuff(activeBuffTimer, activeBuffDamageMul) }
-                } else {
-                    val sec = kotlin.math.ceil(activeBuffTimer.toDouble()).toInt()
-                    if (sec != buffUiSecLast) {
-                        buffUiSecLast = sec
-                        runOnUiThread { hud.refreshBuff(activeBuffTimer, activeBuffDamageMul) }
-                    }
-                }
-            }
-
-            // Central-turret cooldown — counts down every tick. The turret
-            // fires when it has a target, the cooldown is up, and the barrel
-            // has rotated close enough to the target direction
-            // (AIM_ALIGN_THRESHOLD_RAD). The align gate prevents off-target
-            // shots during the first frames after a target switch, while the
-            // exponential rotation catches up. Active buff multiplies the
-            // weapon's per-shot damage.
-            val weapon = currentWeapon
-            val weaponDamage = (effectiveMainWeaponDamage * weapon.damageMultiplier * activeBuffDamageMul).toInt()
-            if (centralFireCooldown > 0f) {
-                centralFireCooldown -= dt
-                if (centralFireCooldown < 0f) centralFireCooldown = 0f
-            }
-            val aimAligned = kotlin.math.abs(targetAngleRaw - centralTurretAngle) <
-                             DraftCombat.AIM_ALIGN_THRESHOLD_RAD
-            if (centralTarget != null && centralFireCooldown <= 0f && aimAligned) {
-                centralFireCooldown = weapon.fireIntervalSec
-                val ang = centralTurretAngle
-                val sinA = kotlin.math.sin(ang)
-                val cosA = kotlin.math.cos(ang)
-                val muzzleR = DraftCombat.CENTRAL_TURRET_HALF_H * 2f
-                val muzzleX = pivotX + sinA * muzzleR
-                val muzzleZ = pivotZ + cosA * muzzleR
-                // Heavy cannon → Bullet_Heavy.glb (chunky shell), automatic →
-                // Bullet.glb (slim round). aoeRadius is the fire-mode tell —
-                // only the heavy cannon ships AoE.
-                val bulletMesh = if (weapon.aoeRadius > 0f) bulletHeavyMeshHandle
-                                 else                       bulletMeshHandle
-                val centralBehaviour: ProjectileBehavior =
-                    if (weapon.aoeRadius > 0f)
-                        HeavyShellBehavior(
-                            aoeRadius = weapon.aoeRadius,
-                            aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
-                        )
-                    else PlainBulletBehavior()
-                effects.add(Projectile(
-                    x  = muzzleX,
-                    z  = muzzleZ,
-                    vx = sinA * weapon.projectileSpeed,
-                    vz = cosA * weapon.projectileSpeed,
-                    damage = weaponDamage,
-                    halfW = weapon.projectileHalfW,
-                    halfH = weapon.projectileHalfH,
-                    meshHandle = bulletMesh,
-                    behaviour  = centralBehaviour,
-                ))
-                // E12 — Railgun (HEAVY_CANNON) gets the lightning discharge
-                // muzzle stack: bright cyan-white core flash + 5-7
-                // procedural electric arcs perpendicular to the barrel +
-                // cyan sparks. Other weapons (Автомат, future additions)
-                // keep the warm cone-trefoil muzzle blast — the asymmetry
-                // makes the player's primary railgun read as a unique,
-                // higher-tier weapon.
-                if (weapon.id == WeaponId.HEAVY_CANNON) {
-                    vfx.spawnRailgunMuzzle(muzzleX, muzzleZ, sinA, cosA,
-                                       weapon.projectileHalfW)
-                    vfx.spawnRailgunSparks(muzzleX, muzzleZ,
-                                       sinA * weapon.projectileSpeed,
-                                       cosA * weapon.projectileSpeed)
-                } else {
-                    // Muzzle blast — cannon-with-brake shape (central pop +
-                    // forward plume + 2 perpendicular vents). Sized by the
-                    // weapon's projectile half-width so the heavy cannon pops
-                    // bigger than the automatic.
-                    vfx.spawnMuzzleBlast(muzzleX, muzzleZ, sinA, cosA,
-                                     weapon.projectileHalfW,
-                                     DraftCombat.FLASH_TINT_MUZZLE)
-                    // E9 — micro-sparks fanning out of the barrel along the
-                    // bullet velocity. Brief (~0.1s) so they punctuate the
-                    // shot without obscuring the muzzle blast cluster.
-                    vfx.spawnMuzzleSparks(muzzleX, muzzleZ,
-                                      sinA * weapon.projectileSpeed,
-                                      cosA * weapon.projectileSpeed)
-                }
-            }
-            // Turrets fire at the nearest asteroid (if any).
-            for (i in turretXs.indices) {
-                turretFireT[i] += dt
-                while (turretFireT[i] >= DraftCombat.FIRE_INTERVAL_SEC) {
-                    turretFireT[i] -= DraftCombat.FIRE_INTERVAL_SEC
-                    val tx = turretXs[i]
-                    val tz = DraftCombat.TURRET_TOP_Z
-                    val target = nearestAsteroidInArc(
-                        asteroids, tx, tz, DraftCombat.ARC_SIDE_CANNON_HALF_RAD,
-                    ) ?: continue
-                    val dx = target.xPos - tx
-                    val dz = target.zPos - tz
-                    val len = kotlin.math.sqrt(dx * dx + dz * dz)
-                    if (len < 1e-4f) continue
-                    val nx = dx / len
-                    val nz = dz / len
-                    // Muzzle = tip of the rotated barrel (housing + barrel +
-                    // muzzle ring). Bullet emerges along the barrel axis, not
-                    // straight up like the legacy quad-square layout.
-                    val muzzleX = tx + nx * DraftCombat.SIDE_TOTAL_LEN
-                    val muzzleZ = tz + nz * DraftCombat.SIDE_TOTAL_LEN
-                    // Side turrets fire heavy AoE shells matching the central
-                    // HEAVY_CANNON weapon profile — chunky projectile, slow
-                    // muzzle velocity, splash damage to nearby asteroids. The
-                    // cadence is paced by FIRE_INTERVAL_SEC (1 shot/sec) so
-                    // they read as supporting artillery rather than a stream
-                    // of small projectiles.
-                    val sideDamage = (effectiveTurretDamage * DraftCombat.SIDE_DAMAGE_MUL).toInt()
-                    effects.add(Projectile(
-                        x  = muzzleX, z = muzzleZ,
-                        vx = nx * DraftCombat.SIDE_BULLET_SPEED,
-                        vz = nz * DraftCombat.SIDE_BULLET_SPEED,
-                        damage     = sideDamage,
-                        halfW      = DraftCombat.SIDE_BULLET_HALF_W,
-                        halfH      = DraftCombat.SIDE_BULLET_HALF_H,
-                        meshHandle = bulletHeavyMeshHandle,
-                        behaviour  = HeavyShellBehavior(
-                            aoeRadius = DraftCombat.SIDE_AOE_RADIUS,
-                            aoeDamage = (sideDamage * DraftCombat.SIDE_AOE_DAMAGE_MUL).toInt(),
-                        ),
-                    ))
-                    // Side-turret muzzle blast — same cannon-with-brake
-                    // cluster as the central turret, sized by the bullet's
-                    // half-width (so an upgraded chunkier projectile gets a
-                    // bigger pop without per-turret-type flags).
-                    vfx.spawnMuzzleBlast(muzzleX, muzzleZ, nx, nz,
-                                     DraftCombat.SIDE_BULLET_HALF_W,
-                                     DraftCombat.FLASH_TINT_MUZZLE)
-                    // E9 — side turrets get the same micro-spark fan; the
-                    // sparks tell "this is a turret shot" identically across
-                    // central and side, the muzzle-blast size tells projectile
-                    // weight.
-                    vfx.spawnMuzzleSparks(muzzleX, muzzleZ,
-                                      nx * DraftCombat.BULLET_SPEED,
-                                      nz * DraftCombat.BULLET_SPEED)
-                }
-            }
-            // Drain the rocket silo's launch queue — pops one rocket per
-            // tick once the previous one has cleared the tube (transitioned
-            // out of ASCENDING). Activated salvos enter the queue inside
-            // activateAbility; the rocket-strike button stays usable
-            // immediately, but the rockets themselves leave the silo
-            // sequentially.
-            rocketSilo.tick()
-            // Tick all active weapon effects (projectiles + beams + future
-            // shockwaves / EMP / etc.). Each effect's tick() owns its own
-            // movement, collision, damage and lifetime; returns true to be
-            // removed. The umbrella means one loop covers every type — no
-            // per-effect-kind branching here.
-            val effectIter = effects.iterator()
-            while (effectIter.hasNext()) {
-                if (effectIter.next().tick(dt, weaponCtx)) effectIter.remove()
-            }
-            val deadAsteroids = asteroids.filter { it.hp <= 0 }
-            val killed = deadAsteroids.size
-            if (killed > 0) {
-                // Per-asteroid death effects: NORMAL/FAST/HEAVY drop a small flash;
-                // EXPLOSIVE deals AoE damage to neighbours + spawns a bigger flash;
-                // ENERGY triggers the main-weapon damage buff. Effects are applied
-                // BEFORE removing the dead asteroids so EXPLOSIVE chains don't
-                // double-fire on already-dead targets.
-                var triggeredBuff = false
-                for (a in deadAsteroids) {
-                    when (a.type) {
-                        AsteroidType.EXPLOSIVE -> {
-                            val r2 = DraftCombat.EXPLOSIVE_AOE_RADIUS *
-                                    DraftCombat.EXPLOSIVE_AOE_RADIUS
-                            for (other in asteroids) {
-                                if (other === a || other.hp <= 0) continue
-                                val dxA = other.xPos - a.xPos
-                                val dzA = other.zPos - a.zPos
-                                if (dxA * dxA + dzA * dzA <= r2) {
-                                    other.hp -= DraftCombat.EXPLOSIVE_AOE_DAMAGE
-                                }
-                            }
-                            vfx.spawnExplosion(a.xPos, a.zPos, DraftCombat.EXPLOSIVE_AOE_RADIUS)
-                        }
-                        AsteroidType.ENERGY -> {
-                            triggeredBuff = true
-                            val et = DraftCombat.FLASH_TINT_ENERGY
-                            flashes.add(Flash(
-                                x = a.xPos, z = a.zPos,
-                                life = DraftCombat.FLASH_LIFE_SEC,
-                                maxLife = DraftCombat.FLASH_LIFE_SEC,
-                                halfMax = DraftCombat.FLASH_HALF * 1.5f,
-                                tintR = et[0], tintG = et[1], tintB = et[2], tintA = et[3],
-                            ))
-                        }
-                        AsteroidType.NORMAL,
-                        AsteroidType.FAST,
-                        AsteroidType.HEAVY -> {
-                            val dt2 = DraftCombat.FLASH_TINT_DEATH
-                            flashes.add(Flash(
-                                x = a.xPos, z = a.zPos,
-                                life = DraftCombat.FLASH_LIFE_SEC,
-                                maxLife = DraftCombat.FLASH_LIFE_SEC,
-                                tintR = dt2[0], tintG = dt2[1], tintB = dt2[2], tintA = dt2[3],
-                            ))
-                            // E9 — debris + smoke. HEAVY gets a darker/redder
-                            // tint matching its dark-red mesh; NORMAL/FAST are
-                            // neutral warm gray. Sized by asteroid half so
-                            // small fast asteroids don't drop boulder chunks.
-                            val tint = when (a.type) {
-                                AsteroidType.HEAVY -> floatArrayOf(0.85f, 0.55f, 0.50f)
-                                else               -> floatArrayOf(0.95f, 0.92f, 0.88f)
-                            }
-                            vfx.spawnAsteroidDeathFX(a.xPos, a.zPos, tint)
-                        }
-                    }
-                }
-                if (triggeredBuff) {
-                    activeBuffTimer     = DraftCombat.ENERGY_BUFF_DURATION
-                    activeBuffDamageMul = DraftCombat.ENERGY_BUFF_DAMAGE_MUL
-                    buffUiSecLast = -1
-                    runOnUiThread { hud.refreshBuff(activeBuffTimer, activeBuffDamageMul) }
-                }
-                missionRun.score += killed * 10
-                missionRun.asteroidsDestroyed += killed
-                missionRun.metalEarned += killed   // +1 metal per asteroid
-                progressRepo.update { it.copy(metal = it.metal + killed) }
-                runOnUiThread { hud.refreshScore(missionRun.score) }
-            }
-            asteroids.removeAll { it.hp <= 0 }
-
-            // Age flashes; cull when life expires.
-            val flashIter = flashes.iterator()
-            while (flashIter.hasNext()) {
-                val f = flashIter.next()
-                f.life -= dt
-                if (f.life <= 0f) flashIter.remove()
-            }
-            // E7.1 — same lifecycle for 3D fireballs.
-            // E10.3 — snapshot prevLife before tick so buildScene can
-            // reconstruct last frame's scale curve for motion-vector input.
-            val fireballIter = fireballs.iterator()
-            while (fireballIter.hasNext()) {
-                val fb = fireballIter.next()
-                fb.prevLife = fb.life
-                fb.life -= dt
-                if (fb.life <= 0f) fireballIter.remove()
-            }
-            // E9 — particle pools. Same physics across pools (Euler step
-            // + drag + gravity), only the pipeline binding differs.
-            tickParticles(sparkParticles,  dt)
-            tickParticles(smokeParticles,  dt)
-            tickParticles(debrisParticles, dt)
-
-            // Move asteroids down at their own speed (mission baseline × type
-            // multiplier, captured at spawn); spin around their own axis.
-            for (a in asteroids) {
-                // E10.3 — snapshot prev z + rotation before mutating so the
-                // motion-vector at this frame's render reads as one tick of
-                // fall + spin (correct delta for motion blur).
-                a.prevZ        = a.zPos
-                a.prevRotation = a.rotation
-                a.zPos     -= a.speed * dt
-                a.rotation += a.rotationSpeed * dt
-            }
-            // Asteroid hit detection — shield first (asteroid breaks ON the
-            // arch, never reaches platform if shield is up and the asteroid
-            // is under the dome's X coverage), then platform (asteroid
-            // landed past where the shield could intercept).
-            var platformDamage = 0
-            val asteroidIter = asteroids.iterator()
-            while (asteroidIter.hasNext()) {
-                val a = asteroidIter.next()
-                // 1. Shield-arch contact (only if shield up + within X coverage).
-                //    Compute the arch Z at this asteroid's X via the same
-                //    superellipse used to author the mesh: |x/a|^n + |z/b|^n = 1.
-                if (shieldHp > 0f) {
-                    val xRatio = kotlin.math.abs(a.xPos) / DraftCombat.SHIELD_ARCH_HALF_W
-                    if (xRatio < 1f) {
-                        val n = DraftCombat.SHIELD_ARCH_SHARPNESS
-                        val archBaseZ = DraftCombat.PLATFORM_TOP_Z +
-                                        DraftCombat.SHIELD_ARCH_LIFT_FRAC *
-                                            DraftCombat.SHIELD_ARCH_HALF_H
-                        val archZ = archBaseZ + DraftCombat.SHIELD_ARCH_HALF_H *
-                            (1f - xRatio.pow(n)).pow(1f / n)
-                        if (a.zPos - a.half <= archZ) {
-                            // Shield contact — asteroid breaks on the arch.
-                            // Full absorb when shield can soak it; partial
-                            // absorb spills overflow into the platform.
-                            // While the player is recharging, incoming damage
-                            // is reduced by the SHIELD_RECHARGE_DAMAGE_MUL
-                            // factor — explicit benefit for actively topping
-                            // up the shield mid-impact.
-                            val dmgF = a.platformDmg.toFloat() * (
-                                if (shieldRecharging) DraftCombat.SHIELD_RECHARGE_DAMAGE_MUL
-                                else 1f
-                            )
-                            if (shieldHp >= dmgF) {
-                                shieldHp -= dmgF
-                            } else {
-                                val overflow = (dmgF - shieldHp).toInt().coerceAtLeast(1)
-                                shieldHp = 0f
-                                platformDamage += overflow
-                            }
-                            val sh = DraftCombat.FLASH_TINT_SHIELD
-                            flashes.add(Flash(
-                                x = a.xPos, z = archZ,
-                                life = DraftCombat.FLASH_LIFE_SEC,
-                                maxLife = DraftCombat.FLASH_LIFE_SEC,
-                                tintR = sh[0], tintG = sh[1], tintB = sh[2], tintA = sh[3],
-                            ))
-                            asteroidIter.remove()
-                            continue
-                        }
-                    }
-                }
-                // 2. Platform hit — shield is down or asteroid fell past the
-                //    shield's X coverage (edge of platform, beyond the arch).
-                if (a.zPos - a.half <= DraftCombat.PLATFORM_TOP_Z) {
-                    platformDamage += a.platformDmg
-                    asteroidIter.remove()
-                }
-            }
-            if (platformDamage > 0) {
-                platformHP -= platformDamage
-                runOnUiThread {
-                    hud.refreshHp(platformHP)
-                    hud.pulseBaseDamage()
-                }
-            }
-            // Safety net: anything else below the screen.
-            asteroids.removeAll { it.zPos < DraftCombat.SCREEN_BOTTOM_Z - 1f }
-
-            // Wave-based spawning. The mission has a list of waves; each wave spawns
-            // asteroidCount asteroids at spawnIntervalSec, then waits for them to be
-            // gone, then a 2 sec break, then the next wave starts.
-            val mission = currentMission
-            if (mission != null) {
-                if (waveBreakTimer > 0f) {
-                    waveBreakTimer -= dt
-                    if (waveBreakTimer <= 0f) {
-                        waveBreakTimer = 0f
-                        currentWaveIndex++
-                        currentWaveSpawned = 0
-                        spawnTimer = 0f
-                        missionRun.currentWaveDisplay = currentWaveIndex + 1
-                        runOnUiThread {
-                            hud.refreshWaveLabel(
-                                "Волна ${missionRun.currentWaveDisplay}/${mission.waves.size}",
-                            )
-                        }
-                        hud.announceWave(missionRun.currentWaveDisplay, mission.waves.size)
-                    }
-                } else if (currentWaveIndex < mission.waves.size) {
-                    val wave = mission.waves[currentWaveIndex]
-                    if (currentWaveSpawned < wave.asteroidCount) {
-                        spawnTimer += dt
-                        while (spawnTimer >= wave.spawnIntervalSec &&
-                               currentWaveSpawned < wave.asteroidCount) {
-                            spawnTimer -= wave.spawnIntervalSec
-                            val type = pickAsteroidType(wave.typeWeights)
-                            val half = DraftCombat.ASTEROID_HALF * type.halfMul
-                            val margin = half
-                            val xMin = -DraftCombat.SCREEN_HALF_W + margin
-                            val xMax =  DraftCombat.SCREEN_HALF_W - margin
-                            val rx   = xMin + Math.random().toFloat() * (xMax - xMin)
-                            // Random spin: ±0.5..±2.0 rad/sec, random starting phase.
-                            val spinSign = if (Math.random() < 0.5) -1f else 1f
-                            val spin     = spinSign * (0.5f + Math.random().toFloat() * 1.5f)
-                            val phase    = (Math.random() * Math.PI * 2).toFloat()
-                            // Pick mesh by type. NORMAL/FAST randomize between
-                            // two grey variants so common waves don't look like
-                            // copy-pastes; HEAVY/EXPLOSIVE/ENERGY get unique
-                            // silhouettes + tints.
-                            val mesh = when (type) {
-                                AsteroidType.HEAVY     -> asteroidMeshHeavy
-                                AsteroidType.EXPLOSIVE -> asteroidMeshExplosive
-                                AsteroidType.ENERGY    -> asteroidMeshEnergy
-                                AsteroidType.NORMAL,
-                                AsteroidType.FAST      ->
-                                    if (Math.random() < 0.5) asteroidMeshGrey1 else asteroidMeshGrey2
-                            }
-                            val hpVal = (mission.asteroidHp * type.hpMul).toInt()
-                                .coerceAtLeast(1)
-                            asteroids.add(
-                                Asteroid(
-                                    id    = newAsteroidId(),
-                                    xPos  = rx,
-                                    zPos  = DraftCombat.SCREEN_TOP_Z - half,
-                                    hp    = hpVal,
-                                    maxHp = hpVal,
-                                    rotation      = phase,
-                                    rotationSpeed = spin,
-                                    type          = type,
-                                    speed         = mission.asteroidSpeed * type.speedMul,
-                                    half          = half,
-                                    platformDmg   = (DraftCombat.PLATFORM_DMG_PER_HIT * type.platformDmgMul)
-                                                       .toInt().coerceAtLeast(1),
-                                    meshHandle    = mesh,
-                                )
-                            )
-                            currentWaveSpawned++
-                        }
-                    } else if (asteroids.isEmpty()) {
-                        // Wave fully spawned and cleared — start break unless this is the last.
-                        if (currentWaveIndex + 1 < mission.waves.size) {
-                            waveBreakTimer = DraftCombat.WAVE_BREAK_SEC
-                        }
-                        // If this was the last wave, B3 (showWin check) handles it.
-                    }
-                }
-            }
-
-            buildScene()
-
-            // Win / lose checks.
-            // Win: last wave fully spawned AND no asteroids left.
-            val m = currentMission
-            val onLastWave = m != null && currentWaveIndex == m.waves.size - 1
-            val lastWaveSpawnedOut = m != null &&
-                currentWaveSpawned >= m.waves[currentWaveIndex.coerceAtMost(m.waves.size - 1)].asteroidCount
-            when {
-                platformHP <= 0 -> { showLose(); return@postDelayed }
-                onLastWave && lastWaveSpawnedOut && asteroids.isEmpty() -> {
-                    showWin(); return@postDelayed
-                }
-            }
-
-            scheduleDraftTick()
-        }, TICK_MS)
+    private fun mountPlaying() {
+        // No overlay during gameplay — just turn the HUD on. The runner
+        // was already told to start the mission by the caller (weapon
+        // select / win-screen "Repeat" / lose-screen "Repeat") before
+        // pushing Screen.Playing onto the stack.
+        hud.setHudVisible(true)
+        abilityBar.visibility      = View.VISIBLE
+        hud.abortButton.visibility = View.VISIBLE
     }
 
     // ---------------------------------------------------------------------------
@@ -1925,7 +895,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause()   { super.onPause();   engineView.onPause();  bgMusic?.pause() }
     override fun onDestroy() {
         super.onDestroy()
-        missionThread?.quitSafely(); missionThread = null; missionHandler = null
+        missionRunner.destroy()
         bgMusic?.release(); bgMusic = null
         engineView.onDestroyView()
     }

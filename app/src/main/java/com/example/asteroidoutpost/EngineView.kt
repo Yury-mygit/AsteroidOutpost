@@ -1,12 +1,10 @@
 package com.example.asteroidoutpost
 
 import android.content.Context
-import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
@@ -18,7 +16,6 @@ class EngineView @JvmOverloads constructor(
     val engine = EngineJni()
     var onSurfaceReady: (() -> Unit)? = null
     var onTap: ((Float, Float) -> Unit)? = null
-    var onScreenFrames: ((List<ScreenFrame>) -> Unit)? = null
     var onCameraOrbited: ((yaw: Float, pitch: Float) -> Unit)? = null
     var onCameraRolled:  ((Float) -> Unit)? = null
     var onCameraReset:   (() -> Unit)? = null
@@ -88,9 +85,6 @@ class EngineView @JvmOverloads constructor(
         private set
 
     private var renderThread: RenderThread? = null
-    @Volatile
-    private var pendingScreenFrames: List<ScreenFrame> = emptyList()
-    private val screenFramePostPending = AtomicBoolean(false)
 
     // Single-finger state
     private var lastTouchX = 0f
@@ -299,38 +293,6 @@ class EngineView @JvmOverloads constructor(
         submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects, particleBatches, beams)
     }
 
-    private fun collectScreenFrames(objects: List<SceneObject>): List<ScreenFrame> {
-        val result = ArrayList<ScreenFrame>(objects.size)
-        for (obj in objects) {
-            val bounds = engine.projectMeshBounds(
-                obj.meshHandle,
-                obj.modelMatrix(),
-                obj.framePadding
-            ) ?: continue
-            result.add(
-                ScreenFrame(
-                    objectId = obj.id,
-                    bounds = RectF(bounds[2], bounds[3], bounds[4], bounds[5]),
-                    selected = obj.selected,
-                    enemy = obj.isEnemy,
-                    partiallyVisible = bounds[1] > 0.5f
-                )
-            )
-        }
-        return result
-    }
-
-    private fun publishScreenFrames(frames: List<ScreenFrame>) {
-        pendingScreenFrames = frames
-        if (!screenFramePostPending.compareAndSet(false, true)) return
-
-        post {
-            val latestFrames = pendingScreenFrames
-            screenFramePostPending.set(false)
-            onScreenFrames?.invoke(latestFrames)
-        }
-    }
-
     private class RenderThread(private val engineView: EngineView) : Thread("RenderThread") {
         private val engine get() = engineView.engine
         @Volatile private var running = true
@@ -344,7 +306,6 @@ class EngineView @JvmOverloads constructor(
                 val currentScene = engineView.scene
                 submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects, engineView.particleBatches, engineView.beams)
                 engine.renderFrame()
-                engineView.publishScreenFrames(engineView.collectScreenFrames(currentScene))
 
                 fpsFrames++
                 val nowNs = System.nanoTime()

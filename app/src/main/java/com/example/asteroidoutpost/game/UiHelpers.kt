@@ -1,10 +1,12 @@
 package com.example.asteroidoutpost.game
 
 import android.content.Context
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -86,6 +88,61 @@ object UiHelpers {
         minHeight = UiTheme.dp(context, UiTheme.DP_BUTTON_HEIGHT_SECONDARY)
         setOnClickListener { onClick() }
     }
+
+    // ---- Icon tiles --------------------------------------------------------
+
+    /**
+     * Square outlined-tile button rendered as a centred text glyph (e.g. "✕").
+     * Caller sets the actual square dimensions via LayoutParams. Used for
+     * close (✕) buttons in overlays and the in-game abort ✕.
+     */
+    fun buildGlyphTile(
+        context: Context,
+        glyph: String,
+        textSize: Float = UiTheme.SP_HEADING,
+        onClick: () -> Unit,
+    ): TextView = TextView(context).apply {
+        text = glyph
+        this.textSize = textSize
+        setTextColor(UiTheme.COL_TEXT_DIM)
+        gravity = Gravity.CENTER
+        isAllCaps = false
+        background = iconTileBackground(context)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+
+    /**
+     * Square outlined-tile button rendered around a Drawable icon. Caller
+     * sets the actual square dimensions via LayoutParams; the icon is
+     * centre-cropped within. Used for nav chevrons and (future) action
+     * shortcuts.
+     */
+    fun buildIconTile(
+        context: Context,
+        icon: Drawable,
+        sideDp: Float = 36f,
+        onClick: () -> Unit,
+    ): ImageView = ImageView(context).apply {
+        setImageDrawable(icon)
+        scaleType = ImageView.ScaleType.CENTER
+        val side = UiTheme.dp(context, sideDp)
+        minimumWidth  = side
+        minimumHeight = side
+        background = iconTileBackground(context)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+
+    private fun iconTileBackground(context: Context): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = UiTheme.dp(context, UiTheme.DP_BUTTON_RADIUS).toFloat()
+            setColor(UiTheme.COL_PANEL_BG)
+            setStroke(UiTheme.dp(context, UiTheme.DP_BORDER_WIDTH), UiTheme.COL_BORDER)
+        }
 
     /** Disabled-look variant — caller still sets isEnabled=false. */
     fun buildDisabledButton(context: Context, label: String): Button = Button(context).apply {

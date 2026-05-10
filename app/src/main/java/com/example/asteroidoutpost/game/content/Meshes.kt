@@ -22,6 +22,132 @@ import kotlin.math.pow
  */
 
 /**
+ * Top-down-back view of the player's ship hull. The camera looks
+ * forward over the bridge, so the ship's long axis runs vertically up
+ * the screen (= along world Z) — wide stern at the bottom (camera-near),
+ * trapezoidal deck narrowing toward the bow at the top.
+ *
+ * Authored in world units to match the legacy gray-quad platform
+ * footprint (X half = 2.40, Z half = 0.275); the SceneObject just
+ * translates onto platform position with scale = 1. Centerline runs at
+ * x = 0; turrets / aux mounts sit on the deck at various Z values along
+ * it (see `DraftCombat.CENTRAL_TURRET_BASE_Z`, `TURRET_TOP_Z`, etc.).
+ */
+internal fun buildShipHullMesh(engine: EngineJni): Long {
+    val mb = MeshBuilder()
+
+    val sternHalfX = 2.40f   // wide back end (camera-near)
+    val bowHalfX   = 0.30f   // bow narrows to a thin flat at the prow
+    val sternZ     = -0.275f // bottom of platform Z range (camera-near)
+    val bowZ       =  0.275f // top of platform Z range (forward)
+
+    // Trapezoid X half-width at a given local Z (linear lerp stern→bow).
+    // Used to size deck-spanning details (panel seams) so they stop right
+    // at the hull edge regardless of where they sit along the length.
+    fun hullHalfXAt(z: Float): Float {
+        val t = ((z - sternZ) / (bowZ - sternZ)).coerceIn(0f, 1f)
+        return sternHalfX + (bowHalfX - sternHalfX) * t
+    }
+
+    // Graphite-on-charcoal palette — darker than slate, closer to the
+    // concept-art armoured plating. Cool cyan accent for engines and
+    // running lights.
+    val hullR = 0.28f; val hullG = 0.30f; val hullB = 0.36f
+    val deckR = 0.35f; val deckG = 0.37f; val deckB = 0.43f
+    val seamR = 0.16f; val seamG = 0.17f; val seamB = 0.22f
+    val sternBlockR = 0.14f; val sternBlockG = 0.16f; val sternBlockB = 0.20f
+    val cyanR = 0.30f; val cyanG = 0.85f; val cyanB = 0.95f
+    val bowAccentR = 0.30f; val bowAccentG = 0.55f; val bowAccentB = 0.70f
+    val mastR = 0.22f; val mastG = 0.24f; val mastB = 0.30f
+
+    // 1. Trapezoidal hull — two triangles span the four corners.
+    mb.addTri(
+        -sternHalfX, sternZ,    // stern-port
+         sternHalfX, sternZ,    // stern-starboard
+         bowHalfX,   bowZ,      // bow-starboard
+        hullR, hullG, hullB,
+    )
+    mb.addTri(
+        -sternHalfX, sternZ,    // stern-port
+         bowHalfX,   bowZ,      // bow-starboard
+        -bowHalfX,   bowZ,      // bow-port
+        hullR, hullG, hullB,
+    )
+
+    // 2. Centerline deck stripe — slightly lighter band along the keel
+    //    from stern engines to just before the bow gun. Layered above the
+    //    hull via a small Y nudge so LESS-depth accepts it.
+    mb.addRect(
+        -0.14f, sternZ + 0.10f,
+         0.14f, bowZ   - 0.04f,
+        deckR, deckG, deckB, y = -0.005f,
+    )
+
+    // 3. Panel seams — three thin dark lines running across the deck
+    //    perpendicular to the centerline. Suggests armour-segment joins
+    //    and gives the hull readable scale without flooding it with
+    //    detail. Each seam clamps to the trapezoid edge at its Z.
+    val seamThickness = 0.012f
+    val seamZs = floatArrayOf(-0.13f, +0.05f, +0.18f)
+    for (sz in seamZs) {
+        val halfX = hullHalfXAt(sz) - 0.03f   // 3 cm inset from edge
+        mb.addRect(
+            -halfX, sz - seamThickness * 0.5f,
+             halfX, sz + seamThickness * 0.5f,
+            seamR, seamG, seamB, y = -0.005f,
+        )
+    }
+
+    // 4. Stern engine block — dark band along the very back edge.
+    val blockTopZ = sternZ + 0.10f
+    mb.addRect(
+        -0.85f, sternZ,
+         0.85f, blockTopZ,
+        sternBlockR, sternBlockG, sternBlockB, y = -0.005f,
+    )
+
+    // 5. Five cyan engine exhausts inside the stern block — main drive
+    //    nacelles glowing. Distributed evenly across the block width.
+    val exhaustCount = 5
+    val exhaustHalfW = 0.10f
+    val exhaustGap   = 0.06f
+    val exhaustHalfH = 0.025f
+    val exhaustZ    = sternZ + 0.05f
+    val exhaustSpan = exhaustCount * exhaustHalfW * 2f +
+                      (exhaustCount - 1) * exhaustGap
+    var exhaustX0 = -exhaustSpan * 0.5f
+    for (i in 0 until exhaustCount) {
+        val cx = exhaustX0 + exhaustHalfW
+        mb.addRect(
+            cx - exhaustHalfW, exhaustZ - exhaustHalfH,
+            cx + exhaustHalfW, exhaustZ + exhaustHalfH,
+            cyanR, cyanG, cyanB, y = -0.010f,
+        )
+        exhaustX0 += exhaustHalfW * 2f + exhaustGap
+    }
+
+    // 6. Antenna mast at the bow tip — thin vertical strip along the
+    //    centerline just before the prow point. Reads as a sensor /
+    //    radio mast, no gameplay role.
+    mb.addRect(
+        -0.020f, bowZ - 0.055f,
+         0.020f, bowZ - 0.005f,
+        mastR, mastG, mastB, y = -0.010f,
+    )
+
+    // 7. Bow accent — small coloured triangle just before the bow tip,
+    //    suggests a forward running light / unit insignia.
+    mb.addTri(
+        -bowHalfX * 0.55f, bowZ - 0.07f,
+         bowHalfX * 0.55f, bowZ - 0.07f,
+         0f,               bowZ - 0.005f,
+        bowAccentR, bowAccentG, bowAccentB, y = -0.005f,
+    )
+
+    return mb.upload(engine)
+}
+
+/**
  * Build a soft-edge disk mesh via `loadMeshRaw` (E1.3): a triangle fan
  * with the centre vertex fully opaque and the rim vertices at alpha=0.
  * Drawn through the translucent pipeline (E1.2) it reads as a soft round
@@ -146,13 +272,13 @@ internal fun buildShieldArchMesh(engine: EngineJni): Long {
 internal fun buildTurretBaseMesh(
     engine: EngineJni,
     halfW: Float, height: Float,
+    bodyR: Float, bodyG: Float, bodyB: Float,
     accentR: Float, accentG: Float, accentB: Float,
 ): Long {
     val mb = MeshBuilder()
-    // Body — dark armoured slab with a chamfered footprint. The chamfer
-    // breaks the rectangle silhouette so the base reads as engineered hex
-    // plating rather than a brick.
-    val bodyR = 0.22f; val bodyG = 0.24f; val bodyB = 0.30f
+    // Body — caller-supplied tint (steel-blue for central, dark-blue
+    // for sides). Chamfered footprint breaks the rectangle silhouette
+    // so the base reads as engineered hex plating rather than a brick.
     mb.addChamferedRect(-halfW, 0f, halfW, height, halfW * 0.30f, bodyR, bodyG, bodyB)
     // Vent slits on the bottom flanks (deep dark, layered above body).
     val ventDark = floatArrayOf(0.05f, 0.06f, 0.09f)
@@ -184,18 +310,24 @@ internal fun buildTurretBarrelMesh(
     housingHalfW: Float, housingLength: Float,
     barrelHalfW:  Float, barrelLength:  Float,
     muzzleHalfW:  Float, muzzleLength:  Float,
+    bodyR: Float, bodyG: Float, bodyB: Float,
     accentR: Float, accentG: Float, accentB: Float,
 ): Long {
     val mb = MeshBuilder()
     val barrelStart = housingLength
     val muzzleStart = housingLength + barrelLength
     val tipZ        = muzzleStart + muzzleLength
-    // Palette — body is neutral metal, slits very dark, muzzle ring
-    // slightly darker than body for a "machined" look, fin a touch lighter.
-    val bodyR = 0.32f; val bodyG = 0.34f; val bodyB = 0.40f
+    // Palette — body tint comes from caller (steel-blue for central,
+    // dark-red for side barrels). Ring (muzzle collar) ≈ 60% of body
+    // for a "machined" look; fin (cooling element) ≈ 130% (clamped) for
+    // a brighter highlight; slits stay near-black for definition.
     val darkR = 0.08f; val darkG = 0.09f; val darkB = 0.12f
-    val ringR = 0.20f; val ringG = 0.22f; val ringB = 0.28f
-    val finR  = 0.55f; val finG  = 0.60f; val finB  = 0.70f
+    val ringR = (bodyR * 0.6f).coerceIn(0f, 1f)
+    val ringG = (bodyG * 0.6f).coerceIn(0f, 1f)
+    val ringB = (bodyB * 0.6f).coerceIn(0f, 1f)
+    val finR  = (bodyR * 1.30f).coerceIn(0f, 1f)
+    val finG  = (bodyG * 1.30f).coerceIn(0f, 1f)
+    val finB  = (bodyB * 1.30f).coerceIn(0f, 1f)
     // 1. Pivot collar — small dark band straddling the rotation axis.
     //    Sits half below the housing front so it's mostly hidden until
     //    the housing rotates off-axis, then reads as a turret ring.
