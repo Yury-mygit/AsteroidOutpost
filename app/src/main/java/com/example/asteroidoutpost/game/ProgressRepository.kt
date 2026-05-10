@@ -34,13 +34,19 @@ class ProgressRepository(context: Context) {
         save(updated)
     }
 
-    private fun load(): GameProgress = GameProgress(
-        metal                    = prefs.getInt(KEY_METAL, 0),
-        mainWeaponDamageLevel    = prefs.getInt(KEY_LVL_MAIN_WEAPON_DMG, 1),
-        baseHpLevel              = prefs.getInt(KEY_LVL_BASE_HP, 1),
-        sideTurretDamageLevel    = prefs.getInt(KEY_LVL_SIDE_TURRET_DMG, 1),
-        highestMissionUnlocked   = prefs.getInt(KEY_HIGHEST_MISSION, 0),
-    )
+    private fun load(): GameProgress {
+        val weaponName = prefs.getString(KEY_WEAPON, WeaponId.AUTOMATIC.name)
+        val weaponId = runCatching { WeaponId.valueOf(weaponName!!) }
+            .getOrDefault(WeaponId.AUTOMATIC)
+        return GameProgress(
+            metal                    = prefs.getInt(KEY_METAL, 0),
+            mainWeaponDamageLevel    = prefs.getInt(KEY_LVL_MAIN_WEAPON_DMG, 1),
+            baseHpLevel              = prefs.getInt(KEY_LVL_BASE_HP, 1),
+            sideTurretDamageLevel    = prefs.getInt(KEY_LVL_SIDE_TURRET_DMG, 1),
+            highestMissionUnlocked   = prefs.getInt(KEY_HIGHEST_MISSION, 0),
+            selectedWeaponId         = weaponId,
+        )
+    }
 
     private fun save(progress: GameProgress) {
         prefs.edit()
@@ -49,6 +55,7 @@ class ProgressRepository(context: Context) {
             .putInt(KEY_LVL_BASE_HP,          progress.baseHpLevel)
             .putInt(KEY_LVL_SIDE_TURRET_DMG,  progress.sideTurretDamageLevel)
             .putInt(KEY_HIGHEST_MISSION,      progress.highestMissionUnlocked)
+            .putString(KEY_WEAPON,            progress.selectedWeaponId.name)
             .apply()
     }
 
@@ -59,5 +66,6 @@ class ProgressRepository(context: Context) {
         const val KEY_LVL_BASE_HP          = "lvl_base_hp"
         const val KEY_LVL_SIDE_TURRET_DMG  = "lvl_side_turret_dmg"
         const val KEY_HIGHEST_MISSION      = "highest_mission"
+        const val KEY_WEAPON               = "selected_weapon"
     }
 }

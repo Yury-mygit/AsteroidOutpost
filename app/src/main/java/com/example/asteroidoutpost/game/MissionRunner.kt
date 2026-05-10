@@ -6,6 +6,7 @@ import kotlin.math.pow
 import com.example.asteroidoutpost.game.combat.Asteroid
 import com.example.asteroidoutpost.game.combat.Beam
 import com.example.asteroidoutpost.game.combat.DraftCombat
+import com.example.asteroidoutpost.game.combat.Drone
 import com.example.asteroidoutpost.game.combat.Fireball
 import com.example.asteroidoutpost.game.combat.Flash
 import com.example.asteroidoutpost.game.combat.HeavyShellBehavior
@@ -127,6 +128,7 @@ internal class MissionRunner(
         Asteroid(id = 2L, xPos =  1.0f, zPos = 8.0f, hp = 100),
     )
     val effects:           MutableList<WeaponEffect> = mutableListOf()
+    val drones:            MutableList<Drone>        = mutableListOf()
     val flashes:           MutableList<Flash>        = mutableListOf()
     val fireballs:         MutableList<Fireball>     = mutableListOf()
     val sparkParticles:    MutableList<Particle>     = mutableListOf()
@@ -138,7 +140,7 @@ internal class MissionRunner(
     // Side deck guns — port and starboard mounts amidships, flanking
     // the centerline. Both sit at `DraftCombat.TURRET_TOP_Z`. The bow
     // gun (central turret) is forward of them on the centerline.
-    val turretXs       = floatArrayOf(-0.85f, 0.85f)
+    val turretXs       = floatArrayOf(-1.10f, 1.10f)
     // Side turret aim angles — independent of the firing routine, smoothed
     // every tick toward the nearest asteroid so the rotating barrel mesh
     // tracks a target visually rather than snapping at fire-time only.
@@ -147,6 +149,7 @@ internal class MissionRunner(
     val abilitySlots: List<AbilitySlot> = listOf(
         AbilitySlot(AbilityCatalog.ROCKET_STRIKE),
         AbilitySlot(AbilityCatalog.LASER_STRIKE),
+        AbilitySlot(AbilityCatalog.DRONES),
     )
     val missionRun: MissionRun = MissionRun()
 
@@ -157,7 +160,6 @@ internal class MissionRunner(
     // Active weapon equipped on the central turret. Set by startMission and
     // exposed so the weapon-select overlay can highlight the active card.
     @Volatile var currentWeapon: Weapon = WeaponCatalog.AUTOMATIC
-        private set
     // Smoothed aim angle of the central turret (radians, atan2(dx,dz)).
     // Tracks the touch position; used by SceneAssembler to orient the
     // turret model and by the tick to spawn bullets.
@@ -484,6 +486,81 @@ internal class MissionRunner(
                             isWithinArc(ast, sx, sz, DraftCombat.ARC_LASER_HALF_RAD)
                         },
                     ))
+                    true
+                }
+            }
+            AbilityId.DRONES        -> {
+                // Spawn DRONE_COUNT interceptors around the ship's bow,
+                // each with its own continuous laser Beam tied to the drone's
+                // position via a closure. canEngage gates damage to range —
+                // beams render only when the drone is within attack range
+                // of its current target, but the beam keeps existing for
+                // the full drone lifetime so the drone can engage new
+                // targets across the 10-second window.
+                if (asteroids.isEmpty()) false
+                else {
+                    val n = DraftCombat.DRONE_COUNT
+                    val baseX = 0f                                  // ship centreline
+                    val baseZ = DraftCombat.CENTRAL_BASE_Z + 0.2f   // just behind central turret
+                    // Pick initial nearest asteroid id so the linked Beam
+                    // resolves a target on the very first tick (else the
+                    // beam aimSelector returns null → beam removed).
+                    val initialTargetId = asteroids
+                        .filter { it.hp > 0 }
+                        .minByOrNull {
+                            val dx = it.xPos - baseX
+                            val dz = it.zPos - baseZ
+                            dx * dx + dz * dz
+                        }?.id ?: -1L
+                    // Sort live asteroids so multiple drones initially target
+                    // DIFFERENT ones when possible (round-robin across the
+                    // sorted list), instead of all converging on the single
+                    // nearest. Reduces the "drones merge into one model"
+                    // effect at swarm spawn. As targets die, drones re-pick
+                    // independently in the tick loop.
+                    val live = asteroids.filter { it.hp > 0 }
+                        .sortedBy {
+                            val dx = it.xPos - baseX
+                            val dz = it.zPos - baseZ
+                            dx * dx + dz * dz
+                        }
+                    for (i in 0 until n) {
+                        val angle = (i.toFloat() / n) * (2.0 * Math.PI).toFloat()
+                        val rx = baseX + DraftCombat.DRONE_SPAWN_SPREAD * kotlin.math.cos(angle)
+                        val rz = baseZ + DraftCombat.DRONE_SPAWN_SPREAD * kotlin.math.sin(angle)
+                        val tid = if (live.isEmpty()) -1L else live[i % live.size].id
+                        val drone = Drone(
+                            x = rx, y = DraftCombat.DRONE_SPAWN_Y, z = rz,
+                            // Mostly upward (vy < 0 = toward camera) with a hint of
+                            // radial xz spread so the swarm fans out as it emerges.
+                            vx = kotlin.math.cos(angle) * DraftCombat.DRONE_SPEED * 0.3f,
+                            vy = -DraftCombat.DRONE_SPEED,
+                            vz = kotlin.math.sin(angle) * DraftCombat.DRONE_SPEED * 0.3f,
+                            heading = angle,
+                            targetId = tid,
+                            swarmIndex = i,
+                        )
+                        drones.add(drone)
+                        // Beam closures point back at this specific drone
+                        // and resolve target dynamically via drone.targetId.
+                        effects.add(Beam(
+                            source       = { Vec3(drone.x, drone.y, drone.z) },
+                            aimSelector  = {
+                                asteroids.firstOrNull { it.id == drone.targetId && it.hp > 0 }
+                            },
+                            durationSec  = DraftCombat.DRONE_LIFETIME_SEC,
+                            dps          = DraftCombat.DRONE_LASER_DPS,
+                            width        = DraftCombat.DRONE_LASER_WIDTH,
+                            color        = DraftCombat.DRONE_LASER_COLOR,
+                            canEngage    = { ast ->
+                                val dx = ast.xPos - drone.x
+                                val dy = ast.yPos - drone.y
+                                val dz = ast.zPos - drone.z
+                                val d2 = dx * dx + dy * dy + dz * dz
+                                d2 <= DraftCombat.DRONE_ATTACK_RANGE * DraftCombat.DRONE_ATTACK_RANGE
+                            },
+                        ))
+                    }
                     true
                 }
             }
@@ -818,15 +895,88 @@ internal class MissionRunner(
         // immediately, but the rockets themselves leave the silo
         // sequentially.
         rocketSilo.tick()
+
+        // E19 — drones AI tick. MUST run BEFORE the effects iterator below:
+        // each drone updates its targetId (sticky lock; re-pick nearest if
+        // current dies) so the linked Beam's aimSelector closure resolves
+        // to a live asteroid this frame instead of returning null and
+        // self-destructing the beam.
+        val droneIter = drones.iterator()
+        while (droneIter.hasNext()) {
+            val d = droneIter.next()
+            d.lifeRemaining -= dt
+            if (d.lifeRemaining <= 0f) { droneIter.remove(); continue }
+            // Re-pick target if current is dead / missing.
+            val current = asteroids.firstOrNull { it.id == d.targetId && it.hp > 0 }
+            val target = current ?: run {
+                val nearest = asteroids.filter { it.hp > 0 }
+                    .minByOrNull {
+                        val dx = it.xPos - d.x
+                        val dy = it.yPos - d.y
+                        val dz = it.zPos - d.z
+                        dx * dx + dy * dy + dz * dz
+                    }
+                d.targetId = nearest?.id ?: -1L
+                nearest
+            }
+            // Steer toward an offset orbit point around the target — each
+            // drone has a unique angular offset (swarmIndex × 2π/N) so the
+            // swarm forms a small ring around the asteroid instead of
+            // stacking at the same xyz. Offset distance is KEEP_DISTANCE
+            // which keeps drones outside the asteroid hull.
+            if (target != null) {
+                val n = DraftCombat.DRONE_COUNT
+                val offsetAngle = d.swarmIndex.toFloat() * (2.0 * Math.PI / n).toFloat()
+                val r = DraftCombat.DRONE_KEEP_DISTANCE
+                val orbitX = kotlin.math.cos(offsetAngle) * r
+                val orbitY = 0.15f                                  // slight vertical lift so drones aren't all on a plane
+                val orbitZ = kotlin.math.sin(offsetAngle) * r
+                val desiredX = (target.xPos + orbitX) - d.x
+                val desiredY = (target.yPos + orbitY) - d.y
+                val desiredZ = (target.zPos + orbitZ) - d.z
+                val len = kotlin.math.sqrt(desiredX * desiredX + desiredY * desiredY + desiredZ * desiredZ)
+                if (len > 1e-3f) {
+                    val nx = desiredX / len
+                    val ny = desiredY / len
+                    val nz = desiredZ / len
+                    // Speed scales with how far we are from the orbit point —
+                    // close to the orbit slot, slow down so drones don't
+                    // overshoot back and forth. Far away → full speed.
+                    val approachSpeed =
+                        DraftCombat.DRONE_SPEED * (len / r).coerceAtMost(1f).coerceAtLeast(0.2f)
+                    val k = (DraftCombat.DRONE_TURN_RATE * dt).coerceAtMost(1f)
+                    d.vx = (d.vx * (1f - k) + nx * approachSpeed * k)
+                    d.vy = (d.vy * (1f - k) + ny * approachSpeed * k)
+                    d.vz = (d.vz * (1f - k) + nz * approachSpeed * k)
+                    val vlen = kotlin.math.sqrt(d.vx * d.vx + d.vy * d.vy + d.vz * d.vz)
+                    if (vlen > DraftCombat.DRONE_SPEED) {
+                        val s = DraftCombat.DRONE_SPEED / vlen
+                        d.vx *= s; d.vy *= s; d.vz *= s
+                    }
+                }
+            }
+            // Advance position.
+            d.x += d.vx * dt
+            d.y += d.vy * dt
+            d.z += d.vz * dt
+            // Heading for rendering — yaw matches xz velocity. Mesh authored
+            // with +Z as forward axis, so rotationY = atan2(vx, vz) with no
+            // model offset (same convention as the homing rocket).
+            if (d.vx * d.vx + d.vz * d.vz > 1e-4f) {
+                d.heading = kotlin.math.atan2(d.vx, d.vz)
+            }
+        }
+
         // Tick all active weapon effects (projectiles + beams + future
         // shockwaves / EMP / etc.). Each effect's tick() owns its own
         // movement, collision, damage and lifetime; returns true to be
-        // removed. The umbrella means one loop covers every type — no
-        // per-effect-kind branching here.
+        // removed. Order after drones above so beam aimSelectors see the
+        // freshly-updated drone.targetId values.
         val effectIter = effects.iterator()
         while (effectIter.hasNext()) {
             if (effectIter.next().tick(dt, weaponCtx)) effectIter.remove()
         }
+
         val deadAsteroids = asteroids.filter { it.hp <= 0 }
         val killed = deadAsteroids.size
         if (killed > 0) {

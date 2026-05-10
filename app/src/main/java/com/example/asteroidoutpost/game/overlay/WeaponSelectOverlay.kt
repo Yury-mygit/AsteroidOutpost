@@ -37,10 +37,7 @@ fun buildWeaponSelect(
             gapParams(context, UiTheme.DP_GAP_NORMAL),
         )
     }
-    content.addView(
-        UiHelpers.buildSecondaryButton(context, "Назад", onClick = onBack),
-        gapParams(context, UiTheme.DP_GAP_WIDE),
-    )
+    attachFloatingBackButton(context, outer, onBack)
     return outer
 }
 

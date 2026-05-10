@@ -16,4 +16,8 @@ data class GameProgress(
     val baseHpLevel:            Int = 1,
     val sideTurretDamageLevel:  Int = 1,
     val highestMissionUnlocked: Int = 0,
+    /** Selected central turret weapon — chosen on the «Корабль» screen,
+     *  applied to every subsequent mission. Mission select no longer
+     *  asks for a weapon; the saved choice rides into Playing as-is. */
+    val selectedWeaponId:       WeaponId = WeaponId.AUTOMATIC,
 )

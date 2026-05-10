@@ -45,13 +45,16 @@ internal object DraftCombat {
     // and it's invisible. ASTEROID_SPAWN_Z and ASTEROID_SPAWN_Y_DEPTH
     // are tuned together so the spawn point sits comfortably inside the
     // frustum at all expected Y depths.
-    // E16 — asteroid trajectory tweaked from the steep 8/5.94 ratio (53° from
-    // horizontal, "falling straight down") to a more diagonal 6/5.94 ratio
-    // (~45° from horizontal, "diagonal attack from upper-front"). Y/Z still
-    // > 0.685 so asteroids approach the camera under the tilted view (per
-    // memory: project_asteroid_trajectory_constraint).
-    const val ASTEROID_SPAWN_Y_DEPTH: Float = 6f
-    const val ASTEROID_SPAWN_Z:       Float = 6f
+    // Radical 3D — asteroids approach the ship head-on with both depth-Y
+    // descent (10 units) and forward-Z motion (12.94 units), so the
+    // trajectory direction roughly aligns with the inverse camera-look
+    // axis. Result on screen: asteroid grows 2.9× from spawn to impact
+    // (vs 1.9× for pure horizontal) and traverses only half the screen
+    // vertically (vs the full screen) — reads as "flying head-on, growing"
+    // instead of "falling from above". Y/Z = 0.77 sits between the steep
+    // 1.46 head-on optimum and the flat 0 horizontal extreme.
+    const val ASTEROID_SPAWN_Y_DEPTH: Float = 10f
+    const val ASTEROID_SPAWN_Z:       Float = 15f
     const val ASTEROID_HALF:     Float = 0.1235f
     const val DAMAGE_PER_HIT:    Int   = 10
     const val ASTEROID_SPEED:    Float = 1.0f   // units/sec downward
@@ -403,6 +406,31 @@ internal object DraftCombat {
     // Vertical lift of the whole arch as a fraction of halfH — the ends
     // detach from the platform and the band reads as a hovering barrier.
     const val SHIELD_ARCH_LIFT_FRAC: Float = 0.05f
+    // E19 — drones ability. Spawn N interceptor drones around the ship that
+    // autonomously target nearest asteroid, fly toward it, fire a continuous
+    // laser beam when within attack range, switch targets on kill. Drones
+    // and their lasers expire after DRONE_LIFETIME_SEC.
+    const val DRONE_COUNT:            Int   = 4
+    const val DRONE_LIFETIME_SEC:     Float = 10f
+    const val DRONE_SPEED:            Float = 3.0f   // world units / sec
+    const val DRONE_TURN_RATE:        Float = 4.0f   // rad / sec (steering)
+    const val DRONE_ATTACK_RANGE:     Float = 1.8f   // beam fires when target within this
+    /** Distance from target the drone tries to maintain — orbit radius
+     *  around the asteroid so it doesn't penetrate the model. Plus a
+     *  per-drone angular offset around the target keeps drones from
+     *  stacking on the same point. */
+    const val DRONE_KEEP_DISTANCE:    Float = 0.9f
+    /** Yaw offset applied to the drone mesh — `ship.gltf` is authored with
+     *  forward axis along +X (legacy convention); rotationY in scene assumes
+     *  +Z forward, so we subtract π/2 to align nose with velocity. */
+    const val DRONE_MESH_YAW_OFFSET:  Float = -1.5707963f   // -π/2
+    const val DRONE_LASER_DPS:        Float = 28f    // 4 drones × 28 DPS = 112 → kills NORMAL in ~1s
+    const val DRONE_LASER_WIDTH:      Float = 0.012f
+    val       DRONE_LASER_COLOR              = floatArrayOf(0.65f, 1.00f, 0.55f, 0.95f)  // green
+    const val DRONE_SPAWN_SPREAD:     Float = 0.4f   // tight xz cluster — drones launch from a bay under the ship
+    const val DRONE_SPAWN_Y:          Float = 0.6f   // well under hull (hull bottom at +0.10) — visible "from below" launch
+    const val DRONE_MESH_SCALE:       Float = 0.18f  // size on screen
+
     // M5 — special asteroid death effects.
     const val EXPLOSIVE_AOE_RADIUS:  Float = 0.5f   // same as heavy cannon AoE
     const val EXPLOSIVE_AOE_DAMAGE:  Int   = 30     // splash damage to neighbours

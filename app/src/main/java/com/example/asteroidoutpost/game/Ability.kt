@@ -7,7 +7,7 @@ package com.example.asteroidoutpost.game
  * is held by MainActivity per slot. All abilities are instant: the actual
  * fire is marshalled onto the tick thread to keep list mutations atomic.
  */
-enum class AbilityId { ROCKET_STRIKE, LASER_STRIKE }
+enum class AbilityId { ROCKET_STRIKE, LASER_STRIKE, DRONES }
 
 data class Ability(
     val id: AbilityId,
@@ -38,7 +38,16 @@ object AbilityCatalog {
         cooldownSec  = 18f,
     )
 
-    val ALL: List<Ability> = listOf(ROCKET_STRIKE, LASER_STRIKE)
+    val DRONES = Ability(
+        id           = AbilityId.DRONES,
+        displayName  = "Дроны-перехватчики",
+        shortLabel   = "ДРОНЫ",
+        description  = "4 дрона вылетают из-под корабля и 10 секунд автономно атакуют ближайшие астероиды лазерным лучом, переключаясь на новую цель после уничтожения текущей.",
+        cost         = 40f,
+        cooldownSec  = 20f,
+    )
+
+    val ALL: List<Ability> = listOf(ROCKET_STRIKE, LASER_STRIKE, DRONES)
 
     fun byId(id: AbilityId): Ability = ALL.first { it.id == id }
 }

@@ -11,9 +11,14 @@ class EngineJni {
         // on these: PLAIN passes per-vertex alpha straight through; NEBULA
         // multiplies alpha by 3-octave value-noise from world position; HEX
         // multiplies alpha by a procedural hex-grid pattern from local X/Z.
-        const val MATERIAL_PLAIN  = 0
-        const val MATERIAL_NEBULA = 1
-        const val MATERIAL_HEX    = 2
+        const val MATERIAL_PLAIN       = 0
+        const val MATERIAL_NEBULA      = 1
+        const val MATERIAL_HEX         = 2
+        /** NEBULA fast mode — single fbm3 call, no domain warp.
+         *  ~67% cheaper per fragment than full NEBULA. Visible artefact:
+         *  square value-noise cells become noticeable. Used as a runtime
+         *  toggle (tap on FPS label) to compare quality vs perf visually. */
+        const val MATERIAL_NEBULA_FAST = 3
 
         // E7.1 — sub-materials for the additive mesh pipeline. Plain = simple
         // pass-through (vColor.rgb * pc.plasmaColor * vColor.a, premultiplied).

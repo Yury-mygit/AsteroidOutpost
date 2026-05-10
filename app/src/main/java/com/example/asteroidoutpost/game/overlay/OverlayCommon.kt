@@ -104,3 +104,31 @@ internal fun gapParams(ctx: Context, topMarginDp: Float): LinearLayout.LayoutPar
         LinearLayout.LayoutParams.MATCH_PARENT,
         LinearLayout.LayoutParams.WRAP_CONTENT,
     ).apply { topMargin = UiTheme.dp(ctx, topMarginDp) }
+
+/**
+ * Attaches a floating chevron-back tile to the bottom-right corner of
+ * `overlay.outer` for back navigation. Same affordance across every
+ * screen: thumb-reachable on portrait phones, never competes with content.
+ * Tinted with the theme's text colour and laid on top of any footer.
+ */
+internal fun attachFloatingBackButton(
+    context: Context,
+    outer: FrameLayout,
+    onBack: () -> Unit,
+) {
+    val sizePx = UiTheme.dp(context, 44f)
+    val tile = UiHelpers.buildIconTile(
+        context = context,
+        icon    = com.example.asteroidoutpost.game.ui.icons.makeBackIcon(
+            context, 28f, UiTheme.COL_TEXT,
+        ),
+        sideDp  = 44f,
+        onClick = onBack,
+    )
+    val marginPx = UiTheme.dp(context, 12f)
+    val params = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+        gravity = Gravity.BOTTOM or Gravity.END
+        setMargins(0, 0, marginPx, marginPx)
+    }
+    outer.addView(tile, params)
+}

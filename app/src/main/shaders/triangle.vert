@@ -47,6 +47,7 @@ layout(location = 2) out vec3 vWorldPos;  // world-space position
 layout(location = 3) out vec2 vLocalXZ;   // model-space X/Z — used for radial soft-fade (E2.1)
 layout(location = 4) out vec2 vUV;        // texture coords passed through to fragment (E8.1)
 layout(location = 5) out vec2 vVelocity;  // E10.3 — screen-space NDC velocity (curr - prev)
+layout(location = 6) out float vNdcY;     // E17 — NDC.y (top=-1, bottom=+1) for star-pipeline bottom fade
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
@@ -73,4 +74,13 @@ void main() {
     vec2 currNdc  = currClip.xy / max(currClip.w, 1e-4);
     vec2 prevNdc  = prevClip.xy / max(prevClip.w, 1e-4);
     vVelocity     = (currNdc - prevNdc) * 0.5;
+    // E17 — pass NDC.y so star fragment branch can fade out in the lower
+    // technical strip (HUD / action bar area). Vulkan projection flips Y,
+    // so +1 = bottom of screen, -1 = top.
+    vNdcY = currNdc.y;
+
+    // E17 — star point size. Only the star pipeline binds POINT_LIST
+    // topology; triangle/quad pipelines ignore gl_PointSize. 4px gives
+    // a visible "twinkle dot" on high-DPI screens (1px is invisible).
+    gl_PointSize = 4.0;
 }

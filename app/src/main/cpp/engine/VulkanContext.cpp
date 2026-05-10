@@ -79,7 +79,10 @@ namespace station {
             std::mt19937 rng(42);
             std::uniform_real_distribution<float> theta(0.0f, 2.0f * 3.14159265f);
             std::uniform_real_distribution<float> cosPhiDist(-1.0f, 1.0f);
-            std::uniform_real_distribution<float> brightness(0.5f, 1.0f);
+            // E17 — narrower brightness range so all stars are clearly
+            // visible after the lit-path bypass; fragment shader twinkle
+            // multiplies this further into a [0.65, 1.0] temporal pulse.
+            std::uniform_real_distribution<float> brightness(0.7f, 1.0f);
 
             stars.vertices.reserve(count);
             stars.indices.reserve(count);
@@ -310,7 +313,7 @@ namespace station {
             if (!createPipelineInfra()) return false;
 
             // Create star-field mesh once
-            MeshData stars = generateStars(600, 45.0f);
+            MeshData stars = generateStars(1500, 45.0f);  // E17 — denser star field
             m_starMesh.create(m_physicalDevice, m_device, stars);
 
             // Corner-bracket frame mesh (LINE_LIST): 4 L-shaped corners, no full sides.
@@ -812,6 +815,9 @@ namespace station {
     void VulkanContext::destroyPipelineInfra() {
         if (m_pipeline            != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipeline, nullptr);                       m_pipeline = VK_NULL_HANDLE; }
         if (m_starPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_starPipeline, nullptr);                   m_starPipeline = VK_NULL_HANDLE; }
+        if (m_backgroundPipeline   != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_backgroundPipeline, nullptr);            m_backgroundPipeline = VK_NULL_HANDLE; }
+        if (m_backgroundVertModule != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_backgroundVertModule, nullptr);       m_backgroundVertModule = VK_NULL_HANDLE; }
+        if (m_backgroundFragModule != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_backgroundFragModule, nullptr);       m_backgroundFragModule = VK_NULL_HANDLE; }
         if (m_systemPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_systemPipeline, nullptr);                 m_systemPipeline = VK_NULL_HANDLE; }
         if (m_plasmaPipeline      != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_plasmaPipeline, nullptr);                 m_plasmaPipeline = VK_NULL_HANDLE; }
         if (m_translucentPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_translucentPipeline, nullptr);            m_translucentPipeline = VK_NULL_HANDLE; }
@@ -920,7 +926,9 @@ namespace station {
                                        const std::vector<uint32_t>& postVertSpv,
                                        const std::vector<uint32_t>& postFragSpv,
                                        const std::vector<uint32_t>& beamVertSpv,
-                                       const std::vector<uint32_t>& beamFragSpv) {
+                                       const std::vector<uint32_t>& beamFragSpv,
+                                       const std::vector<uint32_t>& backgroundVertSpv,
+                                       const std::vector<uint32_t>& backgroundFragSpv) {
         auto makeModule = [&](const std::vector<uint32_t>& code, VkShaderModule& mod) -> bool {
             VkShaderModuleCreateInfo ci{};
             ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -1126,6 +1134,53 @@ namespace station {
 
         r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gpCI, nullptr, &m_starPipeline);
         if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(stars): %s", vkRes(r).c_str()); return false; }
+
+        // E18 — fullscreen background nebula. Empty vertex input (3 verts
+        // synthesised in the shader from gl_VertexIndex), TRIANGLE_LIST
+        // topology, depth test/write off so the background sits at far
+        // plane unconditionally and every subsequent draw paints over it
+        // via standard depth ordering. Reuses m_pipelineLayout so the
+        // shader sees pc.time at the same offset as the scene shaders.
+        if (!backgroundVertSpv.empty() && !backgroundFragSpv.empty()) {
+            if (!makeModule(backgroundVertSpv, m_backgroundVertModule)) return false;
+            if (!makeModule(backgroundFragSpv, m_backgroundFragModule)) return false;
+            VkPipelineShaderStageCreateInfo bgStages[2]{};
+            bgStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            bgStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            bgStages[0].module = m_backgroundVertModule; bgStages[0].pName = "main";
+            bgStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            bgStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bgStages[1].module = m_backgroundFragModule; bgStages[1].pName = "main";
+
+            VkPipelineVertexInputStateCreateInfo bgViCI{};
+            bgViCI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            // No bindings, no attributes — vertex shader uses gl_VertexIndex.
+
+            VkPipelineInputAssemblyStateCreateInfo bgIaCI{};
+            bgIaCI.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            bgIaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineDepthStencilStateCreateInfo bgDsCI{};
+            bgDsCI.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            bgDsCI.depthTestEnable  = VK_FALSE;
+            bgDsCI.depthWriteEnable = VK_FALSE;
+
+            // Reuse the rest of the state objects from the scene pipeline build
+            // (vpCI, rastCI, msCI, cbCI, gpCI). Override what differs.
+            VkGraphicsPipelineCreateInfo bgGpCI = gpCI;
+            bgGpCI.stageCount = 2;
+            bgGpCI.pStages = bgStages;
+            bgGpCI.pVertexInputState = &bgViCI;
+            bgGpCI.pInputAssemblyState = &bgIaCI;
+            bgGpCI.pDepthStencilState = &bgDsCI;
+            r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &bgGpCI, nullptr, &m_backgroundPipeline);
+            if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(background): %s", vkRes(r).c_str()); return false; }
+        }
+        // Reset star-pipeline overrides so subsequent pipelines (particles
+        // etc.) start from the lit-pipeline defaults again.
+        iaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        dsCI.depthWriteEnable = VK_TRUE;
+        dsCI.depthCompareOp   = VK_COMPARE_OP_LESS;
 
         // E9 — Particle pipelines. Two pipelines share particle.vert /
         // particle.frag and the same per-instance binding 1; they differ
@@ -1710,8 +1765,14 @@ namespace station {
         cmd.billboard   = false;
         cmd.objectFrame = false;
         std::memcpy(cmd.modelMatrix, modelMatrix, sizeof(float) * 16);
-        if (material == 1) cmd.tint[1] = 1.0f;  // NEBULA → fragment FBM mode
-        if (material == 2) cmd.tint[2] = 1.0f;  // HEX    → fragment hex-grid mode
+        if (material == 1) cmd.tint[1] = 1.0f;  // NEBULA      → fragment FBM mode (full quality: warp + fbm4)
+        if (material == 2) cmd.tint[2] = 1.0f;  // HEX         → fragment hex-grid mode
+        if (material == 3) cmd.tint[1] = 2.0f;  // NEBULA_FAST → still nebula (≥0.5 gate), but shader gates >=1.5 = single fbm3 no warp
+        // Don't use cmd.tint[3] (= pc.tint.w) for translucent flags — it's
+        // already claimed by the additive pipeline path in triangle.frag
+        // (`if (pc.tint.w >= 0.5)` switches to premultiplied additive output),
+        // which corrupts translucent rendering. Use distinct values of
+        // pc.tint.y instead.
         cmd.perDrawUboOffset = allocPerDrawSlotImpl(
                 m_perDrawUboMapped, m_perDrawUboStride,
                 m_perDrawUboCursor, kMaxDrawsPerFrame,
@@ -2254,15 +2315,38 @@ namespace station {
                                     1, &zeroOffset);
         }
 
+        // E18 — fullscreen background nebula. Drawn FIRST (before stars and
+        // scene), no vertex buffer (3 verts synthesised in shader from
+        // gl_VertexIndex), depth test/write off so it sits at far plane and
+        // every subsequent draw paints over it. Reuses the scene pipeline
+        // layout so pc.time is available at offset 96 for animated FBM.
+        if (m_backgroundPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_backgroundPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+            PushConstantData bgPc{};
+            bgPc.time = elapsedSec;
+            math::Mat4 identity = math::Mat4::identity();
+            for (int i = 0; i < 16; ++i) bgPc.model[i] = identity.m[i];
+            vkCmdPushConstants(cmd, m_pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(PushConstantData), &bgPc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);  // 3 verts, fullscreen triangle
+        }
+
         // --- Draw star-field first (depth write OFF, drawn behind everything) ---
         if (m_starMesh.isReady() && m_starPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_starPipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 
-            // Identity model for stars (they're in world space already)
+            // Identity model for stars (they're in world space already).
+            // E17 — textureMode = 2.0 is the sentinel for the emissive
+            // twinkling-star branch in triangle.frag's lit path. Skips
+            // Lambertian shading and outputs vColor * sin-driven twinkle.
             PushConstantData starPc{};
             starPc.time = elapsedSec;
+            starPc.textureMode = 2.0f;
             math::Mat4 identity = math::Mat4::identity();
             for (int i = 0; i < 16; ++i) starPc.model[i] = identity.m[i];
             vkCmdPushConstants(cmd, m_pipelineLayout,

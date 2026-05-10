@@ -6,6 +6,7 @@ layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec2 vLocalXZ;   // model-space X/Z — used for radial soft-fade (E2.1)
 layout(location = 4) in vec2 vUV;        // texture coords (E8.1) — sampled by E8.3+ textured branch
 layout(location = 5) in vec2 vVelocity;  // E10.3 — screen-space NDC velocity from triangle.vert
+layout(location = 6) in float vNdcY;     // E17 — NDC.y for star bottom-fade (top=-1, bottom=+1)
 
 layout(location = 0) out vec4 outColor;
 // E10.2 — second colour attachment: screen-space velocity in NDC units
@@ -79,6 +80,22 @@ float fbm4(vec2 p) {
     }
     return v;
 }
+// 3-octave variant for the nebula alpha modulator — drops the finest
+// octave (visible only as sub-pixel grain at translucent nebula scales)
+// to reclaim ~25% of fragment cost. Other consumers of fbm4 (plasma flash,
+// fire fireball, lightning bolt) still need all 4 octaves for their
+// fine-grain animated detail.
+float fbm3(vec2 p) {
+    const mat2 R = mat2(0.766, -0.643, 0.643, 0.766);
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 3; i++) {
+        v += amp * vnoise2(p);
+        p = R * p * 2.13;
+        amp *= 0.55;
+    }
+    return v;
+}
 float nebulaAlphaMod() {
     // E12 — `pc.tint.y` is reused as the lightning sub-mode flag in the
     // plasma branch (pc.tint.x >= 0.5). Gate on `pc.tint.x < 0.5` so this
@@ -86,16 +103,22 @@ float nebulaAlphaMod() {
     // path, where `tint.x` is always 0. Translucent and plasma never
     // share a draw call so the overload is safe.
     if (pc.tint.y < 0.5 || pc.tint.x >= 0.5) return 1.0;
-    // E6 — slow drift over time so nebulae feel alive instead of frozen.
-    // Drift speed kept low (~0.04 sample units/sec) so the motion reads as
-    // ambient gas circulation, not visibly flowing.
-    vec2 drift = vec2(pc.time * 0.04, pc.time * 0.025);
+    // Drift disabled — user wanted static backdrop nebulae for now.
+    vec2 drift = vec2(0.0, 0.0);
     vec2 base = vWorldPos.xz * 0.9 + drift;
-    // Domain warp — perturb the sample point with a second FBM lookup so
-    // residual rectangular cell clusters get smeared into curls and
-    // tendrils. The cost is 3× FBM per fragment but it's the cleanest fix
-    // for value-noise grid artifacts and the warped flow lines also read
-    // as natural cosmic-cloud structure.
+    // FAST mode — MATERIAL_NEBULA_FAST sets pc.tint.y = 2.0 (regular NEBULA
+    // is 1.0). Single fbm3 call, no domain warp. ~67% cheaper per fragment
+    // vs full quality. Visible artefact: square value-noise cells become
+    // noticeable. Why pc.tint.y for the discriminator and not pc.tint.w —
+    // tint.w is already used by the additive pipeline path below
+    // (`if (pc.tint.w >= 0.5)` enters premultiplied additive blending),
+    // which would corrupt translucent rendering.
+    if (pc.tint.y >= 1.5) {
+        float n = fbm3(base);
+        return smoothstep(0.20, 0.85, n);
+    }
+    // Full quality: domain warp + 4-octave fbm. The warp turns the
+    // value-noise grid into curls, the 4th octave adds fine wisp detail.
     vec2 warp = vec2(fbm4(base), fbm4(base + vec2(5.3, 2.7)));
     float n = fbm4(base + warp * 0.5);
     return smoothstep(0.20, 0.85, n);
@@ -147,6 +170,26 @@ void main() {
     // meaningful (frame, plasma billboard) overwrite with vec2(0.0) just
     // before their early return so motion blur sees them as static.
     outVelocity = vVelocity;
+
+    // E17 — emissive twinkling stars. Engine sets pc.textureMode = 2.0
+    // when binding the star pipeline (see VulkanContext::renderFrame).
+    // Stars share the standard scene fragment shader for layout
+    // compatibility but want zero Lambertian shading and a per-star
+    // sin-driven brightness pulse so the field feels alive instead of
+    // statically textured. Per-vertex world position seeds the phase so
+    // each star pulses on its own rhythm.
+    if (pc.textureMode >= 1.5) {
+        float seed = fract(sin(dot(vWorldPos.xy + vWorldPos.zz,
+                                   vec2(12.9898, 78.233))) * 43758.5453);
+        float twinkle = 0.65 + 0.35 * sin(pc.time * 3.0 + seed * 6.2832);
+        // Fade stars out in the lower technical strip (NDC.y > ~+0.55 on
+        // Vulkan flipped projection). Ship's lowest visible edge sits
+        // around +0.73 — fade window 0.55 → 0.75 so HUD area is starless.
+        twinkle *= 1.0 - smoothstep(0.55, 0.75, vNdcY);
+        outColor    = vec4(vColor.rgb * twinkle, 1.0);
+        outVelocity = vec2(0.0);
+        return;
+    }
 
     float alpha = vColor.a * plasmaSoftFade() * nebulaAlphaMod() * hexAlphaMod();
 

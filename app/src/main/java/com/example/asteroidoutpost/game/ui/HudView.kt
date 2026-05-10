@@ -13,6 +13,7 @@ import com.example.asteroidoutpost.game.UiHelpers
 import com.example.asteroidoutpost.game.UiTheme
 import com.example.asteroidoutpost.game.ui.icons.IconDrawable
 import com.example.asteroidoutpost.game.ui.icons.ShieldFillDrawable
+import com.example.asteroidoutpost.game.ui.icons.makeDroneIcon
 import com.example.asteroidoutpost.game.ui.icons.makeLaserIcon
 import com.example.asteroidoutpost.game.ui.icons.makeRocketIcon
 import com.example.asteroidoutpost.game.ui.icons.makeShieldIcon
@@ -160,6 +161,7 @@ internal class HudView(
             val icon = when (ability.id) {
                 AbilityId.ROCKET_STRIKE -> makeRocketIcon(activity, 22f, UiTheme.COL_TEXT)
                 AbilityId.LASER_STRIKE  -> makeLaserIcon(activity, 22f, UiTheme.COL_TEXT)
+                AbilityId.DRONES        -> makeDroneIcon(activity, 22f, UiTheme.COL_TEXT)
             }
             while (abilityIcons.size <= slotIndex) abilityIcons.add(icon)
             abilityIcons[slotIndex] = icon

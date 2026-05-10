@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **`ROADMAP.md` is the source of truth** for what's done, what's planned, and the rationale behind each milestone. Treat any drift between this file and ROADMAP as a sign one wasn't updated. The active refactor source spec is `idea.txt` (M1–M7 done long ago; current wave is M10–M15 + E13–E14, complete as of 2026-05-09).
 
+**Branch state.** `style3` is the active branch — flips the camera behind the ship for a third-person space-shooter look (orbit `+0.6` instead of `-0.6`), asteroids fly at the bow from far +Z, the deck tilts toward the player, an interceptor-drone ability ships, and the mission-flow UI is graph-based. `style2` keeps the diagonal-from-above 3D look (camera in front of bow). `style1` is the original 2D side-view.
+
 ### What the game is
 
 Wide grey platform at the bottom holds player installations (central turret + 2 side turrets + laser dome + rocket silo, all on a procedural mesh per `TurretMeshBuilder`). Asteroids spawn at top and fall through 5 typed variants (NORMAL / FAST / HEAVY / EXPLOSIVE / ENERGY).
@@ -19,7 +21,8 @@ Wide grey platform at the bottom holds player installations (central turret + 2 
 - **Shield** is a permanent HP-based barrier (`shieldHp: Float`, max 500). Shield button = hold-to-recharge: drain 50 energy/sec, refill 200 HP/sec. Asteroids break on the arch superellipse (n=4) when within `±SHIELD_ARCH_HALF_W`; damage routes through shield first (full / partial+overflow / pass-through). While recharging, incoming shield damage is reduced 20% and cyan tangential sparks run along the arch.
 - **Wave-based missions** — 5 missions, each teaches a mechanic. Numbers in `game/Missions.kt`.
 - **Meta** — metal currency persists in `SharedPreferences("outpost_progress_v2")`. Three upgrade tracks × 3 levels in `game/UpgradeCatalog.kt`.
-- **Screen flow**: menu → mission select → weapon select → game (HUD: Score / HP / Волна X/Y) → win/lose.
+- **Screen flow** (style3): menu → mission hub (Кампания / Случайные) → campaign graph (5 numbered colour-coded circles) → mission detail → game (HUD: Score / HP / Волна X/Y) → win/lose. Weapon is no longer asked per mission; it's persisted on the «Корабль» screen (formerly «База») via `GameProgress.selectedWeaponId` and used directly when the mission starts.
+- **Drones ability** (`AbilityId.DRONES`, `combat/Drone.kt`): tap the third action button to launch 4 interceptors from under the ship. They steer onto the nearest asteroids in an orbit pattern (`DRONE_KEEP_DISTANCE`, per-drone angular offset by `swarmIndex`), fire a green continuous laser via a `Beam` whose source/aim closures resolve back to the drone each tick, and re-pick targets on kill. Lifetime 10s, beam ticks AFTER drones in `MissionRunner.tick` so `aimSelector` sees the freshly-updated `targetId`. Mesh: `art/ship.gltf`, tinted red-orange. Yaw offset `-π/2` to align the +X-forward gltf with the +Z-forward rotationY convention.
 
 Numbers, type tables, and gameplay rationale live in ROADMAP §Концепция.
 

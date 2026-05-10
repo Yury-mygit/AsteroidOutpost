@@ -35,6 +35,10 @@ struct StationEngine {
     // E14 — dedicated beam pipeline shaders (own pipeline layout).
     std::vector<uint32_t> beamVertSpv;
     std::vector<uint32_t> beamFragSpv;
+    // E18 — fullscreen background nebula. Optional; falls back to no
+    // background draw if shaders aren't uploaded.
+    std::vector<uint32_t> backgroundVertSpv;
+    std::vector<uint32_t> backgroundFragSpv;
     bool pipelineCreated = false;
 };
 
@@ -103,6 +107,12 @@ extern "C" void station_engine_set_shader(StationEngine* e,
     } else if (std::string(name) == "beam.frag") {
         e->beamFragSpv = std::move(words);
         LOGI("Beam fragment shader set (%zu bytes)", length);
+    } else if (std::string(name) == "background.vert") {
+        e->backgroundVertSpv = std::move(words);
+        LOGI("Background vertex shader set (%zu bytes)", length);
+    } else if (std::string(name) == "background.frag") {
+        e->backgroundFragSpv = std::move(words);
+        LOGI("Background fragment shader set (%zu bytes)", length);
     } else {
         LOGE("set_shader: unknown name '%s'", name);
     }
@@ -129,7 +139,8 @@ extern "C" void station_engine_surface_created(StationEngine* e,
         if (e->vulkan.createPipeline(e->vertSpv, e->fragSpv,
                                      e->particleVertSpv, e->particleFragSpv,
                                      e->postVertSpv, e->postFragSpv,
-                                     e->beamVertSpv, e->beamFragSpv)) {
+                                     e->beamVertSpv, e->beamFragSpv,
+                                     e->backgroundVertSpv, e->backgroundFragSpv)) {
             e->pipelineCreated = true;
         } else {
             LOGE("createPipeline failed");

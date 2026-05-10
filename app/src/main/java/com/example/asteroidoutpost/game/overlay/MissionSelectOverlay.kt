@@ -19,7 +19,7 @@ fun buildMissionList(
     onStart: (MissionConfig) -> Unit,
     onBack:  () -> Unit,
 ): View {
-    val overlay = makeOverlay(context, OverlayOpts(scrollable = true, footer = true))
+    val overlay = makeOverlay(context, OverlayOpts(scrollable = true))
     overlay.content.addView(UiHelpers.buildTitle(context, "Выбор миссии"))
     for (mission in missions) {
         overlay.content.addView(
@@ -27,13 +27,7 @@ fun buildMissionList(
             gapParams(context, UiTheme.DP_GAP_NORMAL),
         )
     }
-    overlay.footer!!.addView(
-        UiHelpers.buildSecondaryButton(context, "Назад", onClick = onBack),
-        LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ),
-    )
+    attachFloatingBackButton(context, overlay.outer, onBack)
     return overlay.outer
 }
 

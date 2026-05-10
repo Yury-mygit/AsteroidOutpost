@@ -22,7 +22,7 @@ private const val TAG_BUTTON_ROW  = "overlay-button-row"
 // wider gap between them, lifted off the bottom edge of the screen.
 private const val DP_MENU_BUTTON_W      = 140f
 private const val DP_MENU_BUTTON_GAP    = 32f
-private const val DP_MENU_BUTTON_BOTTOM = 200f
+private const val DP_MENU_BUTTON_BOTTOM = 12f    // hugging the bottom edge of the screen
 
 fun buildMenu(
     context: Context,

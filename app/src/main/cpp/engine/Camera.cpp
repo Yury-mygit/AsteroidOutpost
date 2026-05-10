@@ -12,11 +12,18 @@ namespace station {
         // DRAFT — Asteroid Outpost: side-view, X=right, Z=up, Y=depth.
         // pitch=π/2 rotates the camera so it looks horizontally instead of top-down.
         using namespace math;
-        m_target   = {0.0f, 0.0f, 4.0f};
+        // Radical 3D — target between original (z=4, ship at -0.91 clipped)
+        // and the over-lifted z=1 (ship at -0.31 mid-screen). z=2.5 puts
+        // the ship's lower visible edge (stern bottom corner) at NDC.y
+        // ≈ -0.73 — about halfway between the deck plane and the bottom
+        // edge of the screen. Asteroid trajectory still spans NDC.y from
+        // +0.34 (upper) to -0.60 (mid-low) → ~94% of screen vertical with
+        // ~3× growth in apparent size.
+        m_target   = {0.0f, 0.0f, 2.5f};
         // E16 — closer camera (was 22) compensates for the wider 55° FOV
         // (was 28°) so the ship occupies similar screen coverage, but the
         // depth ratio between near/far objects ~doubles → asteroids visibly
-        // grow from spawn to impact (was 12% growth, now ~23%).
+        // grow from spawn to impact.
         m_radius   = 11.0f;
         m_normCounter = 0;
         Quat pitch = Quat::fromAxisAngle(1, 0, 0, 1.5707963f); // 90°

@@ -16,9 +16,13 @@ import com.example.asteroidoutpost.game.MissionConfig
 import com.example.asteroidoutpost.game.MissionRunner
 import com.example.asteroidoutpost.game.Missions
 import com.example.asteroidoutpost.game.overlay.addMenuButton
+import com.example.asteroidoutpost.game.overlay.buildCampaign
 import com.example.asteroidoutpost.game.overlay.buildEndOfMission
 import com.example.asteroidoutpost.game.overlay.buildMenu
+import com.example.asteroidoutpost.game.overlay.buildMissionDetail
+import com.example.asteroidoutpost.game.overlay.buildMissionHub
 import com.example.asteroidoutpost.game.overlay.buildMissionList
+import com.example.asteroidoutpost.game.overlay.buildRandomMissions
 import com.example.asteroidoutpost.game.overlay.buildUpgrades
 import com.example.asteroidoutpost.game.overlay.buildWeaponSelect
 import com.example.asteroidoutpost.game.overlay.setMenuBody
@@ -45,10 +49,14 @@ import com.example.asteroidoutpost.game.content.generateDebrisTexture
 import com.example.asteroidoutpost.game.content.generateSmokeTexture
 import com.example.asteroidoutpost.game.ui.HudView
 
-/** 3D-pivot camera tilt — orbit angle applied to the engine on surface
- *  ready, also used for any geometry that needs to be rotated to face the
- *  tilted camera (e.g. nebula billboards in `setupBackgroundNebulae`). */
-private const val CAMERA_TILT_RAD: Float = -0.6f
+/** Radical 3D — camera now ORBITS BEHIND THE SHIP (positive sign) instead
+ *  of in front of the bow. New view: third-person space-shooter — ship in
+ *  foreground, asteroids approach from far +Z direction (in front of bow),
+ *  player shoots forward. Look direction now has +Z component, so any -Z
+ *  trajectory (asteroids descending in z) approaches the camera and grows
+ *  on screen — the constraint that previously needed Y/Z > 0.685 is GONE
+ *  (any Y/Z works). */
+private const val CAMERA_TILT_RAD: Float = +0.6f
 
 class MainActivity : AppCompatActivity() {
 
@@ -86,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     // Bullet meshes (replace red-quad placeholders).
     private var bulletMeshHandle:      Long = 0L  // Bullet.glb        (automatic + side turrets)
     private var bulletHeavyMeshHandle: Long = 0L  // Bullet_Heavy.glb  (heavy cannon)
+    private var droneMeshHandle:       Long = 0L  // ship.gltf — DRONES ability
     private var quadFlashHandle:    Long = 0L  // unit X-Z quad, bright yellow (destruction flash)
     private var quadHpBgHandle:     Long = 0L  // unit X-Z quad, dark grey (HP-bar background)
     private var quadHpFgHandle:     Long = 0L  // unit X-Z quad, green (HP-bar fill)
@@ -123,7 +132,17 @@ class MainActivity : AppCompatActivity() {
     // Static translucent scene (background nebulae) — captured once in
     // setupBackgroundNebulae so buildScene can compose it with per-frame
     // dynamic translucent objects (currently just the shield dome).
-    private var nebulaeTranslucent: List<SceneObject> = emptyList()
+    // MutableList so its contents can be rebuilt at runtime when the
+    // nebula-quality flag toggles (tap on FPS label) — SceneAssembler holds
+    // a reference to this same list, so mutating in place propagates.
+    private val nebulaeTranslucent: MutableList<SceneObject> = mutableListOf()
+    private data class NebulaPlacement(
+        val tint: Int, val x: Float, val y: Float, val z: Float, val scale: Float,
+    )
+    private val nebulaPlacements: MutableList<NebulaPlacement> = mutableListOf()
+    /** Toggle between full-quality nebula FBM (warp + 4-octave) and fast mode
+     *  (single 3-octave, no warp). Tap on the FPS label cycles. */
+    private var nebulaFastMode: Boolean = false
 
     // Game → engine adapter. Reads the runner's gameplay state (asteroids,
     // effects, flashes, fireballs, particles) by ref + per-frame scalars
@@ -156,7 +175,7 @@ class MainActivity : AppCompatActivity() {
             if (missionRunner.gameState != GameState.PLAYING) return
             // Abort returns the player to mission select, with menu underneath
             // for the "Назад" path.
-            resetStack(Screen.Menu, Screen.MissionSelect)
+            resetStack(Screen.Menu, Screen.MissionHub)
         }
     }
 
@@ -188,7 +207,11 @@ class MainActivity : AppCompatActivity() {
     // ---------------------------------------------------------------------
     private sealed class Screen {
         object Menu : Screen()
-        object MissionSelect : Screen()
+        object MissionHub : Screen()                                       // Campaign / Random tabs
+        object Campaign : Screen()                                         // Graph of mission circles
+        object RandomMissions : Screen()                                   // Procedural missions placeholder
+        data class MissionDetail(val mission: MissionConfig) : Screen()    // Description + Start
+        object MissionSelect : Screen()                                    // Legacy flat list (kept for fallback)
         data class WeaponSelect(val mission: MissionConfig) : Screen()
         object Base : Screen()
         object Win : Screen()
@@ -258,6 +281,27 @@ class MainActivity : AppCompatActivity() {
         engineView.onCameraReset   = { }
         engineView.onTap = { _, _ -> }
         engineView.setOnTouchListener { _, event ->
+            // Debug toggle — tap inside the bottom-left ~120×120 px square
+            // where the FPS label sits cycles nebula quality FULL ↔ FAST.
+            // Routed here (not via FPS label's OnClickListener) because the
+            // FrameLayout dispatch order doesn't reliably let the small
+            // text-view consume the touch first; this hook checks raw
+            // coordinates and intercepts before any other tap handling.
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                val h = engineView.height.toFloat()
+                if (event.x < 160f && event.y > h - 160f) {
+                    nebulaFastMode = !nebulaFastMode
+                    rebuildNebulaeTranslucent()
+                    engineView.translucentObjects = nebulaeTranslucent
+                    android.widget.Toast.makeText(
+                        this@MainActivity,
+                        if (nebulaFastMode) "Nebula: FAST (fbm3 no warp)"
+                        else                "Nebula: FULL (warp + fbm4)",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                    return@setOnTouchListener true
+                }
+            }
             if (missionRunner.gameState == GameState.PLAYING &&
                 event.actionMasked == MotionEvent.ACTION_DOWN) {
                 // 3D-pivot Phase 2/3: ask the engine's pickable buffer
@@ -297,33 +341,32 @@ class MainActivity : AppCompatActivity() {
         // Each button has its own state machine (shield: READY/ACTIVE/
         // COOLING; ability: READY/COOLING/INSUFFICIENT-ENERGY/ARMED).
         val theme = com.example.asteroidoutpost.game.UiTheme
-        // Vertical column at bottom-right — thumb-reachable on portrait
-        // phones. Buttons are square icon-tiles (~46dp side) stacked with a
-        // small gap; cooldown text swaps in for the icon via refresh when
-        // it has to show.
-        val btnSide     = theme.dp(this, 46f)
-        val btnGapDp    = theme.dp(this, 8f)
+        // Horizontal row at bottom-centre — thumb-reachable on portrait
+        // phones. Buttons are square icon-tiles (~46dp side) with small
+        // horizontal gaps; cooldown text swaps in for the icon via refresh
+        // when shown.
+        val btnSide     = theme.dp(this, 69f)   // 1.5× the previous 46dp
+        val btnGapDp    = theme.dp(this, 16f)   // 2× the previous 8dp gap
         val btnLp = LinearLayout.LayoutParams(btnSide, btnSide)
         val btnLpGap = LinearLayout.LayoutParams(btnSide, btnSide).apply {
-            setMargins(0, btnGapDp, 0, 0)
+            setMargins(btnGapDp, 0, 0, 0)
         }
         abilityBar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
         abilityBar.addView(hud.buildShieldButton(), btnLp)
         // Build one button per slot, sharing the same dimensions as the
-        // shield button so the column reads as a uniform diegetic control stack.
+        // shield button so the row reads as a uniform action bar.
         for (btn in hud.buildAbilityButtons()) {
             abilityBar.addView(btn, btnLpGap)
         }
         val barParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.BOTTOM or android.view.Gravity.END,
+            android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL,
         ).apply {
             bottomMargin = theme.dp(this@MainActivity, 16f)
-            marginEnd    = theme.dp(this@MainActivity, 16f)
         }
         root.addView(abilityBar, barParams)
         hud.refreshShield(missionRunner.shieldHp, DraftCombat.SHIELD_MAX_HP)
@@ -360,6 +403,26 @@ class MainActivity : AppCompatActivity() {
             text = "FPS —"
             setTextColor(com.example.asteroidoutpost.game.UiTheme.COL_TEXT_DIM)
             textSize = com.example.asteroidoutpost.game.UiTheme.SP_CAPTION * 0.7f
+            // Tap to toggle nebula quality — full FBM (warp + 4 octaves) vs
+            // fast (single fbm3, no warp). Lets us A/B compare visually
+            // without rebuilding the app. Padding makes the touch area
+            // larger than the small text.
+            setPadding(
+                com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 12f),
+                com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 12f),
+                com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 12f),
+                com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 12f),
+            )
+            setOnClickListener {
+                nebulaFastMode = !nebulaFastMode
+                rebuildNebulaeTranslucent()
+                engineView.translucentObjects = nebulaeTranslucent
+                android.widget.Toast.makeText(
+                    this@MainActivity,
+                    if (nebulaFastMode) "Nebula: FAST (fbm3 no warp)" else "Nebula: FULL (warp + fbm4)",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            }
         }
         val fpsParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -411,6 +474,17 @@ class MainActivity : AppCompatActivity() {
             // from the engine's POV — without them drawLaserBeam is a no-op.
             engineView.engine.setShader("beam.vert", assets.open("shaders/beam.vert.spv").readBytes())
             engineView.engine.setShader("beam.frag", assets.open("shaders/beam.frag.spv").readBytes())
+            // E18 — fullscreen FBM nebula background. DISABLED for now —
+            // GPU cost was visible (FPS dropped) and screen-space FBM
+            // didn't match the structured-cloud look of the foreground 3D
+            // nebulae anyway. Skipping the setShader calls leaves the
+            // engine's `backgroundVertSpv`/`backgroundFragSpv` empty,
+            // which the createPipeline branch checks before building
+            // m_backgroundPipeline — so no pipeline, no draw call. The
+            // shader files (.vert/.frag/.spv) and the C++ pipeline plumbing
+            // remain in place; uncommenting these two lines re-enables it.
+            // engineView.engine.setShader("background.vert", assets.open("shaders/background.vert.spv").readBytes())
+            // engineView.engine.setShader("background.frag", assets.open("shaders/background.frag.spv").readBytes())
         } catch (e: Exception) {
             showStatus("Shader load failed: ${e.message}")
         }
@@ -452,8 +526,12 @@ class MainActivity : AppCompatActivity() {
             val a3 = assets.open("models/Asteroid_3.glb").readBytes()
             val a4 = assets.open("models/Asteroid_4.glb").readBytes()
             val a9 = assets.open("models/Asteroid_9.glb").readBytes()
-            asteroidMeshGrey1     = engineView.engine.loadMeshColored(a1, 0.55f, 0.55f, 0.60f)
-            asteroidMeshGrey2     = engineView.engine.loadMeshColored(a2, 0.55f, 0.55f, 0.60f)
+            // Bright brown for the common asteroid types so they stand
+            // distinctly out from the (cool blue) nebula backdrop and the
+            // (red-orange) drones. HEAVY/EXPLOSIVE/ENERGY keep their type
+            // tints so the player can read them at a glance.
+            asteroidMeshGrey1     = engineView.engine.loadMeshColored(a1, 0.78f, 0.50f, 0.22f)
+            asteroidMeshGrey2     = engineView.engine.loadMeshColored(a2, 0.85f, 0.55f, 0.25f)
             asteroidMeshHeavy     = engineView.engine.loadMeshColored(a3, 0.70f, 0.20f, 0.20f)
             asteroidMeshExplosive = engineView.engine.loadMeshColored(a4, 0.95f, 0.55f, 0.20f)
             asteroidMeshEnergy    = engineView.engine.loadMeshColored(a9, 0.30f, 0.85f, 0.95f)
@@ -481,6 +559,16 @@ class MainActivity : AppCompatActivity() {
             if (bulletMeshHandle == 0L) showStatus("Bullet meshes load failed")
         } catch (e: Exception) {
             showStatus("Bullet mesh load failed: ${e.message}")
+        }
+        // E19 — drones ability. Bright red-orange tint so the swarm reads
+        // distinctly against the brown asteroids and blue nebula backdrop.
+        try {
+            val droneBytes = assets.open("models/ship.gltf").readBytes()
+            droneMeshHandle = engineView.engine.loadMeshColored(droneBytes, 0.95f, 0.40f, 0.18f)
+            if (droneMeshHandle == 0L) droneMeshHandle = engineView.engine.loadMesh(droneBytes)
+            if (droneMeshHandle == 0L) showStatus("Drone mesh load failed")
+        } catch (e: Exception) {
+            showStatus("Drone mesh load failed: ${e.message}")
         }
         // ORDER MATTERS — `setupBackgroundNebulae()` constructs the
         // `SceneAssembler` at its tail, capturing all mesh handles by value.
@@ -576,26 +664,25 @@ class MainActivity : AppCompatActivity() {
         // textures painted on the floor. Positions pushed deep behind the
         // asteroid spawn plane (z > 8, y > 6) so they recede into the
         // distance and don't compete with foreground gameplay.
-        data class N(val tint: Int, val x: Float, val y: Float, val z: Float, val scale: Float)
-        val placements = listOf(
-            N(0, -1.7f, 4f, 6.2f, 3.6f),   // purple, upper-left
-            N(1,  1.5f, 3f, 4.0f, 3.0f),   // cyan, mid-right
-            N(2, -0.9f, 5f, 1.4f, 2.4f),   // crimson, lower-left
-            N(3,  1.9f, 4f, 7.6f, 2.8f),   // twilight blue, top-right
-            N(4,  0.0f, 4f, 2.8f, 2.0f),   // warm dust, mid-centre
-        )
-        nebulaeTranslucent = placements.mapIndexed { i, p ->
-            SceneObject(
-                id         = 2000 + i,
-                meshHandle = nebulaHandles[p.tint],
-                x          = p.x, y = p.y, z = p.z,
-                scale      = p.scale,
-                rotationX  = CAMERA_TILT_RAD,
-                // E3.2 — fragment shader applies FBM-noise alpha modulation
-                // for this material → soft-disk turns into wispy clouds.
-                material   = EngineJni.MATERIAL_NEBULA,
-            )
-        }
+        // 5 nebulae in the upper half of the screen — discrete coloured
+        // patches with parallax depth. Mid/lower areas are intentionally
+        // black for now (full-screen FBM background was abandoned for
+        // performance; revisit later with a different approach).
+        // Z reduced ~2 units across the board to lower the nebula band on
+        // screen ("спустить верх пониже"); scales × 1.2 ("растянуть на 20%").
+        // Static — drift was disabled in triangle.frag::nebulaAlphaMod.
+        nebulaPlacements.clear()
+        // Pushed deep past the asteroid spawn plane (which sits at depth
+        // ~24.65) so the nebulae read as a true "far backdrop" — no longer
+        // intersect drone / asteroid trajectories. Scales bumped × 1.7 to
+        // compensate for the further distance and keep similar screen
+        // coverage. Two close nebulae (N4 dust, N2 crimson) stay disabled.
+        nebulaPlacements.addAll(listOf(
+            NebulaPlacement(0, -2.0f, 10f, 18f, 9.0f),  // purple, upper-left, depth ≈28
+            NebulaPlacement(1,  2.2f, 10f, 17f, 8.0f),  // cyan, upper-right, depth ≈27
+            NebulaPlacement(3,  0.5f, 12f, 22f, 9.0f),  // twilight blue, upper-centre, depth ≈32
+        ))
+        rebuildNebulaeTranslucent()
         // E3.3 — filled half-disk so the hex shader has a continuous surface
         // to draw onto. centerAlpha is low (subtle interior fill, turret stays
         // visible) and the mid-arc carries the rim glow. midR pulled inward to
@@ -657,6 +744,7 @@ class MainActivity : AppCompatActivity() {
         sceneAssembler = SceneAssembler(
             asteroids          = missionRunner.asteroids,
             effects            = missionRunner.effects,
+            drones             = missionRunner.drones,
             flashes            = missionRunner.flashes,
             fireballs          = missionRunner.fireballs,
             sparkParticles     = missionRunner.sparkParticles,
@@ -678,12 +766,38 @@ class MainActivity : AppCompatActivity() {
             laserInstallMeshHandle   = laserInstallMeshHandle,
             rocketSiloMeshHandle     = rocketSiloMeshHandle,
             asteroidMeshGrey1        = asteroidMeshGrey1,
+            droneMeshHandle          = droneMeshHandle,
             domeMembraneHandle       = domeMembraneHandle,
             fireballMeshHandle       = fireballMeshHandle,
             particleQuadHandle       = particleQuadHandle,
             smokeTextureHandle       = smokeTextureHandle,
             debrisTextureHandle      = debrisTextureHandle,
         )
+    }
+
+    /**
+     * Rebuild the translucent nebula list from `nebulaPlacements` using the
+     * current `nebulaFastMode`. The list itself (and its reference held by
+     * SceneAssembler) is mutated in place, so the assembler picks up the
+     * new material flag on its next `assemble()` call without needing a
+     * fresh assembler.
+     */
+    private fun rebuildNebulaeTranslucent() {
+        val material =
+            if (nebulaFastMode) EngineJni.MATERIAL_NEBULA_FAST
+            else EngineJni.MATERIAL_NEBULA
+        val rebuilt = nebulaPlacements.mapIndexed { i, p ->
+            SceneObject(
+                id         = 2000 + i,
+                meshHandle = nebulaHandles[p.tint],
+                x          = p.x, y = p.y, z = p.z,
+                scale      = p.scale,
+                rotationX  = CAMERA_TILT_RAD,
+                material   = material,
+            )
+        }
+        nebulaeTranslucent.clear()
+        nebulaeTranslucent.addAll(rebuilt)
     }
 
     // ---------------------------------------------------------------------------
@@ -757,13 +871,17 @@ class MainActivity : AppCompatActivity() {
         hud.abortButton.visibility = View.GONE
 
         when (val top = backStack.lastOrNull() ?: return) {
-            Screen.Menu          -> mountMenu(root)
-            Screen.MissionSelect -> mountMissionSelect(root)
+            Screen.Menu            -> mountMenu(root)
+            Screen.MissionHub      -> mountMissionHub(root)
+            Screen.Campaign        -> mountCampaign(root)
+            Screen.RandomMissions  -> mountRandomMissions(root)
+            is Screen.MissionDetail -> mountMissionDetail(root, top.mission)
+            Screen.MissionSelect   -> mountMissionSelect(root)
             is Screen.WeaponSelect -> mountWeaponSelect(root, top.mission)
-            Screen.Base          -> mountBase(root)
-            Screen.Win           -> mountWin(root)
-            Screen.Lose          -> mountLose(root)
-            Screen.Playing       -> mountPlaying()
+            Screen.Base            -> mountBase(root)
+            Screen.Win             -> mountWin(root)
+            Screen.Lose            -> mountLose(root)
+            Screen.Playing         -> mountPlaying()
         }
     }
 
@@ -782,12 +900,60 @@ class MainActivity : AppCompatActivity() {
         val view = buildMenu(
             this, "Asteroid Outpost", "Миссии",
             onClose = { finish() },
-            onClick = { enterScreen(Screen.MissionSelect) },
+            onClick = { enterScreen(Screen.MissionHub) },
         )
         setMenuBody(view, "Всего металла: ${progressRepo.current.metal}")
-        addMenuButton(view, "База") { enterScreen(Screen.Base) }
+        addMenuButton(view, "Корабль") { enterScreen(Screen.Base) }
         mountAt(root, view)
         buildScene()
+    }
+
+    private fun mountMissionHub(root: FrameLayout) {
+        missionRunner.stopMission(clearScene = false)
+        val view = buildMissionHub(
+            context    = this,
+            onCampaign = { enterScreen(Screen.Campaign) },
+            onRandom   = { enterScreen(Screen.RandomMissions) },
+            onBack     = { popScreen() },
+        )
+        mountAt(root, view)
+    }
+
+    private fun mountCampaign(root: FrameLayout) {
+        missionRunner.stopMission(clearScene = false)
+        val view = buildCampaign(
+            context  = this,
+            missions = Missions.ALL,
+            onPick   = { enterScreen(Screen.MissionDetail(it)) },
+            onBack   = { popScreen() },
+        )
+        mountAt(root, view)
+    }
+
+    private fun mountRandomMissions(root: FrameLayout) {
+        missionRunner.stopMission(clearScene = false)
+        val view = buildRandomMissions(
+            context = this,
+            onBack  = { popScreen() },
+        )
+        mountAt(root, view)
+    }
+
+    private fun mountMissionDetail(root: FrameLayout, mission: MissionConfig) {
+        missionRunner.stopMission(clearScene = false)
+        val view = buildMissionDetail(
+            context = this,
+            mission = mission,
+            onStart = { picked ->
+                // Skip WeaponSelect — weapon is set persistently from
+                // «Корабль». Use the saved selection straight into Playing.
+                val weapon = WeaponCatalog.byId(progressRepo.current.selectedWeaponId)
+                resetStack(Screen.Playing)
+                missionRunner.startMission(picked, weapon)
+            },
+            onBack  = { popScreen() },
+        )
+        mountAt(root, view)
     }
 
     private fun mountMissionSelect(root: FrameLayout) {
@@ -827,10 +993,16 @@ class MainActivity : AppCompatActivity() {
         missionRunner.clearCombatScene()
         buildScene()
         val view = buildUpgrades(
-            this, progressRepo.current,
+            context = this,
+            progress = progressRepo.current,
             onPurchase = { type, cost ->
                 progressRepo.update { UpgradeCatalog.applyPurchase(it, type, cost) }
                 renderTop()   // refresh in place
+            },
+            onWeaponPick = { weaponId ->
+                progressRepo.update { it.copy(selectedWeaponId = weaponId) }
+                missionRunner.currentWeapon = WeaponCatalog.byId(weaponId)
+                renderTop()   // refresh — pill updates, "Выбрано" jumps card
             },
             onBack = { popScreen() },
         )
@@ -858,8 +1030,8 @@ class MainActivity : AppCompatActivity() {
             resetStack(Screen.Playing)
             missionRunner.startMission(mission, missionRunner.currentWeapon)
         }
-        buttons += "База"            to { enterScreen(Screen.Base) }
-        buttons += "К выбору миссий" to { resetStack(Screen.Menu, Screen.MissionSelect) }
+        buttons += "Корабль"         to { enterScreen(Screen.Base) }
+        buttons += "К выбору миссий" to { resetStack(Screen.Menu, Screen.MissionHub) }
         val view = buildEndOfMission(
             context  = this,
             title    = "МИССИЯ ВЫПОЛНЕНА",
@@ -886,8 +1058,8 @@ class MainActivity : AppCompatActivity() {
                 resetStack(Screen.Playing)
                 missionRunner.startMission(mission, missionRunner.currentWeapon)
             },
-            "База"             to { enterScreen(Screen.Base) },
-            "К выбору миссий"  to { resetStack(Screen.Menu, Screen.MissionSelect) },
+            "Корабль"          to { enterScreen(Screen.Base) },
+            "К выбору миссий"  to { resetStack(Screen.Menu, Screen.MissionHub) },
         )
         val view = buildEndOfMission(
             context    = this,

@@ -8,6 +8,7 @@ import com.example.asteroidoutpost.SceneObject
 import com.example.asteroidoutpost.game.combat.Asteroid
 import com.example.asteroidoutpost.game.combat.Beam
 import com.example.asteroidoutpost.game.combat.DraftCombat
+import com.example.asteroidoutpost.game.combat.Drone
 import com.example.asteroidoutpost.game.combat.Fireball
 import com.example.asteroidoutpost.game.combat.Flash
 import com.example.asteroidoutpost.game.combat.Particle
@@ -63,6 +64,7 @@ internal class SceneAssembler(
     // ---- Game-state references (read-only here; mutated by tick / VfxSpawner) ----
     private val asteroids: List<Asteroid>,
     private val effects: List<WeaponEffect>,
+    private val drones: List<Drone>,
     private val flashes: List<Flash>,
     private val fireballs: List<Fireball>,
     private val sparkParticles: List<Particle>,
@@ -88,6 +90,7 @@ internal class SceneAssembler(
     private val laserInstallMeshHandle: Long,
     private val rocketSiloMeshHandle: Long,
     private val asteroidMeshGrey1: Long,
+    private val droneMeshHandle: Long,
     private val domeMembraneHandle: Long,
     private val fireballMeshHandle: Long,
     private val particleQuadHandle: Long,
@@ -286,6 +289,19 @@ internal class SceneAssembler(
                 rotationZ       = rotZ,
                 scale           = bScale,
                 prevModelMatrix = prev,
+            )
+        } + drones.mapIndexed { i, d ->
+            // E19 — render each drone as an oriented opaque mesh. Yaw =
+            // velocity heading + DRONE_MESH_YAW_OFFSET (ship.gltf is +X
+            // forward; rotationY assumes +Z forward, so we apply -π/2 to
+            // align the mesh nose with the flight direction instead of
+            // the side facing forward).
+            SceneObject(
+                id         = 600 + i,
+                meshHandle = droneMeshHandle,
+                x          = d.x, y = d.y, z = d.z,
+                rotationY  = d.heading + DraftCombat.DRONE_MESH_YAW_OFFSET,
+                scale      = DraftCombat.DRONE_MESH_SCALE,
             )
         } + buildHpBars(asteroids, quadHpBgHandle, quadHpFgHandle)
 

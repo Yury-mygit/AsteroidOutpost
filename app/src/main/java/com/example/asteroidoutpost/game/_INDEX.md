@@ -22,11 +22,15 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | Screen | Public entry | File |
 |---|---|---|
 | Main menu | `buildMenu`, `setMenuBody`, `addMenuButton` | `overlay/MenuOverlay.kt` |
-| Mission select | `buildMissionList` | `overlay/MissionSelectOverlay.kt` |
-| Weapon select | `buildWeaponSelect` | `overlay/WeaponSelectOverlay.kt` |
-| Base / upgrades | `buildUpgrades` | `overlay/UpgradesOverlay.kt` |
+| Mission hub (Campaign / Random tabs) | `buildMissionHub` | `overlay/MissionHubOverlay.kt` |
+| Campaign graph (numbered circles) | `buildCampaign` | `overlay/CampaignOverlay.kt` |
+| Mission detail (description + Start) | `buildMissionDetail` | `overlay/MissionDetailOverlay.kt` |
+| Random missions (placeholder) | `buildRandomMissions` | `overlay/RandomMissionsOverlay.kt` |
+| Mission select (legacy flat list) | `buildMissionList` | `overlay/MissionSelectOverlay.kt` |
+| Weapon select (legacy — flow now persists weapon in Корабль) | `buildWeaponSelect` | `overlay/WeaponSelectOverlay.kt` |
+| Корабль (formerly «База») — weapon picker + metal | `buildUpgrades` | `overlay/UpgradesOverlay.kt` |
 | Win / lose | `buildEndOfMission` | `overlay/EndOfMissionOverlay.kt` |
-| Common plumbing | `makeOverlay`, `gapParams`, `OverlayOpts`, `Overlay` | `overlay/OverlayCommon.kt` |
+| Common plumbing | `makeOverlay`, `gapParams`, `OverlayOpts`, `Overlay`, `attachFloatingBackButton` | `overlay/OverlayCommon.kt` |
 
 `MainActivity` drives navigation via a `sealed class Screen` + `backStack`
 (`enterScreen` / `popScreen` / `replaceTop` / `resetStack`).
@@ -42,6 +46,7 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | Rocket icon | `ui/icons/RocketIcon.kt :: makeRocketIcon` |
 | Laser-cuts-asteroid icon | `ui/icons/LaserIcon.kt :: makeLaserIcon` |
 | Back chevron icon | `ui/icons/BackIcon.kt :: makeBackIcon` |
+| Drone (fighter silhouette) icon | `ui/icons/DroneIcon.kt :: makeDroneIcon` |
 | Shield HP fill bar drawable | `ui/icons/ShieldFillDrawable.kt :: ShieldFillDrawable` |
 
 ## UI theming primitives
@@ -58,6 +63,7 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 
 | What | Where |
 |---|---|
+| Drone (interceptor swarm AI entity) | `combat/Drone.kt :: Drone` |
 | Asteroid data class | `combat/Asteroid.kt :: Asteroid` |
 | Asteroid types + per-type tables | `AsteroidType.kt` |
 | Falling / collision / spin constants | `combat/Combat.kt :: DraftCombat` |

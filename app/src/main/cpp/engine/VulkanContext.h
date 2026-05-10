@@ -32,7 +32,9 @@ namespace station {
                             const std::vector<uint32_t>& postVertSpv = {},
                             const std::vector<uint32_t>& postFragSpv = {},
                             const std::vector<uint32_t>& beamVertSpv = {},
-                            const std::vector<uint32_t>& beamFragSpv = {});
+                            const std::vector<uint32_t>& beamFragSpv = {},
+                            const std::vector<uint32_t>& backgroundVertSpv = {},
+                            const std::vector<uint32_t>& backgroundFragSpv = {});
 
         void setFocused(bool focused);
         [[nodiscard]] bool isFocused()      const { return m_focused; }
@@ -294,6 +296,12 @@ namespace station {
         VkPipelineLayout      m_pipelineLayout       = VK_NULL_HANDLE;
         VkPipeline            m_pipeline             = VK_NULL_HANDLE;  // mesh pipeline
         VkPipeline            m_starPipeline         = VK_NULL_HANDLE;  // star point pipeline
+        // E18 — fullscreen FBM nebula backdrop. Empty vertex input,
+        // draws 3 verts forming a fullscreen triangle; depth test/write
+        // off so it sits at far plane unconditionally.
+        VkPipeline            m_backgroundPipeline   = VK_NULL_HANDLE;
+        VkShaderModule        m_backgroundVertModule = VK_NULL_HANDLE;
+        VkShaderModule        m_backgroundFragModule = VK_NULL_HANDLE;
         VkPipeline            m_systemPipeline       = VK_NULL_HANDLE;  // system overlay pipeline
         VkPipeline            m_plasmaPipeline       = VK_NULL_HANDLE;  // additive-blend plasma pipeline
         VkPipeline            m_translucentPipeline  = VK_NULL_HANDLE;  // SRC_ALPHA / ONE_MINUS_SRC_ALPHA mesh pipeline (E1.2)
