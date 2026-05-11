@@ -1082,6 +1082,82 @@ Pull-request-style полировка: каждое оружие имеет св
 
 **Дальше (deferred):** `MissionRunner` — выделить tick-loop + gameplay state из Activity, чтобы `MainActivity` стала чисто-UI shell'ом. Дизайн готов, реализация — в следующей сессии.
 
+## Сессия 2026-05-11 — `style3`: combat-mission прототип, debug toolset, motion blur retired
+
+Большой батч работ поверх `style3` после рефакторинга `M16`. Все изменения локализованы в Kotlin + один shader touch (см. ниже).
+
+### Combat-mission прототип (M17)
+- **Новые миссии №7/№8** в `Missions.ALL` — повторяемые «Бой: одиночный перехватчик» и «Бой: три перехватчика». Доступны через **Случайные миссии** (`RandomMissionsOverlay` теперь рендерит несколько событий, каждое с собственным тегом «Однократно» / «Повторяемое»).
+- **`MissionConfig.enemyShipSpawns: List<EnemyShipSpawn>?`** — список спецификаций «корабль через N сек, lateral xOffset». Mission 7 = 1 запись, mission 8 = 3 (-2 / 0 / +2 по X со staggered delay 10 / 13 / 16 сек).
+- **Враг = special asteroid** `AsteroidType.ENEMY_SHIP` с `hpMul=4.0`, `halfMul=3.0`. Reuse существующего auto-aim / tap-pick / damage пайплайна, отдельной entity-системы нет. Position перетирается каждый тик (`yPos = shipPosY + ENEMY_SHIP_LEAD_DISTANCE`, `zPos = ENEMY_SHIP_Z`), `xPos` от spec'а (val, ставится при spawn).
+- **`isThreatening`** делает override для ENEMY_SHIP → всегда threat, чтобы красная bracket-рамка появлялась и центральная турель его engaging'ит.
+- **`leadAimAt` фикс**: при spawn ставится `depthSpeed = -SHIP_CRUISE_SPEED` — leadAimAt предсказывает позицию через `a.depthSpeed * t`, в отсутствие этого пули мажут за корму движущегося врага. Стандартный movement integrator пишет в `yPos`, но override каждый тик его перетирает; на actual position depthSpeed не влияет.
+- **Win-condition**: spawn queue пуста И нет живых ENEMY_SHIP. Lose как обычно (platformHP ≤ 0).
+- **Mesh врага**: пока reuse `Asteroid_3.glb` (тёмно-красный HEAVY). Подменять на dedicated mesh когда будет.
+
+### Враг-оружие (EnemyBolt + урон по кораблю)
+- **`combat/Effects.kt :: EnemyBolt`** — отдельный `WeaponEffect`. Летит из enemy.position в `(0, shipPosY, PLATFORM_TOP_Z+0.5)` со скоростью `ENEMY_BOLT_SPEED=12`. Collide со shield-sphere (центр `(0, shipPosY, SHIELD_CENTER_Z)`, радиус `SHIELD_HEMISPHERE_RADIUS`) или hull-AABB → damage 30. Не collide'ит с астероидами.
+- **`WeaponEffectContext` расширен:**
+  - `shipPosY: Float` — для EnemyBolt aim.
+  - `damageShip(amount: Int)` — route через shield / hull, dispatch'ает HUD-refresh.
+  - `damageAsteroid(a, amount)` — централизованный subtract; роутит damage через `a.shieldHp` если есть buffer (ENEMY_SHIP), overflow на `a.hp`.
+  - `shieldImpactAt(x, y, z)` — добавляет ShieldImpact + cyan flash на shield sphere (визуальное попадание enemy bolt в наш щит).
+- **`Asteroid` получил поля** `var shieldHp: Int = 0`, `val shieldHpMax: Int = 0`. Defaults сохраняют legacy semantics для обычных астероидов; ENEMY_SHIP при spawn получает `shieldHpMax = hp/2`.
+- **HP-bars в `buildHpBars`**: shielded targets (`shieldHpMax > 0`) показывают **обе полосы всегда** — cyan shield-bar над зелёной HP-bar. Обычные астероиды как раньше — HP-bar только когда `hp < maxHp`.
+- **Все 6 мест `hp -=` в codebase** переключены на `ctx.damageAsteroid` (Effects.kt × 5 + MissionRunner.kt EXPLOSIVE AoE × 1). `applySplashDamage` сигнатура сменилась с `(asteroids, ...)` на `(ctx, ...)`.
+- **Тюнинг #7/#8**: mission 7 = 1 враг × 800 HP / 400 shield. Mission 8 = 3 врага × 600 HP / 300 shield каждый. Fire каждые 1.5 сек на врага, cooldown'ы независимые (`HashMap<Long, Float>` keyed by asteroid id).
+
+### Player target dispatch (priority lock + threat indicator)
+- **Player priority lock и central auto-aim расщеплены на два независимых поля** в `MissionRunner`:
+  - `playerPriorityId: Long?` — set'ит tap, целевой для laser/rockets/drones.
+  - `centralAutoStickyId: Long?` — sticky pick центральной (highest-HP-in-arc, переписывается при смерти текущей цели).
+- **`preferredTarget()`** — priority lock первым, fallback на `centralTurretTarget()`. Используют:
+  - **Лазер**: beam aimSelector.
+  - **Ракеты**: при non-null preferred — все N ракет фокусируют огонь (`List(N) { focused }`), иначе legacy top-N-by-HP fallback.
+  - **Дроны**: и spawn target, и per-tick re-pick. Swarm переключается коллективно если игрок тапнет другой астероид во время полёта.
+- **Центральная и боковые турели** теперь чистый auto-aim, priority lock не override'ит (раньше lock мастерил central).
+- **`SelectionFrameView`** — full-screen overlay рисует bracket-frame'ы вокруг астероидов:
+  - **Зелёный** вокруг priority-locked цели.
+  - **Красный** вокруг всех threat-астероидов (тех, по которым auto-aim'ит).
+  - Стиль — 4 corner-bracket'а (L-shape), длина рукава адаптивна, gap min 6 dp — на дальних дистанциях рамка не сливается в сплошной контур.
+- **Tap pick переехал с engine pickable buffer на screen-space pick** (`pickAsteroidByScreen` в MainActivity). Старый pixel-precise depth pick всегда возвращал ближайший к камере → не давал тапнуть дальнего overlapping врага. Новый pick — projection всех live-asteroid'ов в pixel coords + nearest-to-touch внутри hitbox (radiusPx × 1.5, floor 22 dp под finger size).
+
+### Drone AI rewrite
+- **Spawn velocity 0** (было `vy = -DRONE_SPEED` — legacy top-down convention под камерой `style1`; в `style3` -Y = к зрителю, дроны разлетались в обратную сторону от целей).
+- **Orbit-steering убран**, заменён на прямую погоню (`thrust toward target → cap at DRONE_SPEED`). Дрон проносится мимо цели, инерция автоматически разворачивает.
+- **Физика лёгкого корабля**: `DRONE_SPEED = 10`, `DRONE_THRUST = 12 м/с²` → разгон ~0.83 сек, 180° flip ~1.7 сек. Beam range `DRONE_ATTACK_RANGE = 4`.
+- **Drone target re-pick** теперь читает `preferredTarget()` каждый тик — swarm follows player lock.
+
+### Motion blur — retired
+- **Симптом**: мелкое дрожание на ship-attached static объектах (hull, turrets, dome, silo) во время миссии (на главном меню чёткие). После замены процедурных side-турелей на `.glb` (одна модель = один draw call с правильными нормалями) дрожь не ушла. После добавления `prev_model` для всех ship-attached SceneObject'ов (см. ниже) — всё ещё.
+- **Причина**: 5×5 velocity-dilation step в `post.frag` (E10.4) — для каждого пикселя берёт max-magnitude velocity из соседних 5×5. Когда астероид пересекается с силуэтом турели на экране, dilation тащит velocity астероида на статичные пиксели турели → blur размывает их в направлении соседей, направление меняется кадр-к-кадру → дрожь. Никакой mesh-чистоты исправить не может — это пост-эффект.
+- **Решение**: `post.frag` → pure passthrough (`outColor = texture(sceneColor, vUV)`). Pipeline + offscreen colour/velocity attachments + `prev_model` Kotlin-side остались — если кому-то понадобится вернуть blur, делать через per-object dilation boundary (stencil mask на статике), без этого shimmer вернётся. Memory: `feedback project_motion_blur_disabled.md`.
+- **Сторонний эффект**: ~32 семпла на пиксель экрана в post-pass отброшены. GPU нагрузка ощутимо меньше, визуально (по слова user'а) разница не читается на 60-Гц OLED phone'ах. Идея «motion blur для читаемости пуль» (E10.4 rationale) на текущем hardware не нужна.
+
+### Side turrets — на `.glb` (M17)
+- **`Turret_Side_Body.glb` (база+башня) + `Turret_Side_Cannon.glb` (ствол)** в `assets/models/`. Сделаны нейросетью по ТЗ, итерация 3: первая версия имела coplanar pairs (overlapping primitives), вторая — двойную обшивку annuli внутри base; финальная — единая mesh, общие вертексы на швах, без internal faces. Стандартная gltf-конвенция (+Y up, -Z forward); в `SceneAssembler` применяется `rotationX = +π/2` для перехода в наши world-axes (Z up, Y forward).
+- **Side turret = 2 SceneObject** (body + cannon). Cannon позиционируется на высоте амбразуры (`SIDE_CANNON_GLTF_PIVOT_Z = PLATFORM_TOP_Z + SIDE_TURRET_AMBRAZURA_Z`). Muzzle position для bullet spawn — `pivot + (-sin(yaw), cos(yaw)) × SIDE_CANNON_GLTF_LENGTH`. Длина (0.45 м) и pivot offset (0.13 м) привязаны к authored .glb — если артист переавтор'ит на другом масштабе, надо синхронизировать в `Combat.kt`.
+- Центральная турель и `LaserDome` / `RocketSilo` остались процедурными — менять когда mesh'и приедут.
+- `prev_model` для всех ship-attached SceneObject (hull, центральная база/башня/ствол, два body + два cannon боковых, laser dome, rocket silo) теперь корректно строится из `prevShipPosY` + `prevCentralTurretAngle` + `prevSideTurretAnglesArr[]`. Stash в конце `assemble()`. Снимает корректные velocity vectors даже если motion blur вернётся.
+
+### Debug toolset
+- **`game/DebugSettings.kt :: DebugSettings`** — persistent `SharedPreferences("debug_settings")` toggles: master on/off + `DebugLabelMode {COORDS, DISTANCE, NONE}`.
+- **`SettingsOverlay` теперь не пустая заглушка**: два segmented-picker'а («Режим дебага» + «Подписи у астероидов»). При смене callback'а `onSettingsChanged` сразу применяет — `applyDebugVisibility()` в MainActivity скрывает axes-gizmo при выключенном debug; labels reactив на следующем тике.
+- **`updateDebugAsteroidLabels`** учитывает оба toggles: debug=off или mode=NONE → clear; COORDS → как раньше `(x.x, y.y, z.z)`; DISTANCE → `X.X m` (3D Euclidean от центра корабля).
+- **`UiHelpers.buildSegmentedPicker`** — общий N-way pill-picker (используется для обоих toggles). На будущее — для других settings.
+
+### Engine touches (с явным одобрением — feedback memory)
+1. `post.frag` → pure passthrough. Velocity descriptor binding оставлен (unused) для ABI-stability с C++ side.
+2. *Никаких других engine изменений в этой сессии.* Vulkan pipelines, descriptor layouts, JNI API не трогались.
+
+### Что осталось / next ideas
+- 🟡 Dedicated enemy ship mesh (sci-fi корабль вместо `Asteroid_3.glb`).
+- 🟡 Muzzle flash + bolt trail VFX у врага (сейчас bolt = одиночный plasma billboard, без шлейфа).
+- 🟡 Hull-impact VFX (когда bolt пробивает щит и попадает в корпус — сейчас только pulseBaseDamage).
+- 🟡 Звуковые эффекты под combat-mission.
+- 🟡 Боковые турели — pitch (ствол поднимается на лету). Сейчас только yaw. ТЗ концепта «Вид 3» предусматривал, отложено.
+- 🟡 Balance combat-missions: HP/damage/fire-rate (текущие значения — first-pass).
+
 ## Старый бэклог (мелкая шерсть)
 
 Сохранён до решения по релевантности:

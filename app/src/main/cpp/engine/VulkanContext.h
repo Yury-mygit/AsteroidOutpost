@@ -34,7 +34,9 @@ namespace station {
                             const std::vector<uint32_t>& beamVertSpv = {},
                             const std::vector<uint32_t>& beamFragSpv = {},
                             const std::vector<uint32_t>& backgroundVertSpv = {},
-                            const std::vector<uint32_t>& backgroundFragSpv = {});
+                            const std::vector<uint32_t>& backgroundFragSpv = {},
+                            const std::vector<uint32_t>& forceFieldVertSpv = {},
+                            const std::vector<uint32_t>& forceFieldFragSpv = {});
 
         void setFocused(bool focused);
         [[nodiscard]] bool isFocused()      const { return m_focused; }
@@ -136,6 +138,15 @@ namespace station {
                            float endX,   float endY,   float endZ,
                            float width,
                            float r, float g, float b, float a);
+
+        // E20 — force-field shield. Renders the supplied hemisphere mesh
+        // via the dedicated forcefield pipeline (own layout, push constants
+        // = vec4 centerRadius + vec4 impacts[4]). The shader produces
+        // fresnel-rim + Gaussian-impact-bumps additive output. Set 0 is
+        // the only descriptor set; no per-draw UBO, no texture.
+        void drawForceField(uint32_t meshToken,
+                            float cx, float cy, float cz, float radius,
+                            const float impacts[16]);
         void drawObjectFrameMesh(uint32_t frameToken, uint32_t targetToken, const float modelMatrix[16], float padding, const float tint[4]);
         void drawGameplayFrameMesh(uint32_t frameToken, const float modelMatrix[16],
                                    const float* localPoints, int32_t pointCount,
@@ -158,6 +169,9 @@ namespace station {
         void zoomCamera(float factor);
         void zoomCameraAt(float factor, float screenX, float screenY);
         void resetCamera() { m_camera.reset(); }
+        // E21 — public camera target setter; used by route-mode missions
+        // to track the moving ship each frame.
+        void setCameraTarget(float x, float y, float z) { m_camera.setTarget(x, y, z); }
         void renderFrame();
 
     private:
@@ -352,6 +366,25 @@ namespace station {
         // Beam draws are stored as the push constant struct directly so
         // renderFrame can memcpy each one straight into vkCmdPushConstants.
         std::vector<BeamPushConstants> m_beamDrawList;
+        // E20 — dedicated force-field pipeline. Own pipeline layout (set 0
+        // = scene UBO; push constants = vec4 centerRadius + vec4 impacts[4]
+        // = 80 bytes, well under the 128-byte Vulkan minimum guarantee).
+        // Additive ONE/ONE blend, depth-test ON read-only, cull mode taken
+        // from gpCI (NONE). Velocity attachment writeMask=0.
+        VkPipeline            m_forceFieldPipeline       = VK_NULL_HANDLE;
+        VkPipelineLayout      m_forceFieldPipelineLayout = VK_NULL_HANDLE;
+        VkShaderModule        m_forceFieldVertModule     = VK_NULL_HANDLE;
+        VkShaderModule        m_forceFieldFragModule     = VK_NULL_HANDLE;
+        // Force-field push constants. vec4 + 4×vec4 = 16 + 64 = 80 bytes.
+        struct ForceFieldPushConstants {
+            float centerRadius[4];  // 16 bytes — xyz = world centre, w = radius
+            float impacts[16];      // 64 bytes — 4×(x,y,z,age); age≥1 = empty slot
+        };
+        struct ForceFieldDraw {
+            uint32_t meshToken;
+            ForceFieldPushConstants pc;
+        };
+        std::vector<ForceFieldDraw> m_forceFieldDrawList;
         MeshGpu               m_frameLineMesh{};
         MeshGpu               m_frameLineMeshEnemy{};
         bool                  m_wideLines            = false;

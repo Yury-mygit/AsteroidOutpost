@@ -159,6 +159,20 @@ data class BeamDraw(
 )
 
 /**
+ * E20 — force-field shield draw. The unit hemisphere mesh is placed by
+ * `(cx, cy, cz)` (world centre) and uniformly scaled by `radius`.
+ * `impacts` is a flat 16-float array packed as 4 × (worldX, worldY,
+ * worldZ, age) where age ∈ [0, 1] normalised (age ≥ 1.0 = empty slot,
+ * shader skips it). At most 4 active impacts visible; the assembler
+ * picks which ones to send when the game has > 4 live impacts.
+ */
+data class ForceFieldDraw(
+    val meshHandle: Long,
+    val cx: Float, val cy: Float, val cz: Float, val radius: Float,
+    val impacts:    FloatArray,
+)
+
+/**
  * E9 — packed particle batch ready for the engine. `data` is `count * 8`
  * floats per particle (pos.xyz, size, rgba), `mesh` is the unit-quad mesh,
  * `texture` is the sampler-bound texture (0 for additive sparks). `mode`
@@ -188,6 +202,7 @@ fun submitScene(
     texturedObjects: List<SceneObject> = emptyList(),
     particleBatches: List<ParticleBatchKt> = emptyList(),
     beams: List<BeamDraw> = emptyList(),
+    forceFields: List<ForceFieldDraw> = emptyList(),
 ) {
     engine.beginScene()
     for (obj in objects) {
@@ -216,6 +231,9 @@ fun submitScene(
                              beam.endX,   beam.endY,   beam.endZ,
                              beam.width,
                              beam.r, beam.g, beam.b, beam.a)
+    }
+    for (ff in forceFields) {
+        engine.drawForceField(ff.meshHandle, ff.cx, ff.cy, ff.cz, ff.radius, ff.impacts)
     }
     for (p in plasmaBillboards) {
         engine.drawPlasmaBillboard(p.meshHandle, p.x, p.y, p.z, p.scale, p.scaleV,

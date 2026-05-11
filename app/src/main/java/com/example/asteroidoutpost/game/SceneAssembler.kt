@@ -3,6 +3,7 @@ package com.example.asteroidoutpost.game
 import com.example.asteroidoutpost.BeamDraw
 import com.example.asteroidoutpost.BillboardDraw
 import com.example.asteroidoutpost.EngineJni
+import com.example.asteroidoutpost.ForceFieldDraw
 import com.example.asteroidoutpost.ParticleBatchKt
 import com.example.asteroidoutpost.SceneObject
 import com.example.asteroidoutpost.game.combat.Asteroid
@@ -13,9 +14,12 @@ import com.example.asteroidoutpost.game.combat.Fireball
 import com.example.asteroidoutpost.game.combat.Flash
 import com.example.asteroidoutpost.game.combat.Particle
 import com.example.asteroidoutpost.game.combat.Projectile
+import com.example.asteroidoutpost.game.combat.ShieldImpact
 import com.example.asteroidoutpost.game.combat.WeaponEffect
 import com.example.asteroidoutpost.game.combat.packParticles
 import com.example.asteroidoutpost.game.content.TURRET_BASE_Y_HEIGHT
+import com.example.asteroidoutpost.game.content.TURRET_CANNON_HALF_THICK
+import com.example.asteroidoutpost.game.content.TURRET_TOWER_Y_HEIGHT
 
 /**
  * Asteroid SceneObject IDs are computed as [ASTEROID_PICK_ID_BASE] + the
@@ -27,6 +31,8 @@ import com.example.asteroidoutpost.game.content.TURRET_BASE_Y_HEIGHT
  * decoding is unambiguous.
  */
 internal const val ASTEROID_PICK_ID_BASE: Int = 100_000
+
+private const val PI_OVER_2: Float = 1.5707964f
 
 /**
  * Game → engine adapter. Reads game-side state (asteroids, projectiles,
@@ -58,6 +64,7 @@ internal data class SceneFrame(
     val additiveObjects: List<SceneObject>,
     val beams: List<BeamDraw>,
     val particleBatches: List<ParticleBatchKt>,
+    val forceFields: List<ForceFieldDraw>,
 )
 
 internal class SceneAssembler(
@@ -67,6 +74,7 @@ internal class SceneAssembler(
     private val drones: List<Drone>,
     private val flashes: List<Flash>,
     private val fireballs: List<Fireball>,
+    private val shieldImpacts: List<ShieldImpact>,
     private val sparkParticles: List<Particle>,
     private val smokeParticles: List<Particle>,
     private val debrisParticles: List<Particle>,
@@ -84,19 +92,35 @@ internal class SceneAssembler(
     private val quadHpBgHandle: Long,
     private val quadHpFgHandle: Long,
     private val centralBaseMeshHandle: Long,
-    private val centralBarrelMeshHandle: Long,
+    private val centralTowerMeshHandle: Long,
+    private val centralCannonMeshHandle: Long,
     private val sideBaseMeshHandle: Long,
-    private val sideBarrelMeshHandle: Long,
+    private val sideTowerMeshHandle: Long,
+    private val sideCannonMeshHandle: Long,
+    private val sideBodyGltfMeshHandle: Long,
+    private val sideCannonGltfMeshHandle: Long,
     private val laserInstallMeshHandle: Long,
     private val rocketSiloMeshHandle: Long,
     private val asteroidMeshGrey1: Long,
     private val droneMeshHandle: Long,
-    private val domeMembraneHandle: Long,
+    private val shieldHemisphereHandle: Long,
     private val fireballMeshHandle: Long,
     private val particleQuadHandle: Long,
     private val smokeTextureHandle: Long,
     private val debrisTextureHandle: Long,
 ) {
+    // ---- Motion-blur prev-state for ship-attached objects ----
+    // The engine's velocity buffer is `currClip - prevClip`. SceneObjects
+    // that don't set `prevModelMatrix` get a sentinel identity, so when the
+    // ship moves along +Y the velocity reads as ≈ shipPosY (huge) for hull/
+    // turrets/dome/silo — the post-pass then dilates and blurs them into a
+    // visibly trembling smear. We track prev-frame ship state here and
+    // build accurate prev_model matrices so velocity for stationary
+    // ship-attached parts comes out ≈ 0.
+    private var hasPrevShipState: Boolean = false
+    private var prevShipPosY: Float = 0f
+    private var prevCentralTurretAngle: Float = 0f
+    private val prevSideTurretAnglesArr: FloatArray = FloatArray(2)
     /**
      * Build one frame's draw commands. Per-frame scalars are passed in;
      * everything else is read from the references baked at construction.
@@ -108,17 +132,37 @@ internal class SceneAssembler(
     fun assemble(
         centralTurretAngle: Float,
         shieldHp: Float,
+        shipPosY: Float,
     ): SceneFrame {
+        // Snapshot prev-state for ship-attached motion-blur prev_model.
+        // First frame: prev = current (avoids one-frame velocity flash on
+        // mission entry). Subsequent frames use the values stashed at the
+        // end of the previous assemble().
+        val pShipPosY = if (hasPrevShipState) prevShipPosY else shipPosY
+        val pCentralAngle = if (hasPrevShipState) prevCentralTurretAngle else centralTurretAngle
+        val pSide0 = if (hasPrevShipState) prevSideTurretAnglesArr[0] else sideTurretAngles[0]
+        val pSide1 = if (hasPrevShipState) prevSideTurretAnglesArr[1] else sideTurretAngles[1]
+
         val opaque = listOf(
             // Ship hull — replaces the legacy gray quad platform. Mesh is
             // authored in world units (X half = 2.47, Z half = 0.275),
             // so the SceneObject just translates it onto the platform
             // position with scale = 1.
+            // Ship hull — mesh was authored for the OLD top-down camera
+            // (extruded along world Y = depth-axis). The new sideways
+            // camera needs it laid flat: rotationX = -π/2 swaps so the
+            // deck face is at world Z = PLATFORM_TOP_Z and the hull body
+            // extends downward in Z. Mesh-local Z (stern→bow) becomes
+            // world Y (back→forward of ship centre). Without this fix
+            // the hull's overlay details (deck stripes, panel seams) all
+            // sit at the same world Y as the deck face → Z-fight shimmer.
             SceneObject(
                 id         = 100,
                 meshHandle = shipHullMeshHandle,
-                x          = 0f, y = 0f, z = -1.215f,
+                x          = 0f, y = shipPosY, z = DraftCombat.PLATFORM_TOP_Z,
+                rotationX  = -1.5707964f,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(0f, pShipPosY, DraftCombat.PLATFORM_TOP_Z, rotX = -1.5707964f),
             ),
             // Central turret — split into static base + rotating barrel.
             // Base sits on the platform (no rotation); the housing+barrel
@@ -137,54 +181,126 @@ internal class SceneAssembler(
             // wall's bottom edge isn't exactly coplanar with the base top
             // face (otherwise the rotating barrel sweeps an LESS-rejected
             // ring across the base top — reads as a heat-shimmer artifact).
+            // Central platform — laid flat: rotationX=-π/2 makes the
+            // mesh's Y-height axis stand vertically in world Z, and the
+            // mesh's Z-length axis lies along world +Y (forward).
+            // Y offset −0.35 puts the central turret slightly back from
+            // ship-centre so it doesn't clump with the side turrets in
+            // a single line.
             SceneObject(
                 id         = 109,
                 meshHandle = centralBaseMeshHandle,
                 x          = DraftCombat.CENTRAL_TURRET_X,
-                y          = -0.02f,
-                z          = DraftCombat.CENTRAL_BASE_Z,
+                y          = shipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
+                z          = DraftCombat.PLATFORM_TOP_Z + 0.003f,
+                rotationX  = -1.5707964f,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    DraftCombat.CENTRAL_TURRET_X,
+                    pShipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
+                    DraftCombat.PLATFORM_TOP_Z + 0.003f,
+                    rotX = -1.5707964f,
+                ),
             ),
+            // Central tower — yaw around world Z. Z = base top + 5 mm
+            // anti-Z-fight nudge so the tower's bottom face isn't
+            // coplanar with the base's top face (would cause the
+            // shimmering "smoke" artifact the user reported).
             SceneObject(
                 id         = 119,
-                meshHandle = centralBarrelMeshHandle,
+                meshHandle = centralTowerMeshHandle,
                 x          = DraftCombat.CENTRAL_TURRET_X,
-                y          = -0.02f - TURRET_BASE_Y_HEIGHT - 0.003f,
-                z          = DraftCombat.CENTRAL_TURRET_BASE_Z,
-                rotationY  = centralTurretAngle,
+                y          = shipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
+                z          = DraftCombat.PLATFORM_TOP_Z + TURRET_BASE_Y_HEIGHT + 0.005f,
+                rotationX  = -1.5707964f,
+                rotationZ  = centralTurretAngle,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    DraftCombat.CENTRAL_TURRET_X,
+                    pShipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
+                    DraftCombat.PLATFORM_TOP_Z + TURRET_BASE_Y_HEIGHT + 0.005f,
+                    rotX = -1.5707964f, rotZ = pCentralAngle,
+                ),
             ),
-            // Side turret 0 — base + tracking barrel.
+            // Central cannon — sits on tower top with the same 5 mm
+            // nudge against the tower's top face.
+            SceneObject(
+                id         = 129,
+                meshHandle = centralCannonMeshHandle,
+                x          = DraftCombat.CENTRAL_TURRET_X,
+                y          = shipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
+                z          = DraftCombat.PLATFORM_TOP_Z + TURRET_BASE_Y_HEIGHT + TURRET_TOWER_Y_HEIGHT + TURRET_CANNON_HALF_THICK + 0.015f,
+                rotationX  = -1.5707964f,
+                rotationZ  = centralTurretAngle,
+                scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    DraftCombat.CENTRAL_TURRET_X,
+                    pShipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
+                    DraftCombat.PLATFORM_TOP_Z + TURRET_BASE_Y_HEIGHT + TURRET_TOWER_Y_HEIGHT + TURRET_CANNON_HALF_THICK + 0.015f,
+                    rotX = -1.5707964f, rotZ = pCentralAngle,
+                ),
+            ),
+            // Side turrets — .glb-loaded Body + Cannon. Authored in standard
+            // gltf convention (+Y up, -Z forward), so Rx(+π/2) maps model
+            // Y-up → world Z-up. Body origin = centre of base bottom, sits
+            // exactly on PLATFORM_TOP_Z. Cannon origin = yaw pivot at
+            // amburazura height; rotationZ takes the targeting angle.
+            // No coplanar seams inside either model → no nudges, no Z-fight.
+            // Y offset −0.9 (further back than central) so the trio stagger
+            // as front-centre + back-flanks instead of clumping in one line.
             SceneObject(
                 id         = 110,
-                meshHandle = sideBaseMeshHandle,
-                x          = turretXs[0], y = -0.02f, z = DraftCombat.SIDE_BASE_Z,
+                meshHandle = sideBodyGltfMeshHandle,
+                x          = turretXs[0], y = shipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET, z = DraftCombat.PLATFORM_TOP_Z,
+                rotationX  = PI_OVER_2,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    turretXs[0], pShipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET, DraftCombat.PLATFORM_TOP_Z,
+                    rotX = PI_OVER_2,
+                ),
             ),
             SceneObject(
-                id         = 120,
-                meshHandle = sideBarrelMeshHandle,
+                id         = 130,
+                meshHandle = sideCannonGltfMeshHandle,
                 x          = turretXs[0],
-                y          = -0.02f - TURRET_BASE_Y_HEIGHT - 0.003f,
-                z          = DraftCombat.TURRET_TOP_Z,
-                rotationY  = sideTurretAngles[0],
+                y          = shipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET,
+                z          = DraftCombat.SIDE_CANNON_GLTF_PIVOT_Z,
+                rotationX  = PI_OVER_2,
+                rotationZ  = sideTurretAngles[0],
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    turretXs[0],
+                    pShipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET,
+                    DraftCombat.SIDE_CANNON_GLTF_PIVOT_Z,
+                    rotX = PI_OVER_2, rotZ = pSide0,
+                ),
             ),
-            // Side turret 1.
             SceneObject(
                 id         = 111,
-                meshHandle = sideBaseMeshHandle,
-                x          = turretXs[1], y = -0.02f, z = DraftCombat.SIDE_BASE_Z,
+                meshHandle = sideBodyGltfMeshHandle,
+                x          = turretXs[1], y = shipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET, z = DraftCombat.PLATFORM_TOP_Z,
+                rotationX  = PI_OVER_2,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    turretXs[1], pShipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET, DraftCombat.PLATFORM_TOP_Z,
+                    rotX = PI_OVER_2,
+                ),
             ),
             SceneObject(
-                id         = 121,
-                meshHandle = sideBarrelMeshHandle,
+                id         = 131,
+                meshHandle = sideCannonGltfMeshHandle,
                 x          = turretXs[1],
-                y          = -0.02f - TURRET_BASE_Y_HEIGHT - 0.003f,
-                z          = DraftCombat.TURRET_TOP_Z,
-                rotationY  = sideTurretAngles[1],
+                y          = shipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET,
+                z          = DraftCombat.SIDE_CANNON_GLTF_PIVOT_Z,
+                rotationX  = PI_OVER_2,
+                rotationZ  = sideTurretAngles[1],
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    turretXs[1],
+                    pShipPosY + DraftCombat.SIDE_TURRET_Y_OFFSET,
+                    DraftCombat.SIDE_CANNON_GLTF_PIVOT_Z,
+                    rotX = PI_OVER_2, rotZ = pSide1,
+                ),
             ),
             // Laser installation — small dome amidships, just starboard of
             // the centerline between the side turrets. Static.
@@ -192,9 +308,12 @@ internal class SceneAssembler(
                 id         = 131,
                 meshHandle = laserInstallMeshHandle,
                 x          = DraftCombat.LASER_INSTALL_X,
-                y          = -0.02f,
+                y          = shipPosY - 0.02f,
                 z          = DraftCombat.LASER_INSTALL_Z,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    DraftCombat.LASER_INSTALL_X, pShipPosY - 0.02f, DraftCombat.LASER_INSTALL_Z,
+                ),
             ),
             // Rocket silo — port mirror of the laser dome on the same
             // amidships row. Rockets emerge from its launch opening.
@@ -202,9 +321,12 @@ internal class SceneAssembler(
                 id         = 132,
                 meshHandle = rocketSiloMeshHandle,
                 x          = DraftCombat.ROCKET_SILO_X,
-                y          = -0.02f,
+                y          = shipPosY - 0.02f,
                 z          = DraftCombat.ROCKET_SILO_Z,
                 scale      = 1f,
+                prevModelMatrix = shipAttachedPrev(
+                    DraftCombat.ROCKET_SILO_X, pShipPosY - 0.02f, DraftCombat.ROCKET_SILO_Z,
+                ),
             ),
         ) + asteroids.mapIndexed { i, a ->
             // Per-asteroid mesh chosen at spawn (5 distinct .glbs across 5 types
@@ -291,15 +413,29 @@ internal class SceneAssembler(
                 prevModelMatrix = prev,
             )
         } + drones.mapIndexed { i, d ->
-            // E19 — render each drone as an oriented opaque mesh. Yaw =
-            // velocity heading + DRONE_MESH_YAW_OFFSET (ship.gltf is +X
-            // forward; rotationY assumes +Z forward, so we apply -π/2 to
-            // align the mesh nose with the flight direction instead of
-            // the side facing forward).
+            // E19 — render each drone as an oriented opaque mesh. The g3
+            // ship.gltf is authored with +X = nose, ±Y = wings, ±Z =
+            // top/bottom of fuselage. Under g3's top-down camera that
+            // reads correctly via rotationZ = heading; in style3 (camera
+            // behind-and-above the ship, world Y = depth, world Z =
+            // vertical screen) we need TWO rotations baked into the model
+            // matrix:
+            //   - rotationX = +π/2  rolls the model around its own +X
+            //                       axis (the nose) so the wings move
+            //                       from world ±Y (into the screen) to
+            //                       world ±X (horizontal across screen).
+            //                       Without this the fighter reads as a
+            //                       thin vertical stick — wings edge-on.
+            //   - rotationY = heading - π/2  yaws the post-roll model
+            //                       so the +X nose aligns with the
+            //                       drone's flight direction.
+            // (Matrix order in Scene.kt is T·Rz·Ry·Rx, so Rx is applied
+            // first in model space — pure roll — and Ry follows.)
             SceneObject(
                 id         = 600 + i,
                 meshHandle = droneMeshHandle,
                 x          = d.x, y = d.y, z = d.z,
+                rotationX  = DraftCombat.DRONE_MESH_PITCH_OFFSET,
                 rotationY  = d.heading + DraftCombat.DRONE_MESH_YAW_OFFSET,
                 scale      = DraftCombat.DRONE_MESH_SCALE,
             )
@@ -310,6 +446,17 @@ internal class SceneAssembler(
         // soft circular glows that brighten what's behind them — instead of square
         // yellow placeholders sitting on the dark background. E5.1 — per-flash tint
         // forwarded to the plasma fragment branch via BillboardDraw → drawPlasmaBillboard.
+        // Enemy bolts — render as small additive plasma billboards
+        // (warm-red glow) so they read as energy shots rather than metal
+        // slugs. Each bolt is one moving billboard; no mesh trail yet.
+        val enemyBoltBillboards = effects.filterIsInstance<com.example.asteroidoutpost.game.combat.EnemyBolt>().map { b ->
+            BillboardDraw(
+                quadFlashHandle, b.x, b.y, b.z, 0.18f,
+                1.0f, 0.45f, 0.30f, 1.0f,
+                scaleV = 0.18f, rotation = 0f, lightningSeed = 0f,
+            )
+        }
+
         val flashBillboards = flashes.map { f ->
             val t  = 1f - (f.life / f.maxLife)
             val k  = 0.6f + t * 0.8f
@@ -325,7 +472,9 @@ internal class SceneAssembler(
                           rotation = f.rotation, lightningSeed = f.lightningSeed)
         }
 
-        val translucent = nebulaeTranslucent + buildShieldDome(shieldHp, domeMembraneHandle)
+        // E20 — shield goes through the dedicated forcefield pipeline
+        // (built below in forceFields). Translucent route is nebulae only.
+        val translucent = nebulaeTranslucent
 
         // E9 — pack each particle pool into the engine's instance-buffer
         // layout once per frame and ship a single batch per pool. The
@@ -426,15 +575,73 @@ internal class SceneAssembler(
             }
         }
 
+        // E20 — build force-field draw. Only emitted when shieldHp > 0.
+        // Centred at ship origin; uniform radius scale. Impacts packed
+        // into a 16-float array; up to 4 most-recent active impacts go
+        // through, the rest get sentinel age = 1.0 so the shader's "skip
+        // slot" branch ignores them.
+        val forceFields = if (shieldHp > 0f && shieldHemisphereHandle != 0L) {
+            val r = DraftCombat.SHIELD_HEMISPHERE_RADIUS
+            val impactsBuf = FloatArray(16) { 0f }
+            // Default all slots to "empty" sentinel (age = 1.0 in w).
+            for (s in 0 until 4) impactsBuf[s * 4 + 3] = 1f
+            val n = minOf(shieldImpacts.size, 4)
+            val maxLife = DraftCombat.SHIELD_IMPACT_LIFE_SEC
+            for (i in 0 until n) {
+                val si = shieldImpacts[shieldImpacts.size - n + i]
+                val o = i * 4
+                impactsBuf[o]     = si.x
+                impactsBuf[o + 1] = si.y
+                impactsBuf[o + 2] = si.z
+                impactsBuf[o + 3] = 1f - (si.life / maxLife).coerceIn(0f, 1f)
+            }
+            listOf(ForceFieldDraw(
+                meshHandle = shieldHemisphereHandle,
+                cx = 0f, cy = shipPosY, cz = DraftCombat.SHIELD_CENTER_Z,
+                radius = r,
+                impacts = impactsBuf,
+            ))
+        } else emptyList()
+
+        // Stash current ship-attached state so next assemble() can build
+        // prev_model matrices from it. Without this, velocity buffer for
+        // hull/turrets/dome/silo reads as ≈ shipPosY (huge) once the ship
+        // starts cruising, and motion-blur dilation smears them into a
+        // visibly trembling shimmer.
+        prevShipPosY = shipPosY
+        prevCentralTurretAngle = centralTurretAngle
+        prevSideTurretAnglesArr[0] = sideTurretAngles[0]
+        prevSideTurretAnglesArr[1] = sideTurretAngles[1]
+        hasPrevShipState = true
+
         return SceneFrame(
             scene              = opaque,
-            plasmaBillboards   = flashBillboards,
+            plasmaBillboards   = flashBillboards + enemyBoltBillboards,
             translucentObjects = translucent,
             additiveObjects    = fireballAdditive,
             beams              = beams,
             particleBatches    = particleBatches,
+            forceFields        = forceFields,
         )
     }
+
+    /**
+     * Build a model matrix for a ship-attached SceneObject's prev frame.
+     * Reuses `SceneObject.modelMatrix()` to guarantee the exact same
+     * composition (T·Rz·Ry·Rx) as the live SceneObject. Allocations are
+     * cheap (one transient SceneObject + one FloatArray per ship part per
+     * frame, ~10 ship parts).
+     */
+    private fun shipAttachedPrev(
+        x: Float, y: Float, z: Float,
+        rotX: Float = 0f, rotY: Float = 0f, rotZ: Float = 0f,
+    ): FloatArray = SceneObject(
+        id = 0, meshHandle = 0L,
+        x = x, y = y, z = z,
+        rotationX = rotX, rotationY = rotY, rotationZ = rotZ,
+        scale = 1f,
+    ).modelMatrix()
+
 }
 
 /**
@@ -455,61 +662,76 @@ internal fun buildHpBars(
     if (asteroids.isEmpty() || bgHandle == 0L || fgHandle == 0L) return emptyList()
     val out = ArrayList<SceneObject>()
     asteroids.forEachIndexed { i, a ->
-        if (a.hp <= 0 || a.hp >= a.maxHp) return@forEachIndexed
-        val frac      = (a.hp.toFloat() / a.maxHp.toFloat()).coerceIn(0f, 1f)
+        if (a.hp <= 0) return@forEachIndexed
+        val hasShield   = a.shieldHpMax > 0
+        // Shielded targets (enemy ships) always show both bars so the
+        // player can read structure-vs-shield split at a glance. Plain
+        // asteroids keep legacy behaviour — HP bar hidden at full.
+        val showHpBar     = hasShield || a.hp < a.maxHp
+        val showShieldBar = hasShield
+        if (!showHpBar && !showShieldBar) return@forEachIndexed
+
         val barCx     = a.xPos
-        // 3D-pivot Phase 2/3: HP-bar follows the asteroid into depth so
-        // it sits above the asteroid silhouette under perspective. Y
-        // matches asteroid; foreground fill nudged forward by 0.01
-        // (camera-near) so it passes the LESS-depth test against the bg.
         val barCy     = a.yPos
-        val barCz     = a.zPos + a.half + DraftCombat.HP_BAR_PADDING
+        val baseZ     = a.zPos + a.half + DraftCombat.HP_BAR_PADDING
         val barHalfW  = a.half * DraftCombat.HP_BAR_HALF_W_MUL
-        val fillHalfW = barHalfW * frac
-        val fillCx    = barCx - barHalfW * (1f - frac)
-        out.add(SceneObject(
-            id         = 400 + i * 2,
-            meshHandle = bgHandle,
-            x          = barCx, y = barCy, z = barCz,
-            scaleX     = barHalfW,
-            scaleY     = 1f,
-            scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
-        ))
-        out.add(SceneObject(
-            id         = 401 + i * 2,
-            meshHandle = fgHandle,
-            x          = fillCx, y = barCy - 0.01f, z = barCz,
-            scaleX     = fillHalfW,
-            scaleY     = 1f,
-            scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
-        ))
+
+        // HP bar (green, original). Hidden if at max but a shield bar
+        // is shown — we still draw the bg track to anchor the shield
+        // bar above it visually.
+        if (showHpBar) {
+            val frac      = (a.hp.toFloat() / a.maxHp.toFloat()).coerceIn(0f, 1f)
+            val fillHalfW = barHalfW * frac
+            val fillCx    = barCx - barHalfW * (1f - frac)
+            out.add(SceneObject(
+                id         = 400 + i * 4,
+                meshHandle = bgHandle,
+                x          = barCx, y = barCy, z = baseZ,
+                scaleX     = barHalfW,
+                scaleY     = 1f,
+                scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
+            ))
+            out.add(SceneObject(
+                id         = 401 + i * 4,
+                meshHandle = fgHandle,
+                x          = fillCx, y = barCy - 0.01f, z = baseZ,
+                scaleX     = fillHalfW,
+                scaleY     = 1f,
+                scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
+            ))
+        }
+
+        // Shield bar (cyan) stacked above the HP bar. Offset by ~2.5×
+        // bar thickness in Z so it doesn't overlap. Uses the same fg
+        // quad — colour tint is implicit by mesh choice (cyan-tinted
+        // mesh would be ideal; for prototype the green-tinted mesh
+        // still reads as a different bar by position).
+        if (showShieldBar) {
+            val sFrac     = (a.shieldHp.toFloat() / a.shieldHpMax.toFloat()).coerceIn(0f, 1f)
+            val sFillHalf = barHalfW * sFrac
+            val sFillCx   = barCx - barHalfW * (1f - sFrac)
+            val shieldZ   = baseZ + DraftCombat.HP_BAR_HALF_THICK * 2.5f
+            out.add(SceneObject(
+                id         = 402 + i * 4,
+                meshHandle = bgHandle,
+                x          = barCx, y = barCy, z = shieldZ,
+                scaleX     = barHalfW,
+                scaleY     = 1f,
+                scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
+            ))
+            out.add(SceneObject(
+                id         = 403 + i * 4,
+                meshHandle = fgHandle,
+                x          = sFillCx, y = barCy - 0.01f, z = shieldZ,
+                scaleX     = sFillHalf,
+                scaleY     = 1f,
+                scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
+                // Cyan tint baked into per-vertex colour via tint RGBA
+                // overrides — engine's textured route consumes plasmaColor.
+                tintR = 0.30f, tintG = 0.80f, tintB = 1.00f, tintA = 1.0f,
+            ))
+        }
     }
     return out
 }
 
-/**
- * Permanent shield arch (M9) — a wide flat ellipse band spanning the
- * platform width, drawn through the translucent pipeline whenever the
- * shield has any HP left. Returns empty when the shield is broken or the
- * arch mesh failed to load (translucent pass simply skips the dome).
- *
- * Arch mesh is pre-scaled in world units (see `buildShieldArchMesh`), so
- * we only translate to the platform top. Plain translucent material — no
- * hex/nebula overlay; the shape itself is the read. The arch is lifted by
- * `SHIELD_ARCH_LIFT_FRAC × halfH` so the ends hover above the platform
- * instead of sitting on it.
- */
-internal fun buildShieldDome(shieldHp: Float, archHandle: Long): List<SceneObject> {
-    if (shieldHp <= 0f) return emptyList()
-    if (archHandle == 0L) return emptyList()
-    val baseZ = DraftCombat.PLATFORM_TOP_Z +
-        DraftCombat.SHIELD_ARCH_LIFT_FRAC * DraftCombat.SHIELD_ARCH_HALF_H
-    return listOf(
-        SceneObject(
-            id         = 700,
-            meshHandle = archHandle,
-            x          = 0f, y = DraftCombat.SHIELD_DOME_LIFT_Y, z = baseZ,
-            scale      = 1f,
-        ),
-    )
-}

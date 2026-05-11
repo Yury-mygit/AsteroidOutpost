@@ -24,6 +24,26 @@ internal enum class RocketPhase { ASCENDING, FLYING }
 internal interface WeaponEffectContext {
     val asteroids: List<Asteroid>
     val vfx: VfxSpawner
+    /** Ship's current absolute world Y. Enemy-fire effects need this to
+     *  aim at the player; for in-flight rockets / drones it's already
+     *  read through their own closures. */
+    val shipPosY: Float
+    /** Apply damage to the ship's shield first, overflow to hull.
+     *  Used by enemy-side WeaponEffects (EnemyBolt). The MissionRunner
+     *  implementation routes through the same shield/hull subtract
+     *  logic that asteroid impacts use, including HUD refresh. */
+    fun damageShip(amount: Int)
+    /** Apply damage to an asteroid. Routes through `shieldHp` first if
+     *  the asteroid has a shield buffer (ENEMY_SHIP); overflow lands on
+     *  hp. Plain `a.hp -= amount` for asteroids without shield, so
+     *  legacy callers don't change semantics. Centralising the subtract
+     *  here lets the shield-buffered enemy ship coexist with the
+     *  existing hp-only damage model. */
+    fun damageAsteroid(a: Asteroid, amount: Int)
+    /** Register a shield-impact visual on the player ship at a given
+     *  world point (will be projected to the shield sphere surface).
+     *  Called by enemy bolts when their hit lands on the shield. */
+    fun shieldImpactAt(x: Float, y: Float, z: Float)
 }
 
 /**
@@ -93,7 +113,7 @@ internal class Projectile(
             x < -DraftCombat.SCREEN_HALF_W - 1f ||
             x >  DraftCombat.SCREEN_HALF_W + 1f ||
             y < -2f ||                                // passed the camera plane
-            y >  DraftCombat.ASTEROID_SPAWN_Y_DEPTH + 2f) return true
+            y > 1000f) return true                    // effectively unlimited forward range
         // 3D-AABB collision against the first live asteroid we touch.
         for (a in ctx.asteroids) {
             if (a.hp <= 0) continue
@@ -102,6 +122,55 @@ internal class Projectile(
                 kotlin.math.abs(z - a.zPos) < a.half + halfH) {
                 return behaviour.onImpact(this, a, ctx)
             }
+        }
+        return false
+    }
+}
+
+/**
+ * Enemy-fired bolt — flies along (vx, vy, vz) from an enemy ship muzzle
+ * toward the player. Collision tests against the player's shield sphere
+ * (centre `(0, ctx.shipPosY, SHIELD_CENTER_Z)`, radius
+ * `SHIELD_HEMISPHERE_RADIUS`) and the hull AABB; first contact applies
+ * `damage` via `ctx.damageShip` and consumes the effect. Does NOT
+ * collide with asteroids — bolts pass through (or past) them.
+ *
+ * Rendered through `SceneAssembler` as a small additive billboard so it
+ * reads as energy rather than steel.
+ */
+internal class EnemyBolt(
+    var x: Float, var y: Float, var z: Float,
+    var vx: Float, var vy: Float, var vz: Float,
+    val damage: Int,
+    var prevX: Float = x, var prevY: Float = y, var prevZ: Float = z,
+) : WeaponEffect {
+    override fun tick(dt: Float, ctx: WeaponEffectContext): Boolean {
+        prevX = x; prevY = y; prevZ = z
+        x += vx * dt; y += vy * dt; z += vz * dt
+        // Despawn if it sails past the camera plane or out of sane bounds.
+        if (y < ctx.shipPosY - 5f ||
+            z < DraftCombat.HULL_BOTTOM_Z - 2f ||
+            z > DraftCombat.SCREEN_TOP_Z + 2f ||
+            kotlin.math.abs(x) > DraftCombat.SCREEN_HALF_W + 2f) return true
+        // Shield sphere — centre (0, shipPosY, SHIELD_CENTER_Z), radius R.
+        val sx = 0f
+        val sy = ctx.shipPosY
+        val sz = DraftCombat.SHIELD_CENTER_Z
+        val r  = DraftCombat.SHIELD_HEMISPHERE_RADIUS
+        val ddx = x - sx; val ddy = y - sy; val ddz = z - sz
+        if (ddx * ddx + ddy * ddy + ddz * ddz <= r * r) {
+            ctx.shieldImpactAt(x, y, z)
+            ctx.damageShip(damage)
+            return true
+        }
+        // Hull AABB (matches the asteroid-hit gates in MissionRunner.tick).
+        val hullHalfW = DraftCombat.SCREEN_HALF_W
+        if (kotlin.math.abs(x) <= hullHalfW &&
+            kotlin.math.abs(y - ctx.shipPosY) <= 1f &&
+            z >= DraftCombat.HULL_BOTTOM_Z &&
+            z <= DraftCombat.PLATFORM_TOP_Z) {
+            ctx.damageShip(damage)
+            return true
         }
         return false
     }
@@ -196,7 +265,7 @@ internal class Beam(
             dmgAccum += dps * dt
             val whole = dmgAccum.toInt()
             if (whole > 0) {
-                bestAst.hp -= whole
+                ctx.damageAsteroid(bestAst, whole)
                 dmgAccum -= whole.toFloat()
             }
         }
@@ -215,7 +284,7 @@ internal class Beam(
 /** Plain single-target bullet — no steering, small hit flash on impact. */
 internal class PlainBulletBehavior : ProjectileBehavior {
     override fun onImpact(p: Projectile, hit: Asteroid, ctx: WeaponEffectContext): Boolean {
-        hit.hp -= p.damage
+        ctx.damageAsteroid(hit, p.damage)
         ctx.vfx.spawnHitFlash(hit.xPos, hit.yPos, hit.zPos, p.halfW)
         return true
     }
@@ -231,8 +300,8 @@ internal class HeavyShellBehavior(
     val aoeDamage: Int,
 ) : ProjectileBehavior {
     override fun onImpact(p: Projectile, hit: Asteroid, ctx: WeaponEffectContext): Boolean {
-        hit.hp -= p.damage
-        applySplashDamage(ctx.asteroids, hit.xPos, hit.yPos, hit.zPos, aoeRadius, aoeDamage, hit)
+        ctx.damageAsteroid(hit, p.damage)
+        applySplashDamage(ctx, hit.xPos, hit.yPos, hit.zPos, aoeRadius, aoeDamage, hit)
         ctx.vfx.spawnExplosion(hit.xPos, hit.yPos, hit.zPos, aoeRadius)
         return true
     }
@@ -321,8 +390,8 @@ internal class HomingRocketBehavior(
         }
     }
     override fun onImpact(p: Projectile, hit: Asteroid, ctx: WeaponEffectContext): Boolean {
-        hit.hp -= p.damage
-        applySplashDamage(ctx.asteroids, hit.xPos, hit.yPos, hit.zPos, aoeRadius, aoeDamage, hit)
+        ctx.damageAsteroid(hit, p.damage)
+        applySplashDamage(ctx, hit.xPos, hit.yPos, hit.zPos, aoeRadius, aoeDamage, hit)
         ctx.vfx.spawnExplosion(hit.xPos, hit.yPos, hit.zPos, aoeRadius)
         return true
     }
@@ -374,18 +443,18 @@ internal fun steerProjectileTowards(
  * direct hit's full damage has already landed on `centre`.
  */
 internal fun applySplashDamage(
-    asteroids: List<Asteroid>,
+    ctx: WeaponEffectContext,
     cx: Float, cy: Float, cz: Float, radius: Float,
     damage: Int, centre: Asteroid?,
 ) {
     if (radius <= 0f || damage <= 0) return
     val r2 = radius * radius
-    for (a in asteroids) {
+    for (a in ctx.asteroids) {
         if (a === centre || a.hp <= 0) continue
         val dx = a.xPos - cx
         val dy = a.yPos - cy
         val dz = a.zPos - cz
         val d2 = dx * dx + dy * dy + dz * dz
-        if (d2 > 1e-6f && d2 <= r2) a.hp -= damage
+        if (d2 > 1e-6f && d2 <= r2) ctx.damageAsteroid(a, damage)
     }
 }

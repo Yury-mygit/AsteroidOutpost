@@ -289,6 +289,20 @@ class EngineJni {
                 width, r, g, b, a)
     }
 
+    /**
+     * E20 — submit a force-field draw. The mesh is the unit hemisphere
+     * `buildShieldHemisphereMesh`; vertex shader places it at
+     * `(cx, cy, cz)` with `radius` scale. `impacts` is a flat 16-float
+     * array = 4 × (x, y, z, age), where age in [0, 1] normalised. A slot
+     * with age ≥ 1.0 is skipped by the shader.
+     */
+    fun drawForceField(meshHandle: Long,
+                       cx: Float, cy: Float, cz: Float, radius: Float,
+                       impacts: FloatArray) {
+        if (engineHandle != 0L && meshHandle != 0L)
+            nativeDrawForceField(engineHandle, meshHandle, cx, cy, cz, radius, impacts)
+    }
+
     fun drawObjectFrameMesh(
         frameMeshHandle: Long,
         targetMeshHandle: Long,
@@ -356,6 +370,12 @@ class EngineJni {
     fun zoomCameraAt(factor: Float, screenX: Float, screenY: Float) {
         if (engineHandle != 0L) nativeZoomCameraAt(engineHandle, factor, screenX, screenY)
     }
+    /** E21 — set the camera lookAt target. Called every frame in route
+     *  mode so the camera follows the ship as it advances along +Y. */
+    fun setCameraTarget(x: Float, y: Float, z: Float) {
+        if (engineHandle != 0L) nativeSetCameraTarget(engineHandle, x, y, z)
+    }
+
     fun resetCamera() {
         if (engineHandle != 0L) nativeResetCamera(engineHandle)
     }
@@ -445,6 +465,12 @@ class EngineJni {
         material: Int,
         prevModelMatrix: FloatArray?,
     )
+    private external fun nativeDrawForceField(
+        engineHandle: Long,
+        meshHandle: Long,
+        cx: Float, cy: Float, cz: Float, radius: Float,
+        impacts: FloatArray,
+    )
     private external fun nativeDrawLaserBeam(
         engineHandle: Long,
         startX: Float, startY: Float, startZ: Float,
@@ -477,6 +503,7 @@ class EngineJni {
     private external fun nativeZoomCamera(handle: Long, factor: Float)
     private external fun nativeZoomCameraAt(handle: Long, factor: Float, screenX: Float, screenY: Float)
     private external fun nativeResetCamera(handle: Long)
+    private external fun nativeSetCameraTarget(handle: Long, x: Float, y: Float, z: Float)
     private external fun nativeRenderFrame(handle: Long)
     private external fun nativePickObject(handle: Long, x: Float, y: Float, currentObjectId: Int): Int
     private external fun nativeProjectGameplayBounds(

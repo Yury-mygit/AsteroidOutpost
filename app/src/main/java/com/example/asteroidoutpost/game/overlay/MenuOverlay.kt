@@ -7,6 +7,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.asteroidoutpost.game.UiHelpers
 import com.example.asteroidoutpost.game.UiTheme
+import com.example.asteroidoutpost.game.ui.icons.makeSettingsIcon
 
 /**
  * Main menu overlay: title at top, a body line in the middle (mutated
@@ -29,6 +30,7 @@ fun buildMenu(
     title: String,
     buttonText: String,
     onClose: (() -> Unit)? = null,
+    onSettings: (() -> Unit)? = null,
     onClick: () -> Unit,
 ): View {
     // Transparent root — the live base scene shows through behind the
@@ -37,15 +39,38 @@ fun buildMenu(
         context,
         OverlayOpts(scrim = false, centred = false),
     )
-    // Optional top-right "✕" — main menu uses it to quit the app.
-    if (onClose != null) {
-        content.addView(
-            UiHelpers.buildGlyphTile(context, "✕", onClick = onClose),
-            LinearLayout.LayoutParams(
-                UiTheme.dp(context, 36f),
-                UiTheme.dp(context, 36f),
-            ).apply { gravity = Gravity.END },
-        )
+    // Top row: optional close (left) + optional settings gear (right).
+    // Always rendered together as a horizontal row at the top so neither
+    // overlaps the title centre.
+    if (onClose != null || onSettings != null) {
+        val topRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val tileSize = UiTheme.dp(context, 36f)
+        if (onClose != null) {
+            topRow.addView(
+                UiHelpers.buildGlyphTile(context, "✕", onClick = onClose),
+                LinearLayout.LayoutParams(tileSize, tileSize),
+            )
+        } else {
+            topRow.addView(View(context), LinearLayout.LayoutParams(tileSize, tileSize))
+        }
+        // Flex spacer between the two tiles.
+        topRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        if (onSettings != null) {
+            val gear = makeSettingsIcon(context, sizeDp = 24f, tint = UiTheme.COL_TEXT)
+            topRow.addView(
+                UiHelpers.buildIconTile(context, gear, sideDp = 36f, onClick = onSettings),
+                LinearLayout.LayoutParams(tileSize, tileSize),
+            )
+        } else {
+            topRow.addView(View(context), LinearLayout.LayoutParams(tileSize, tileSize))
+        }
+        content.addView(topRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
     }
     content.addView(UiHelpers.buildTitle(context, title))
     content.addView(UiHelpers.buildBody(context, "").apply {

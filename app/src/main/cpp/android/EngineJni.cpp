@@ -358,6 +358,23 @@ Java_com_example_asteroidoutpost_EngineJni_nativeDrawLaserBeam(JNIEnv* /*env*/, 
 }
 
 JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeDrawForceField(JNIEnv* env, jobject /*thiz*/,
+                                                  jlong engineHandle,
+                                                  jlong meshHandle,
+                                                  jfloat cx, jfloat cy, jfloat cz, jfloat radius,
+                                                  jfloatArray impacts) {
+    if (!impacts) return;
+    jfloat* imp = env->GetFloatArrayElements(impacts, nullptr);
+    station_engine_draw_force_field(
+            reinterpret_cast<StationEngine*>(engineHandle),
+            reinterpret_cast<StationMesh*>(meshHandle),
+            cx, cy, cz, radius,
+            reinterpret_cast<float*>(imp)
+    );
+    env->ReleaseFloatArrayElements(impacts, imp, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeDrawParticles(JNIEnv* env, jobject /*thiz*/,
                                                   jlong engineHandle,
                                                   jlong meshHandle,
@@ -549,6 +566,13 @@ JNIEXPORT void JNICALL
 Java_com_example_asteroidoutpost_EngineJni_nativeResetCamera(JNIEnv* /*env*/, jobject /*thiz*/,
                                                 jlong handle) {
     station_engine_reset_camera(reinterpret_cast<StationEngine*>(handle));
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_asteroidoutpost_EngineJni_nativeSetCameraTarget(JNIEnv* /*env*/, jobject /*thiz*/,
+                                                jlong handle,
+                                                jfloat x, jfloat y, jfloat z) {
+    station_engine_set_camera_target(reinterpret_cast<StationEngine*>(handle), x, y, z);
 }
 
 JNIEXPORT void JNICALL

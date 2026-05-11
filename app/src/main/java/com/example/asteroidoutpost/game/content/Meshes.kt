@@ -216,87 +216,6 @@ internal fun buildSoftDiskMesh(
 }
 
 /**
- * 3D shield bubble — translucent half-dome rising above the platform's
- * forward half. Footprint at y=0 is the upper half (z >= 0) of the
- * superellipse |x/a|^n + |z/b|^n = 1; vertical profile is hemispherical
- * (`scale = sqrt(1 - tv²)`) so each horizontal slice is a smaller
- * superellipse, converging to a single point at the pole.
- *
- * Per-vertex alpha is **PEAK at the base ring, fading to 0 at the pole**
- * — the densest visible band sits where the dome meets the deck (a
- * glowing skirt), with the dome's upper surface increasingly transparent.
- * That fakes a force-field-fresnel look without needing a real shader,
- * and keeps the gameplay-significant rim (where asteroids break against
- * the shield) the most readable feature.
- *
- * Mesh is pre-scaled in world units; the SceneObject just translates the
- * dome onto the platform with scale=1.
- */
-internal fun buildShieldArchMesh(engine: EngineJni): Long {
-    val slices = 48        // around the half-perimeter (theta in [0, π])
-    val stacks = 12        // vertical levels from base ring to pole
-    val halfW    = DraftCombat.SHIELD_ARCH_HALF_W
-    val halfH    = DraftCombat.SHIELD_ARCH_HALF_H
-    val height   = DraftCombat.SHIELD_DOME_HEIGHT
-    val n        = DraftCombat.SHIELD_ARCH_SHARPNESS
-    val pExp     = 2.0f / n
-    val r = 0.45f; val g = 0.75f; val b = 1.00f
-    val peakAlpha = DraftCombat.SHIELD_ARCH_PEAK_ALPHA
-
-    val nVertsPerLevel = slices + 1
-    val nVerts = (stacks + 1) * nVertsPerLevel
-    val verts  = FloatArray(nVerts * 10)
-
-    for (j in 0..stacks) {
-        val tv = j.toFloat() / stacks                 // 0 at base, 1 at pole
-        val scale = kotlin.math.sqrt((1f - tv * tv).coerceAtLeast(0f))
-        // Dome rises in +Y. Under our tilted camera, +Y projects upward on
-        // screen — the dome appears as a bubble *above* the ship, between
-        // descending asteroids (yPos > 0) and the deck (y=0). With -Y the
-        // dome would collapse visually below the deck.
-        val y = +height * tv
-        val alpha = peakAlpha * (1f - tv)             // linear fade base → pole
-        for (i in 0..slices) {
-            val theta = (i.toDouble() / slices * Math.PI).toFloat()
-            val c  = kotlin.math.cos(theta)
-            val sV = kotlin.math.sin(theta)
-            val signC = if (c >= 0f) 1f else -1f
-            val absC  = kotlin.math.abs(c)
-            val ux = signC * absC.pow(pExp)
-            val uz = sV.pow(pExp)
-            val px = ux * halfW * scale
-            val pz = uz * halfH * scale
-            val off = (j * nVertsPerLevel + i) * 10
-            verts[off + 0] = px
-            verts[off + 1] = y
-            verts[off + 2] = pz
-            verts[off + 3] = r; verts[off + 4] = g; verts[off + 5] = b
-            verts[off + 6] = alpha
-            verts[off + 7] = 0f; verts[off + 8] = 1f; verts[off + 9] = 0f
-        }
-    }
-
-    // Quad strip between each pair of adjacent stacks. The top stack's
-    // vertices all collapse to the pole point — the resulting "quads"
-    // there become degenerate triangles (zero area) which the rasterizer
-    // discards naturally; alpha=0 at the pole would hide them anyway.
-    val nTris = stacks * slices * 2
-    val indices = ShortArray(nTris * 3)
-    var idx = 0
-    for (j in 0 until stacks) {
-        for (i in 0 until slices) {
-            val v0 = (j * nVertsPerLevel + i    ).toShort()
-            val v1 = (j * nVertsPerLevel + i + 1).toShort()
-            val v2 = ((j + 1) * nVertsPerLevel + i    ).toShort()
-            val v3 = ((j + 1) * nVertsPerLevel + i + 1).toShort()
-            indices[idx++] = v0; indices[idx++] = v1; indices[idx++] = v2
-            indices[idx++] = v1; indices[idx++] = v3; indices[idx++] = v2
-        }
-    }
-    return engine.loadMeshRaw(verts, indices)
-}
-
-/**
  * Static turret base — a chamfered armoured box sitting on the platform with a
  * brightly-coloured top accent stripe (red for central, blue for sides).
  * Origin at platform-top centre so a SceneObject just translates without
@@ -306,6 +225,14 @@ internal fun buildShieldArchMesh(engine: EngineJni): Long {
  */
 internal const val TURRET_BASE_Y_HEIGHT: Float = 0.06f
 internal const val TURRET_BARREL_Y_HEIGHT: Float = 0.05f
+internal const val TURRET_TOWER_Y_HEIGHT:  Float = 0.11f
+internal const val TURRET_TOWER_HALF_W:    Float = 0.20f
+internal const val TURRET_TOWER_HALF_L:    Float = 0.20f
+internal const val TURRET_CANNON_LENGTH:   Float = 0.55f
+internal const val TURRET_CANNON_HALF_W:   Float = 0.07f
+internal const val TURRET_CANNON_HALF_THICK: Float = 0.07f
+internal const val TURRET_CANNON_MUZZLE_LENGTH: Float = 0.08f
+internal const val TURRET_CANNON_MUZZLE_HALF_W: Float = 0.10f
 
 internal fun buildTurretBaseMesh(
     engine: EngineJni,
@@ -341,12 +268,93 @@ internal fun buildTurretBaseMesh(
 }
 
 /**
+ * Tower — the rotating "head" that sits on the platform and carries the
+ * cannon. Just a chamfered box (no barrel built in). Origin at the centre
+ * of the bottom face (so a SceneObject just sits it atop the platform).
+ * Extends camera-near in -Y (mesh-local) by TURRET_TOWER_Y_HEIGHT.
+ * Concept «Вид 3»: tower rotates relative to platform; cannon (separate
+ * mesh) rotates with it AND pitches further around its own axis.
+ */
+internal fun buildTurretTowerMesh(
+    engine: EngineJni,
+    bodyR: Float, bodyG: Float, bodyB: Float,
+): Long {
+    val mb = MeshBuilder()
+    val halfW = TURRET_TOWER_HALF_W
+    val halfL = TURRET_TOWER_HALF_L
+    val yTop  = -TURRET_TOWER_Y_HEIGHT     // camera-near
+    val yBot  = 0f
+    val chamfer = 0.030f
+    mb.addExtrudedChamferedRect(
+        -halfW, -halfL, halfW, halfL, chamfer,
+        bodyR, bodyG, bodyB, yTop = yTop, yBottom = yBot,
+    )
+    // Brighter accent stripe down the front face — gives the tower a
+    // sense of "facing direction" so its rotation reads as the head
+    // pointing somewhere, not just spinning anonymously.
+    val accentR = (bodyR * 1.4f).coerceAtMost(1f)
+    val accentG = (bodyG * 1.4f).coerceAtMost(1f)
+    val accentB = (bodyB * 1.4f).coerceAtMost(1f)
+    mb.addRect(
+        -halfW * 0.35f, halfL - 0.012f,
+         halfW * 0.35f, halfL + 0.001f,
+        accentR, accentG, accentB,
+        y = yTop - 0.005f,
+    )
+    return mb.upload(engine)
+}
+
+/**
+ * Cannon — the barrel itself, extends +Z forward from the pitch pivot at
+ * the origin. Designed so that with rotationY = yawAngle the barrel
+ * points the same way as the legacy `buildTurretBarrelMesh` direction,
+ * and an additional rotationX = pitchAngle elevates the tip up/down.
+ * Includes a thicker muzzle ring at the +Z tip.
+ */
+internal fun buildTurretCannonMesh(
+    engine: EngineJni,
+    bodyR: Float, bodyG: Float, bodyB: Float,
+): Long {
+    val mb = MeshBuilder()
+    val halfW       = TURRET_CANNON_HALF_W
+    val length      = TURRET_CANNON_LENGTH
+    val thick       = TURRET_CANNON_HALF_THICK
+    val muzzleHalfW = TURRET_CANNON_MUZZLE_HALF_W
+    val muzzleLen   = TURRET_CANNON_MUZZLE_LENGTH
+    // Barrel body. Origin at Z=0 (pitch pivot); extends to Z = length−muzzleLen.
+    // Body and muzzle ring used to share a wall at z=length−muzzleLen which,
+    // after the Rx(-π/2) lay-flat, collapsed to a coplanar pair → Z-fight
+    // shimmer ("smoke") at the junction. 3 mm gap between them removes the
+    // overlap; the muzzle ring's outer geometry occludes the gap visually.
+    val ringR = (bodyR * 0.65f).coerceIn(0f, 1f)
+    val ringG = (bodyG * 0.65f).coerceIn(0f, 1f)
+    val ringB = (bodyB * 0.65f).coerceIn(0f, 1f)
+    val bodyEndZ   = length - muzzleLen - 0.003f
+    val muzzleStartZ = length - muzzleLen
+    mb.addExtrudedRect(
+        -halfW, 0f, halfW, bodyEndZ,
+        bodyR, bodyG, bodyB,
+        yTop = -thick, yBottom = thick,
+    )
+    // Muzzle ring at the tip — chunkier, darker.
+    mb.addExtrudedRect(
+        -muzzleHalfW, muzzleStartZ,  muzzleHalfW, length,
+        ringR, ringG, ringB,
+        yTop = -thick * 1.25f, yBottom = thick * 1.25f,
+    )
+    return mb.upload(engine)
+}
+
+/**
  * Rotating housing + barrel + muzzle ring. Origin at the pivot (top of
  * the static base). The barrel extends along +Z so a SceneObject's
  * rotationY = 0 points the gun straight up the screen, matching the
  * legacy convention. Built from a few non-overlapping body chunks (Y=0)
  * plus thin overlay details (slits, fin, bore — at y=-0.005) so the
  * LESS-depth test renders the layered look without artefacts.
+ *
+ * Legacy: kept for fallback / non-concept turrets but mainline central +
+ * side turrets now use buildTurretTowerMesh + buildTurretCannonMesh.
  */
 internal fun buildTurretBarrelMesh(
     engine: EngineJni,
@@ -705,6 +713,64 @@ internal fun buildFireballSphereMesh(
             vertices[off + 2] = z
             vertices[off + 3] = 1f; vertices[off + 4] = 1f; vertices[off + 5] = 1f
             vertices[off + 6] = 1f
+            vertices[off + 7] = x; vertices[off + 8] = y; vertices[off + 9] = z
+            off += 10
+        }
+    }
+    val nTris = stacks * slices * 2
+    val indices = ShortArray(nTris * 3)
+    var idx = 0
+    for (i in 0 until stacks) {
+        for (j in 0 until slices) {
+            val a = (i * (slices + 1) + j).toShort()
+            val b = (i * (slices + 1) + j + 1).toShort()
+            val c = ((i + 1) * (slices + 1) + j).toShort()
+            val d = ((i + 1) * (slices + 1) + j + 1).toShort()
+            indices[idx++] = a; indices[idx++] = c; indices[idx++] = b
+            indices[idx++] = b; indices[idx++] = c; indices[idx++] = d
+        }
+    }
+    return engine.loadMeshRaw(vertices, indices)
+}
+
+/**
+ * E20 — shield force-field hemisphere mesh: unit half-sphere covering
+ * y ≥ 0 (front hemisphere when SceneObject is at ship origin with no
+ * rotation). Per-vertex normal = position (unit sphere → normal points
+ * outward from origin). Used by the dedicated forcefield pipeline which
+ * runs a fresnel + impact-bloom fragment shader; the mesh itself just
+ * supplies position + outward normal.
+ *
+ * Stacks = 8 vertex rings from pole (y=1) to equator (y=0). Slices = 24
+ * around the polar axis. Total 8·24·2 = 384 tris, same order as the
+ * fireball mesh.
+ */
+internal fun buildShieldHemisphereMesh(
+    engine: EngineJni,
+    stacks: Int = com.example.asteroidoutpost.game.combat.DraftCombat.SHIELD_HEMISPHERE_STACKS,
+    slices: Int = com.example.asteroidoutpost.game.combat.DraftCombat.SHIELD_HEMISPHERE_SLICES,
+): Long {
+    val nVerts = (stacks + 1) * (slices + 1)
+    val vertices = FloatArray(nVerts * 10)
+    var off = 0
+    for (i in 0..stacks) {
+        // theta in [0, π/2] — pole at i=0, equator at i=stacks.
+        val theta = i.toDouble() * (Math.PI * 0.5) / stacks
+        val sinT = kotlin.math.sin(theta).toFloat()
+        val cosT = kotlin.math.cos(theta).toFloat()
+        for (j in 0..slices) {
+            val phi = j.toDouble() * 2.0 * Math.PI / slices
+            val sinP = kotlin.math.sin(phi).toFloat()
+            val cosP = kotlin.math.cos(phi).toFloat()
+            val x = sinT * cosP
+            val y = cosT
+            val z = sinT * sinP
+            vertices[off + 0] = x
+            vertices[off + 1] = y
+            vertices[off + 2] = z
+            vertices[off + 3] = 1f; vertices[off + 4] = 1f; vertices[off + 5] = 1f
+            vertices[off + 6] = 1f
+            // Normal = position (unit sphere centred at origin).
             vertices[off + 7] = x; vertices[off + 8] = y; vertices[off + 9] = z
             off += 10
         }

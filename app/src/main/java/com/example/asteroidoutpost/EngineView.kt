@@ -79,6 +79,26 @@ class EngineView @JvmOverloads constructor(
     @Volatile
     var beams: List<BeamDraw> = emptyList()
 
+    /** E20 — force-field draws (one per shield instance per frame). */
+    @Volatile
+    var forceFields: List<ForceFieldDraw> = emptyList()
+
+    /** E21 — world-Y for the camera lookAt target. Set by buildScene each
+     *  frame; render thread applies it via engine.setCameraTarget right
+     *  before submitting the scene so the camera and the in-scene ship
+     *  position stay perfectly synced (without this we'd race between
+     *  scene writes and the setCameraTarget JNI call and see the ship
+     *  tremble by one delta per frame). */
+    @Volatile
+    var cameraTargetY: Float = 0f
+    private val cameraTargetX: Float = 0f
+    private val cameraTargetZ: Float = 2.5f
+
+    /** Mutex held while buildScene writes engineView state AND while the
+     *  render thread takes a snapshot of that state — guarantees scene
+     *  lists and cameraTargetY describe the same simulation frame. */
+    val sceneSyncLock = Any()
+
     /** Engine render-loop FPS (sliding 1-sec window, updated by RenderThread). */
     @Volatile
     var fps: Float = 0f
@@ -290,7 +310,7 @@ class EngineView @JvmOverloads constructor(
     }
 
     fun submitCurrentScene() {
-        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects, particleBatches, beams)
+        submitScene(engine, scene, highlightMeshes, billboards, plasmaBillboards, translucentObjects, additiveObjects, texturedObjects, particleBatches, beams, forceFields)
     }
 
     private class RenderThread(private val engineView: EngineView) : Thread("RenderThread") {
@@ -303,8 +323,38 @@ class EngineView @JvmOverloads constructor(
             var fpsFrames = 0
             var fpsWindowStartNs = System.nanoTime()
             while (running) {
-                val currentScene = engineView.scene
-                submitScene(engine, currentScene, engineView.highlightMeshes, engineView.billboards, engineView.plasmaBillboards, engineView.translucentObjects, engineView.additiveObjects, engineView.texturedObjects, engineView.particleBatches, engineView.beams)
+                // E21 — atomic snapshot of all scene lists + camera target
+                // under engineView.sceneSyncLock so buildScene can't write
+                // a partial state during this read. Without this snapshot,
+                // the ship's in-scene Y could be from one buildScene call
+                // while the camera target was from a different one — the
+                // mismatch shows as visible per-frame trembling.
+                val snapScene: List<SceneObject>
+                val snapHi: HighlightMeshes
+                val snapBb: List<BillboardDraw>
+                val snapPlasma: List<BillboardDraw>
+                val snapTrans: List<SceneObject>
+                val snapAdd: List<SceneObject>
+                val snapTex: List<SceneObject>
+                val snapPart: List<ParticleBatchKt>
+                val snapBeams: List<BeamDraw>
+                val snapFF: List<ForceFieldDraw>
+                val snapCameraY: Float
+                synchronized(engineView.sceneSyncLock) {
+                    snapScene  = engineView.scene
+                    snapHi     = engineView.highlightMeshes
+                    snapBb     = engineView.billboards
+                    snapPlasma = engineView.plasmaBillboards
+                    snapTrans  = engineView.translucentObjects
+                    snapAdd    = engineView.additiveObjects
+                    snapTex    = engineView.texturedObjects
+                    snapPart   = engineView.particleBatches
+                    snapBeams  = engineView.beams
+                    snapFF     = engineView.forceFields
+                    snapCameraY = engineView.cameraTargetY
+                }
+                engine.setCameraTarget(engineView.cameraTargetX, snapCameraY, engineView.cameraTargetZ)
+                submitScene(engine, snapScene, snapHi, snapBb, snapPlasma, snapTrans, snapAdd, snapTex, snapPart, snapBeams, snapFF)
                 engine.renderFrame()
 
                 fpsFrames++

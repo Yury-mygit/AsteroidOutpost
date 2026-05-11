@@ -35,6 +35,9 @@ struct StationEngine {
     // E14 — dedicated beam pipeline shaders (own pipeline layout).
     std::vector<uint32_t> beamVertSpv;
     std::vector<uint32_t> beamFragSpv;
+    // E20 — force-field shield pipeline (own pipeline layout).
+    std::vector<uint32_t> forceFieldVertSpv;
+    std::vector<uint32_t> forceFieldFragSpv;
     // E18 — fullscreen background nebula. Optional; falls back to no
     // background draw if shaders aren't uploaded.
     std::vector<uint32_t> backgroundVertSpv;
@@ -107,6 +110,12 @@ extern "C" void station_engine_set_shader(StationEngine* e,
     } else if (std::string(name) == "beam.frag") {
         e->beamFragSpv = std::move(words);
         LOGI("Beam fragment shader set (%zu bytes)", length);
+    } else if (std::string(name) == "forcefield.vert") {
+        e->forceFieldVertSpv = std::move(words);
+        LOGI("Forcefield vertex shader set (%zu bytes)", length);
+    } else if (std::string(name) == "forcefield.frag") {
+        e->forceFieldFragSpv = std::move(words);
+        LOGI("Forcefield fragment shader set (%zu bytes)", length);
     } else if (std::string(name) == "background.vert") {
         e->backgroundVertSpv = std::move(words);
         LOGI("Background vertex shader set (%zu bytes)", length);
@@ -140,7 +149,8 @@ extern "C" void station_engine_surface_created(StationEngine* e,
                                      e->particleVertSpv, e->particleFragSpv,
                                      e->postVertSpv, e->postFragSpv,
                                      e->beamVertSpv, e->beamFragSpv,
-                                     e->backgroundVertSpv, e->backgroundFragSpv)) {
+                                     e->backgroundVertSpv, e->backgroundFragSpv,
+                                     e->forceFieldVertSpv, e->forceFieldFragSpv)) {
             e->pipelineCreated = true;
         } else {
             LOGE("createPipeline failed");
@@ -403,6 +413,14 @@ extern "C" void station_engine_draw_laser_beam(StationEngine* e,
                             width, r, g, b, a);
 }
 
+extern "C" void station_engine_draw_force_field(StationEngine* e,
+                                                StationMesh*   mesh,
+                                                float cx, float cy, float cz, float radius,
+                                                const float    impacts[16]) {
+    if (!e || !mesh) return;
+    e->vulkan.drawForceField(mesh->token, cx, cy, cz, radius, impacts);
+}
+
 extern "C" void station_engine_draw_object_frame_mesh(StationEngine* e,
                                                       StationMesh*   frameMesh,
                                                       StationMesh*   targetMesh,
@@ -478,6 +496,9 @@ extern "C" void station_engine_zoom_camera_at(StationEngine* e, float factor,
 }
 extern "C" void station_engine_reset_camera(StationEngine* e) {
     if (e) e->vulkan.resetCamera();
+}
+extern "C" void station_engine_set_camera_target(StationEngine* e, float x, float y, float z) {
+    if (e) e->vulkan.setCameraTarget(x, y, z);
 }
 
 // ---------------------------------------------------------------------------

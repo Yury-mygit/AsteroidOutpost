@@ -48,6 +48,9 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | Back chevron icon | `ui/icons/BackIcon.kt :: makeBackIcon` |
 | Drone (fighter silhouette) icon | `ui/icons/DroneIcon.kt :: makeDroneIcon` |
 | Shield HP fill bar drawable | `ui/icons/ShieldFillDrawable.kt :: ShieldFillDrawable` |
+| Asteroid debug labels (x,y,z / distance) overlay | `ui/DebugAsteroidLabelsView.kt :: DebugAsteroidLabelsView` |
+| Coord-axes gizmo (МИР / ЭКР) | `ui/DebugAxesView.kt :: DebugAxesView` |
+| Bracket frame overlay (green priority / red threats) | `ui/SelectionFrameView.kt :: SelectionFrameView` |
 
 ## UI theming primitives
 
@@ -58,6 +61,7 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | Outlined-tile icon buttons (✕ / ←) | `UiHelpers.kt :: buildGlyphTile / buildIconTile` |
 | Title / heading / body / caption / pill | `UiHelpers.kt :: buildTitle / buildHeading / buildBody / buildCaption / buildPill` |
 | Card panel | `UiHelpers.kt :: buildCard / stylePanel` |
+| Segmented pill picker (toggle / N-way select) | `UiHelpers.kt :: buildSegmentedPicker` |
 
 ## Combat — `game/combat/`
 
@@ -69,6 +73,7 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | Falling / collision / spin constants | `combat/Combat.kt :: DraftCombat` |
 | Weapon-effect umbrella (Projectile / Beam / Behavior) | `combat/Effects.kt` |
 | Per-projectile behaviour strategies | `combat/Effects.kt :: PlainBulletBehavior / HeavyShellBehavior / HomingRocketBehavior` |
+| Enemy bolt (anti-player WeaponEffect, hits shield/hull) | `combat/Effects.kt :: EnemyBolt` |
 | VFX state (Flash / Fireball / Particle) | `combat/Vfx.kt` |
 | VFX emitter (muzzle / flash / sparks / smoke / debris) | `combat/VfxSpawner.kt :: VfxSpawner` |
 | Particle pools / tick / packing | `combat/Particles.kt` |
@@ -87,6 +92,8 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | What | Where |
 |---|---|
 | Mission configs + balance numbers | `Missions.kt :: Missions.ALL`, `MissionConfig.kt` |
+| Combat-mission enemy spawn list | `MissionConfig.kt :: EnemyShipSpawn` |
+| Debug toggles (master on/off + label mode picker) | `DebugSettings.kt :: DebugSettings`, `DebugLabelMode` |
 | In-flight mission stats | `MissionRun.kt :: MissionRun` |
 | Weapon catalog | `Weapon.kt :: WeaponCatalog`, `WeaponId` |
 | Ability catalog + slot runtime | `Ability.kt :: AbilityCatalog`, `AbilitySlot.kt :: AbilitySlot`, `Ability.kt :: AbilityId` |

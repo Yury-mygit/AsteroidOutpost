@@ -20,6 +20,9 @@ namespace station {
                     float viewportWidth, float viewportHeight,
                     float planeZ = 0.0f);
         void setAspect(float aspect);
+        // E21 — public setter for the lookAt target. Used by route-mode
+        // missions to follow the ship as it advances along the corridor.
+        void setTarget(float x, float y, float z);
 
         math::Mat4 viewMatrix()     const;
         math::Mat4 projMatrix()     const;

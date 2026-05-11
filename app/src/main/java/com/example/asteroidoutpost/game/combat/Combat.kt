@@ -55,6 +55,47 @@ internal object DraftCombat {
     // 1.46 head-on optimum and the flat 0 horizontal extreme.
     const val ASTEROID_SPAWN_Y_DEPTH: Float = 10f
     const val ASTEROID_SPAWN_Z:       Float = 15f
+    // Second spawn echelon — higher AND deeper than the first, picked 50/50
+    // per spawn. Same destination (xPos, 0, PLATFORM_TOP_Z), so depthSpeed
+    // is recomputed per-asteroid from its actual yFall/zFall. Reads as a
+    // second tier of incoming rocks behind and above the first.
+    const val ASTEROID_SPAWN_Y_DEPTH_2: Float = 16f
+    const val ASTEROID_SPAWN_Z_2:       Float = 26f
+    /** Farthest Y a projectile can travel before despawn. Must clear the
+     *  most-distant spawn zone — bumped to ASTEROID_SPAWN_Y_DEPTH_2 + 2. */
+    const val ASTEROID_MAX_SPAWN_Y_DEPTH: Float = ASTEROID_SPAWN_Y_DEPTH_2
+
+    // Route mode (a.k.a. tunnel mode) — the ship glides forward along the
+    // camera-forward axis so asteroids appear to come from the depth (centre
+    // of screen, growing toward camera) instead of "from below" like the
+    // pure-Y motion would give. Forward direction is fixed by the style3
+    // camera tilt: pitch = π/2 + CAMERA_TILT_RAD. With CAMERA_TILT_RAD = 0
+    // the camera looks straight along world +Y (no extra rotation), the
+    // ship sits on the Y axis at origin and the route is just a list of
+    // Y-positions with optional X/Z offsets — no axis-mixing needed.
+    //
+    // ⚠ When CAMERA_TILT_RAD in MainActivity changes, update these two
+    // constants too — they're hand-baked, not derived at runtime.
+    const val SHIP_CRUISE_SPEED:        Float = 3.0f
+    const val ROUTE_FORWARD_Y:          Float = 1.0f          // cos(0)
+    const val ROUTE_FORWARD_Z:          Float = 0.0f          // sin(0)
+    /** How far ahead of the ship (in route-distance units) a placement is
+     *  materialised. Generous (40) so the player sees obstacles ~13 sec
+     *  in advance at SHIP_CRUISE_SPEED = 3, has time to plan priorities,
+     *  and turrets aren't time-pressured into rapid-fire panic. */
+    const val ROUTE_SPAWN_DEPTH:        Float = 40f
+    /** Asteroid is despawned when its yPos drops below this. Set so the
+     *  asteroid stays visible flying past the ship (camera is at world
+     *  Y ≈ -11 with zNear = 0.5, so anything at yPos < -10.5 is behind
+     *  the near plane). -7 keeps the asteroid on screen for ~2.3 sec
+     *  past the ship at SHIP_CRUISE_SPEED = 3 — a clear "zoomed past you"
+     *  beat instead of vanishing in the middle of the screen. */
+    const val ROUTE_PASS_BY_THRESHOLD:  Float = -7f
+    /** Max engagement range (world units, measured as forward distance
+     *  from ship). Auto-fire turrets / rockets / laser ignore asteroids
+     *  beyond this even if they're on a collision course — keeps the
+     *  ship from blasting things half a corridor away. */
+    const val WEAPON_ENGAGEMENT_RANGE:  Float = 30f
     const val ASTEROID_HALF:     Float = 0.1235f
     const val DAMAGE_PER_HIT:    Int   = 10
     const val ASTEROID_SPEED:    Float = 1.0f   // units/sec downward
@@ -63,6 +104,10 @@ internal object DraftCombat {
     const val SCREEN_BOTTOM_Z:   Float = -1.49f
     const val SCREEN_HALF_W:     Float = 2.47f
     const val PLATFORM_TOP_Z:    Float = -0.94f // matches platform z + halfH
+    /** Bottom of the ship hull mesh in world Z. Asteroids whose Z is
+     *  ENTIRELY below this just fly under the ship — they shouldn't
+     *  count as a hull hit (they're physically passing beneath). */
+    const val HULL_BOTTOM_Z:     Float = -1.49f
     const val PLATFORM_HP_INIT:  Int   = 100
     const val PLATFORM_DMG_PER_HIT: Int = 20
     const val TURRET_HALF:       Float = 0.10f  // legacy — bbox of old square; kept for back-compat with existing collision math
@@ -82,6 +127,13 @@ internal object DraftCombat {
     const val CENTRAL_BASE_HEIGHT:     Float = 0.04f
     const val CENTRAL_BASE_HALF_W:     Float = 0.20f
     const val CENTRAL_TURRET_BASE_Z:   Float = CENTRAL_BASE_Z + CENTRAL_BASE_HEIGHT
+    /** Y-offset (forward of ship centre) where the CENTRAL turret pivot
+     *  sits. Negative = behind ship centre. Concept «Вид 3» layout puts
+     *  the central forward of the side pair so they stagger visually. */
+    const val CENTRAL_TURRET_Y_OFFSET: Float = -0.35f
+    /** Y-offset for the SIDE turret pivots. Further back than central
+     *  so the trio reads as a chevron formation, not a single line. */
+    const val SIDE_TURRET_Y_OFFSET:    Float = -0.9f
     const val CENTRAL_TURRET_HALF_W:   Float = 0.15f  // legacy — = housing half-W
     const val CENTRAL_TURRET_HALF_H:   Float = 0.30f  // half of total rotating-part length
     // Rotating housing + barrel + muzzle ring (origin at pivot, +Z forward).
@@ -110,6 +162,43 @@ internal object DraftCombat {
     const val SIDE_MUZZLE_LENGTH:      Float = 0.08f
     const val SIDE_TOTAL_LEN: Float =
         SIDE_HOUSING_LENGTH + SIDE_BARREL_LENGTH + SIDE_MUZZLE_LENGTH
+
+    // .glb-loaded side cannon metrics (Turret_Side_Cannon.glb). Pivot
+    // origin lives at amburazura height inside the body (model file Y=0.13
+    // above the body's bottom face); barrel extends from pivot along model
+    // -Z for 0.45 m to the muzzle tip. After Rx(+π/2) in SceneAssembler:
+    // model -Z → world +Y, so the rotated barrel's tip is `SIDE_CANNON_GLTF_LENGTH`
+    // away from pivot along (-sin(yaw), cos(yaw)) in the XY plane, with Z
+    // constant at SIDE_CANNON_GLTF_PIVOT_Z. SceneAssembler reads
+    // SIDE_TURRET_AMBRAZURA_Z directly when placing the cannon SceneObject;
+    // the values here must match the artist-authored .glb topology.
+    const val SIDE_TURRET_AMBRAZURA_Z: Float = 0.13f
+    const val SIDE_CANNON_GLTF_PIVOT_Z: Float = PLATFORM_TOP_Z + SIDE_TURRET_AMBRAZURA_Z
+    const val SIDE_CANNON_GLTF_LENGTH: Float = 0.45f
+
+    // ------------------------------------------------------------------
+    // Enemy ship (combat mission prototype). One adversary that holds
+    // station ahead of the player and lobs bolts. Spawned by
+    // MissionConfig.enemyShipDelaySec; ticked as a special AsteroidType
+    // (ENEMY_SHIP) so it benefits from existing auto-aim / tap-pick /
+    // damage flow without a parallel entity system.
+    // ------------------------------------------------------------------
+    /** World-Y offset the enemy ship maintains ahead of the player. */
+    const val ENEMY_SHIP_LEAD_DISTANCE: Float = 20f
+    /** World-Z the enemy ship floats at (above platform line). */
+    const val ENEMY_SHIP_Z: Float = 3.5f
+    /** Seconds between bolt shots fired at the player. */
+    const val ENEMY_SHIP_FIRE_INTERVAL_SEC: Float = 1.5f
+    /** Damage per bolt impact (shield or hull, before shield-recharge mod). */
+    const val ENEMY_BOLT_DAMAGE: Int = 30
+    /** Bolt travel speed (world units / sec). Slow enough to read as a
+     *  guided shot and give the player reaction time. */
+    const val ENEMY_BOLT_SPEED: Float = 12f
+    /** Render scale for the enemy ship asteroid relative to its `half` —
+     *  meshes loaded for asteroids are unit-bbox, half × this gives the
+     *  on-screen size. Bumped above 1.0 so the enemy reads as a ship,
+     *  not a chunky rock. */
+    const val ENEMY_SHIP_MESH_SCALE_MUL: Float = 1.2f
 
     // Laser installation — small dome on the deck, just starboard of
     // the centerline between the two side turrets. Static (no
@@ -366,15 +455,19 @@ internal object DraftCombat {
     // (percentage × 180°) / 2 → percentage × π / 2. A target is
     // considered engageable by this weapon when |atan2(dx, dz)| ≤ HALF.
     // 90% = ±81° (1.4137 rad); 80% = ±72°; 70% = ±63°; 95% = ±85.5°.
-    const val ARC_CENTRAL_CANNON_HALF_RAD: Float = 1.4137f  // 90% — Рельсотрон
-    const val ARC_CENTRAL_MG_HALF_RAD:     Float = 1.2566f  // 80% — Автомат
-    const val ARC_SIDE_CANNON_HALF_RAD:    Float = 1.2566f  // 80% — current side turret
-    const val ARC_SIDE_MG_HALF_RAD:        Float = 1.0996f  // 70% — future side MG, unused
-    const val ARC_LASER_HALF_RAD:          Float = 1.4923f  // 95% — laser dome
-    const val ARC_ROCKET_HALF_RAD:         Float = 1.4923f  // 95% — rocket silo
+    // All arcs set to π (effectively no arc limit) — every weapon
+    // reaches every target the auto-aimer picks, including extreme-X /
+    // low-Z asteroids that previously fell outside the firing cone.
+    const val ARC_CENTRAL_CANNON_HALF_RAD: Float = 3.1416f
+    const val ARC_CENTRAL_MG_HALF_RAD:     Float = 3.1416f
+    const val ARC_SIDE_CANNON_HALF_RAD:    Float = 3.1416f
+    const val ARC_SIDE_MG_HALF_RAD:        Float = 3.1416f
+    const val ARC_LASER_HALF_RAD:          Float = 3.1416f
+    const val ARC_ROCKET_HALF_RAD:         Float = 3.1416f
     // Spark emitter parameters for the "shield is recharging" VFX.
-    // RATE = sparks/sec; tangential SPEED so they skim along the arch
-    // before drag stalls them; cyan tint matching the shield material.
+    // RATE = sparks/sec; tangential SPEED so they skim along the
+    // hemisphere surface before drag stalls them; cyan tint matching
+    // the shield material.
     const val SHIELD_RECHARGE_SPARK_RATE:     Float = 90f
     const val SHIELD_RECHARGE_SPARK_LIFE_MIN: Float = 0.10f
     const val SHIELD_RECHARGE_SPARK_LIFE_MAX: Float = 0.22f
@@ -384,25 +477,22 @@ internal object DraftCombat {
     const val SHIELD_RECHARGE_SPARK_SPEED_MAX: Float = 1.0f
     const val SHIELD_RECHARGE_SPARK_DRAG:     Float = 4f
     val SHIELD_RECHARGE_SPARK_TINT = floatArrayOf(0.55f, 0.85f, 1.00f)
-    // 3D dome geometry — half-superellipse footprint on the deck (z >= 0
-    // half), extruded vertically into a hemispherical translucent bubble.
-    // halfW = X-extent of the dome's footprint at deck level (≈ ship width).
-    // halfH = Z-depth of the footprint (how far forward of platform top).
-    const val SHIELD_ARCH_HALF_W:    Float = 2.40f
-    const val SHIELD_ARCH_HALF_H:    Float = 1.00f
-    /** Y-extent of the shield dome above the deck — how high the bubble
-     *  rises from its base ring. Roughly hemispherical relative to halfH
-     *  so the dome reads as a real protective bubble, not a paint stripe. */
-    const val SHIELD_DOME_HEIGHT:    Float = 0.70f
-    /** Tiny -Y nudge for the dome SceneObject so its base ring sits a hair
-     *  above the deck (camera-near) and clears the LESS depth test against
-     *  the hull's top face. Negative = closer to camera. */
-    const val SHIELD_DOME_LIFT_Y:    Float = -0.05f
-    const val SHIELD_ARCH_PEAK_ALPHA: Float = 0.85f
-    // Superellipse exponent for the arch profile: |x/a|^n + |z/b|^n = 1.
-    // n=2 is the legacy half-ellipse; n>2 flattens the top and sharpens
-    // the shoulders so the sides drop more vertically.
-    const val SHIELD_ARCH_SHARPNESS: Float = 4.0f
+    // E20 — force-field hemisphere replaces the legacy superellipse arch.
+    //   * Radius is "comfortably bigger than the ship", so the contact
+    //     point sits visibly off the hull — not touching the deck.
+    //   * Impact life is short (≈ 1/3 sec) so the impact bloom feels like
+    //     a quick zap rather than lingering smoke.
+    //   * Up to 4 simultaneous impacts; older ones get pushed out.
+    const val SHIELD_HEMISPHERE_RADIUS:  Float = 2.3f    // E-variant — bigger dome, properly enclosing the ship's nose
+    const val SHIELD_HEMISPHERE_STACKS:  Int   = 8       // vertex rings pole → equator
+    const val SHIELD_HEMISPHERE_SLICES:  Int   = 24      // segments around polar axis
+    /** Shield centre offset in WORLD Z (screen-vertical up). Shifts the
+     *  hemisphere up on screen so it visually centres on/above the ship
+     *  instead of hanging in the lower half of the viewport. Collision
+     *  uses the same offset — the field really is up there. */
+    const val SHIELD_CENTER_Z:           Float = 0.4f
+    const val SHIELD_IMPACT_LIFE_SEC:    Float = 0.6f
+    const val SHIELD_MAX_ACTIVE_IMPACTS: Int   = 4
     // Vertical lift of the whole arch as a fraction of halfH — the ends
     // detach from the platform and the band reads as a hovering barrier.
     const val SHIELD_ARCH_LIFT_FRAC: Float = 0.05f
@@ -412,18 +502,40 @@ internal object DraftCombat {
     // and their lasers expire after DRONE_LIFETIME_SEC.
     const val DRONE_COUNT:            Int   = 4
     const val DRONE_LIFETIME_SEC:     Float = 10f
-    const val DRONE_SPEED:            Float = 3.0f   // world units / sec
-    const val DRONE_TURN_RATE:        Float = 4.0f   // rad / sec (steering)
-    const val DRONE_ATTACK_RANGE:     Float = 1.8f   // beam fires when target within this
+    // Interceptor-feel tuning — light spacecraft with thrust-based
+    // physics. Drone applies a constant THRUST acceleration toward its
+    // target each tick; its velocity integrates over time. Cap at
+    // DRONE_SPEED. Inertia gives natural "accelerate from rest → cruise
+    // → overshoot past target → reverse thrust slows it → loops back"
+    // behaviour without explicit braking logic.
+    //
+    // Tuning math: DRONE_SPEED / DRONE_THRUST = time-to-cruise from
+    // standstill. 10 / 12 ≈ 0.83 s ramp-up. A 180° flip (full speed
+    // forward → full speed back) takes 2× that ≈ 1.7 s of opposing
+    // thrust — visible momentum without feeling sluggish.
+    const val DRONE_SPEED:            Float = 10.0f  // world units / sec (hard cap)
+    const val DRONE_THRUST:           Float = 12.0f  // m/s² toward target
+    const val DRONE_ATTACK_RANGE:     Float = 4.0f   // beam fires when target within this
     /** Distance from target the drone tries to maintain — orbit radius
      *  around the asteroid so it doesn't penetrate the model. Plus a
      *  per-drone angular offset around the target keeps drones from
      *  stacking on the same point. */
     const val DRONE_KEEP_DISTANCE:    Float = 0.9f
     /** Yaw offset applied to the drone mesh — `ship.gltf` is authored with
-     *  forward axis along +X (legacy convention); rotationY in scene assumes
-     *  +Z forward, so we subtract π/2 to align nose with velocity. */
+     *  forward axis along +X (legacy convention used in the g3 top-down
+     *  scene); style3 rotationY assumes +Z forward, so we subtract π/2 to
+     *  align nose with velocity. */
     const val DRONE_MESH_YAW_OFFSET:  Float = -1.5707963f   // -π/2
+    /** Pitch (rotationX) applied to the drone mesh. The g3 ship.gltf has
+     *  ±Y wings and ±Z thickness — under g3's top-down camera that's
+     *  correct, but in style3 (camera roughly behind-and-above the ship,
+     *  world Y = depth, world Z = vertical-screen) the wings would point
+     *  into the screen and the fighter reads as a thin sideways stick.
+     *  Rolling +π/2 around the model nose (its own +X axis, which is what
+     *  Rx is BEFORE the yaw is applied in our T·Rz·Ry·Rx chain) brings
+     *  the wings out of the depth axis into the horizontal XZ plane and
+     *  the top of the fuselage toward the camera. */
+    const val DRONE_MESH_PITCH_OFFSET: Float = 1.5707963f   // +π/2
     const val DRONE_LASER_DPS:        Float = 28f    // 4 drones × 28 DPS = 112 → kills NORMAL in ~1s
     const val DRONE_LASER_WIDTH:      Float = 0.012f
     val       DRONE_LASER_COLOR              = floatArrayOf(0.65f, 1.00f, 0.55f, 0.95f)  // green

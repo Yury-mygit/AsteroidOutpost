@@ -93,6 +93,10 @@ namespace station {
 
     void Camera::setAspect(float aspect) { m_aspect = aspect; }
 
+    void Camera::setTarget(float x, float y, float z) {
+        m_target = {x, y, z};
+    }
+
     math::Mat4 Camera::viewMatrix() const {
         using namespace math;
         Vec3 eye    = eyePosition();

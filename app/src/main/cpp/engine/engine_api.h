@@ -234,6 +234,18 @@ void station_engine_draw_laser_beam(StationEngine* engine,
                                     float r,      float g,      float b,
                                     float a);
 
+// E20 — force-field shield. Renders the given mesh (a unit hemisphere)
+// scaled by `radius` and translated to `(cx, cy, cz)`, through a
+// dedicated additive pipeline that combines a fresnel rim glow with up
+// to 4 impact blooms (Gaussian falloff at world points). `impacts` is a
+// flat array of 16 floats = 4 × (x, y, z, age). Age in [0, 1] is the
+// normalised lifetime where 0 = fresh, 1 = expired (sentinel; the
+// shader skips the slot). Use 0,0,0,1 to leave a slot empty.
+void station_engine_draw_force_field(StationEngine* engine,
+                                     StationMesh*   mesh,
+                                     float cx, float cy, float cz, float radius,
+                                     const float    impacts[16]);
+
 void station_engine_draw_object_frame_mesh(StationEngine* engine,
                                            StationMesh*   frameMesh,
                                            StationMesh*   targetMesh,
@@ -282,6 +294,9 @@ void station_engine_zoom_camera_at(StationEngine* engine,
                                    float screenX,
                                    float screenY);
 void station_engine_reset_camera(StationEngine* engine);
+// E21 — set the camera lookAt target. Used to follow the ship in
+// route-mode missions; called each frame from Kotlin.
+void station_engine_set_camera_target(StationEngine* engine, float x, float y, float z);
 
 // ---------------------------------------------------------------------------
 // Render

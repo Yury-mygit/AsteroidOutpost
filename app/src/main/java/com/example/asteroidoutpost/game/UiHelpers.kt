@@ -203,6 +203,62 @@ object UiHelpers {
         }
     }
 
+    /**
+     * Segmented horizontal picker — row of pill buttons, one highlighted
+     * with the accent colour. Tap a segment to switch selection. The
+     * `onChange` callback fires with the new index after re-highlight.
+     * Works for both binary toggles (Выкл/Вкл) and N-way mode pickers.
+     */
+    fun buildSegmentedPicker(
+        context: Context,
+        options: List<String>,
+        initialIndex: Int,
+        accent: Int = UiTheme.COL_ACCENT_BLUE,
+        onChange: (Int) -> Unit,
+    ): LinearLayout {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val segs = ArrayList<TextView>(options.size)
+        fun applyState(selected: Int) {
+            for (i in options.indices) {
+                segs[i].background = segmentBg(context, selected = (i == selected), accent = accent)
+                segs[i].setTextColor(if (i == selected) UiTheme.COL_TEXT else UiTheme.COL_TEXT_DIM)
+            }
+        }
+        options.forEachIndexed { i, label ->
+            val tv = TextView(context).apply {
+                text = label
+                textSize = UiTheme.SP_BODY
+                gravity = Gravity.CENTER
+                val padH = UiTheme.dp(context, UiTheme.DP_PAD_BUTTON_HORIZ)
+                val padV = UiTheme.dp(context, UiTheme.DP_PAD_BUTTON_VERT)
+                setPadding(padH, padV, padH, padV)
+                isClickable = true
+                isFocusable = true
+            }
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            if (i > 0) lp.marginStart = UiTheme.dp(context, UiTheme.DP_GAP_TIGHT)
+            tv.layoutParams = lp
+            tv.setOnClickListener {
+                applyState(i)
+                onChange(i)
+            }
+            segs.add(tv)
+            row.addView(tv)
+        }
+        applyState(initialIndex.coerceIn(0, options.size - 1))
+        return row
+    }
+
+    private fun segmentBg(context: Context, selected: Boolean, accent: Int): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = UiTheme.dp(context, UiTheme.DP_BUTTON_RADIUS).toFloat()
+            setColor(if (selected) accent else UiTheme.COL_PANEL_BG)
+            setStroke(UiTheme.dp(context, UiTheme.DP_BORDER_WIDTH), UiTheme.COL_BORDER)
+        }
+
     // ---- Layout params helpers --------------------------------------------
 
     fun lpVertical(topMarginDp: Float = 0f, ctx: Context): LinearLayout.LayoutParams =

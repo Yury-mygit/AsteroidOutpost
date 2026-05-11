@@ -23,6 +23,7 @@ import com.example.asteroidoutpost.game.overlay.buildMissionDetail
 import com.example.asteroidoutpost.game.overlay.buildMissionHub
 import com.example.asteroidoutpost.game.overlay.buildMissionList
 import com.example.asteroidoutpost.game.overlay.buildRandomMissions
+import com.example.asteroidoutpost.game.overlay.buildSettings
 import com.example.asteroidoutpost.game.overlay.buildUpgrades
 import com.example.asteroidoutpost.game.overlay.buildWeaponSelect
 import com.example.asteroidoutpost.game.overlay.setMenuBody
@@ -40,10 +41,12 @@ import com.example.asteroidoutpost.game.content.buildMuzzleConeMesh
 import com.example.asteroidoutpost.game.content.buildParticleQuadMesh
 import com.example.asteroidoutpost.game.content.buildRocketMesh
 import com.example.asteroidoutpost.game.content.buildRocketSiloMesh
-import com.example.asteroidoutpost.game.content.buildShieldArchMesh
+import com.example.asteroidoutpost.game.content.buildShieldHemisphereMesh
 import com.example.asteroidoutpost.game.content.buildShipHullMesh
 import com.example.asteroidoutpost.game.content.buildSoftDiskMesh
 import com.example.asteroidoutpost.game.content.buildTurretBarrelMesh
+import com.example.asteroidoutpost.game.content.buildTurretCannonMesh
+import com.example.asteroidoutpost.game.content.buildTurretTowerMesh
 import com.example.asteroidoutpost.game.content.buildTurretBaseMesh
 import com.example.asteroidoutpost.game.content.generateDebrisTexture
 import com.example.asteroidoutpost.game.content.generateSmokeTexture
@@ -56,7 +59,15 @@ import com.example.asteroidoutpost.game.ui.HudView
  *  trajectory (asteroids descending in z) approaches the camera and grows
  *  on screen — the constraint that previously needed Y/Z > 0.685 is GONE
  *  (any Y/Z works). */
-private const val CAMERA_TILT_RAD: Float = +0.6f
+private const val CAMERA_TILT_RAD: Float = 0.0f
+
+// Asteroid bracket-frame colours. Priority lock (player tap) — green;
+// auto-aim threats (course intersects shield/hull within engagement
+// range) — red. Saturated values so they read against busy nebula
+// backgrounds; alpha=full on the main stroke, the glow halo uses ~33%
+// of the same RGB internally.
+private const val COLOR_FRAME_PRIORITY: Int = 0xFF44EE44.toInt()
+private const val COLOR_FRAME_THREAT:   Int = 0xFFEE4444.toInt()
 
 class MainActivity : AppCompatActivity() {
 
@@ -77,9 +88,22 @@ class MainActivity : AppCompatActivity() {
     // silhouette with a tapered prow (right) and engine block (left).
     private var shipHullMeshHandle:       Long = 0L
     private var centralBaseMeshHandle:    Long = 0L
-    private var centralBarrelMeshHandle:  Long = 0L
+    private var centralBarrelMeshHandle:  Long = 0L   // legacy — unused now
     private var sideBaseMeshHandle:       Long = 0L
-    private var sideBarrelMeshHandle:     Long = 0L
+    private var sideBarrelMeshHandle:     Long = 0L   // legacy — unused now
+    // Concept «Вид 3» — split rotating part into tower + cannon. Tower
+    // rotates yaw with the central angle; cannon rotates the same yaw +
+    // optional pitch around its own X axis.
+    private var centralTowerMeshHandle:   Long = 0L
+    private var centralCannonMeshHandle:  Long = 0L
+    private var sideTowerMeshHandle:      Long = 0L
+    private var sideCannonMeshHandle:     Long = 0L
+    // .glb-loaded side turret (Body = base+tower fused, Cannon = barrel).
+    // Authored in standard gltf convention (+Y up, -Z forward); applied with
+    // rotationX = +π/2 in SceneAssembler. No internal coplanar seams →
+    // no Z-fight, no runtime nudges.
+    private var sideBodyGltfMeshHandle:   Long = 0L
+    private var sideCannonGltfMeshHandle: Long = 0L
     private var laserInstallMeshHandle:   Long = 0L
     private var rocketSiloMeshHandle:     Long = 0L
     private var rocketMeshHandle:         Long = 0L
@@ -103,14 +127,21 @@ class MainActivity : AppCompatActivity() {
     // so when rendered through the translucent pipeline it fades smoothly to
     // the background instead of showing hard quad edges. One handle per tint.
     private val nebulaHandles: LongArray = LongArray(5)
-    // Shield dome (E2.2) — procedural half-ring (annular half-disk) mesh.
-    // Three concentric arcs over the upper half-circle (θ ∈ [0, π]), built as
-    // two triangle strips: alpha 0 at the inner rim, peak alpha at the middle
-    // arc, alpha 0 at the outer rim. Drawn through the translucent pipeline →
-    // the result reads as a thin energy-membrane outline of the dome instead
-    // of a filled blue wash. Interior is fully transparent so the central
-    // turret stays visible inside the shield.
-    private var domeMembraneHandle: Long = 0L
+    // E20 — force-field hemisphere mesh (unit half-sphere, y ≥ 0).
+    private var shieldHemisphereHandle: Long = 0L
+    // Debug — labels above asteroids. Mounted in Activity setup; mutated
+    // (snapshot updated) from the tick thread after each buildScene.
+    private var debugAsteroidLabelsView: com.example.asteroidoutpost.game.ui.DebugAsteroidLabelsView? = null
+    // Green frame around the player-priority-locked asteroid (tap-to-lock).
+    // Updated alongside debug labels; null when nothing is locked.
+    private var selectionFrameView: com.example.asteroidoutpost.game.ui.SelectionFrameView? = null
+    // Debug — axes-gizmo container (МИР + ЭКР tiles, top-right). Toggled
+    // by the master debug switch in SettingsOverlay.
+    private var debugAxesContainer: View? = null
+    // User debug toggles (master on/off + asteroid label mode). Backed by
+    // SharedPreferences; read each frame by `updateDebugAsteroidLabels` and
+    // applied to overlay visibility when the user flips them in Settings.
+    private lateinit var debugSettings: com.example.asteroidoutpost.game.DebugSettings
     // E7.1 — unit Y-axis-aligned sphere for 3D fireball explosions, drawn
     // through the additive pipeline with material=ADDITIVE_FIRE. Y-axis
     // alignment is required: the fragment shader's Fresnel-like fade uses
@@ -214,6 +245,7 @@ class MainActivity : AppCompatActivity() {
         object MissionSelect : Screen()                                    // Legacy flat list (kept for fallback)
         data class WeaponSelect(val mission: MissionConfig) : Screen()
         object Base : Screen()
+        object Settings : Screen()
         object Win : Screen()
         object Lose : Screen()
         /** No overlay — gameplay running. HUD visible. */
@@ -304,17 +336,18 @@ class MainActivity : AppCompatActivity() {
             }
             if (missionRunner.gameState == GameState.PLAYING &&
                 event.actionMasked == MotionEvent.ACTION_DOWN) {
-                // 3D-pivot Phase 2/3: ask the engine's pickable buffer
-                // which SceneObject sits under the finger — works under
-                // arbitrary camera orientation. Asteroid ids start at
-                // ASTEROID_PICK_ID_BASE (see SceneAssembler), so we
-                // decode back to the stable asteroid.id and route to
-                // the runner. Tap on empty space / non-asteroid returns
-                // a non-asteroid id and is silently ignored.
-                val pickedSceneId = engineView.engine.pickObject(event.x, event.y, -1)
-                if (pickedSceneId >= ASTEROID_PICK_ID_BASE) {
-                    val asteroidId = (pickedSceneId - ASTEROID_PICK_ID_BASE).toLong()
-                    missionRunner.handleAsteroidPickedById(asteroidId)
+                // Screen-space pick — project every live asteroid to pixel
+                // coords and pick the one whose projected centre is closest
+                // to the touch point (within its own screen-radius hitbox).
+                // Replaces engine.pickObject (per-pixel depth buffer): that
+                // approach always returned the nearest occluding asteroid
+                // even when the player tapped on the visible edge of a
+                // farther one. With screen-space picking, two overlapping
+                // asteroids can be distinguished by tapping the further
+                // one's exposed edge.
+                val pickedId = pickAsteroidByScreen(event.x, event.y)
+                if (pickedId != null) {
+                    missionRunner.handleAsteroidPickedById(pickedId)
                 }
             }
             true
@@ -396,6 +429,77 @@ class MainActivity : AppCompatActivity() {
         )
         root.addView(hud.buildWaveAnnounce(), waveAnnounceParams)
 
+        // Debug — two stacked axes gizmos in the right band: world (top)
+        // and screen (bottom). Same 2D arrow style; only the per-arrow
+        // (dx, dy) data differs. World-axis directions are pre-computed
+        // by applying R^-1 = Rx(-(π/2 + tilt)) (style3 camera rotation
+        // inverse, where tilt = CAMERA_TILT_RAD) to each world basis
+        // vector and taking the resulting (camera_x, camera_y) components.
+        // Canvas y is flipped (positive = down on screen) so camera_y → -dy.
+        //
+        //   world +X → camera (1, 0, 0)              → dx=+1.000, dy= 0.000
+        //   world +Y → camera (0, -sin(tilt), …)     → dx= 0.000, dy=+sin(tilt)
+        //   world +Z → camera (0, +cos(tilt), …)     → dx= 0.000, dy=-cos(tilt)
+        //
+        // At tilt 0: sin=0, cos=1. World +Y goes straight into the screen
+        // (zero 2D component), world +Z aligns with screen-up. So world Y
+        // is essentially a "dot" — not drawable as a 2D arrow.
+        val redAxis   = 0xFFFF5050.toInt()
+        val greenAxis = 0xFF5DE08C.toInt()
+        val blueAxis  = 0xFF6090FF.toInt()
+        val worldAxes = com.example.asteroidoutpost.game.ui.DebugAxesView(this, "МИР", listOf(
+            com.example.asteroidoutpost.game.ui.DebugAxesView.Axis("X",  1.000f,  0.000f, redAxis),
+            com.example.asteroidoutpost.game.ui.DebugAxesView.Axis("Y",  0.000f,  0.000f, greenAxis),
+            com.example.asteroidoutpost.game.ui.DebugAxesView.Axis("Z",  0.000f, -1.000f, blueAxis),
+        ))
+        val screenAxes = com.example.asteroidoutpost.game.ui.DebugAxesView(this, "ЭКР", listOf(
+            com.example.asteroidoutpost.game.ui.DebugAxesView.Axis("X",  1.000f,  0.000f, redAxis),
+            com.example.asteroidoutpost.game.ui.DebugAxesView.Axis("Y",  0.000f, -1.000f, greenAxis),
+        ))
+        val axesTileSize = com.example.asteroidoutpost.game.UiTheme.dp(this, 72f)
+        val axesContainer = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            addView(worldAxes,  android.widget.LinearLayout.LayoutParams(axesTileSize, axesTileSize))
+            addView(screenAxes, android.widget.LinearLayout.LayoutParams(axesTileSize, axesTileSize))
+        }
+        val axesContainerParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL,
+        ).apply {
+            rightMargin = com.example.asteroidoutpost.game.UiTheme.dp(this@MainActivity, 6f)
+        }
+        root.addView(axesContainer, axesContainerParams)
+        debugAxesContainer = axesContainer
+
+        // Selection-frame overlay (game feature, not debug) — green rect
+        // around the player-priority-locked asteroid. Mounted BEFORE the
+        // labels view so labels render on top (won't be hidden behind the
+        // frame stroke). Touches fall through.
+        val selFrame = com.example.asteroidoutpost.game.ui.SelectionFrameView(this)
+        selectionFrameView = selFrame
+        val selFrameParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+        )
+        root.addView(selFrame, selFrameParams)
+
+        // Debug — full-screen transparent overlay drawing world-coord
+        // labels above each live asteroid. Mounted last so it sits on
+        // top of everything; touches fall through (View.isClickable=false).
+        val labelsView = com.example.asteroidoutpost.game.ui.DebugAsteroidLabelsView(this)
+        debugAsteroidLabelsView = labelsView
+        val labelsParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+        )
+        root.addView(labelsView, labelsParams)
+
+        // Apply initial debug-overlay visibility from persisted settings.
+        // Re-applied on Settings change via the onSettingsChanged callback.
+        debugSettings = com.example.asteroidoutpost.game.DebugSettings(this)
+        applyDebugVisibility()
+
         // Diagnostic FPS readout — bottom-left corner, dim caption-size so it
         // doesn't compete with gameplay. Reads engineView.fps (sliding 1-sec
         // window updated by RenderThread). Polled every 500ms by fpsUpdater.
@@ -474,6 +578,11 @@ class MainActivity : AppCompatActivity() {
             // from the engine's POV — without them drawLaserBeam is a no-op.
             engineView.engine.setShader("beam.vert", assets.open("shaders/beam.vert.spv").readBytes())
             engineView.engine.setShader("beam.frag", assets.open("shaders/beam.frag.spv").readBytes())
+            // E20 — force-field shield pipeline shaders. Optional; without
+            // them drawForceField is a no-op (engine skips the pipeline
+            // create branch).
+            engineView.engine.setShader("forcefield.vert", assets.open("shaders/forcefield.vert.spv").readBytes())
+            engineView.engine.setShader("forcefield.frag", assets.open("shaders/forcefield.frag.spv").readBytes())
             // E18 — fullscreen FBM nebula background. DISABLED for now —
             // GPU cost was visible (FPS dropped) and screen-space FBM
             // didn't match the structured-cloud look of the foreground 3D
@@ -570,6 +679,21 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             showStatus("Drone mesh load failed: ${e.message}")
         }
+        // Side turret .glb pair — Body (base+tower fused) and Cannon.
+        // Authored in standard gltf convention (+Y up, -Z forward).
+        // SceneAssembler applies rotationX = +π/2 to map Y-up → world Z-up
+        // and rotationZ for yaw on the cannon. Per-vertex baseColor already
+        // baked into the file by the artist; no runtime tint.
+        try {
+            val bodyBytes   = assets.open("models/Turret_Side_Body.glb").readBytes()
+            val cannonBytes = assets.open("models/Turret_Side_Cannon.glb").readBytes()
+            sideBodyGltfMeshHandle   = engineView.engine.loadMesh(bodyBytes)
+            sideCannonGltfMeshHandle = engineView.engine.loadMesh(cannonBytes)
+            if (sideBodyGltfMeshHandle == 0L || sideCannonGltfMeshHandle == 0L)
+                showStatus("Side turret .glb load failed (handle=0)")
+        } catch (e: Exception) {
+            showStatus("Side turret .glb load failed: ${e.message}")
+        }
         // ORDER MATTERS — `setupBackgroundNebulae()` constructs the
         // `SceneAssembler` at its tail, capturing all mesh handles by value.
         // The turret/silo/laser handles must be set before that, otherwise
@@ -609,6 +733,15 @@ class MainActivity : AppCompatActivity() {
             bodyR   = 0.50f, bodyG = 0.58f, bodyB = 0.72f,
             accentR = 0.45f, accentG = 0.82f, accentB = 1.00f,
         )
+        // Concept «Вид 3» — split rotating part into tower + cannon.
+        // Brighter tints (was 0.50/0.58/0.72) so the pieces stand out
+        // against the dark hull plating.
+        centralTowerMeshHandle  = buildTurretTowerMesh(
+            engine, bodyR = 0.78f, bodyG = 0.85f, bodyB = 0.95f,
+        )
+        centralCannonMeshHandle = buildTurretCannonMesh(
+            engine, bodyR = 0.78f, bodyG = 0.85f, bodyB = 0.95f,
+        )
         sideBaseMeshHandle = buildTurretBaseMesh(
             engine,
             halfW   = DraftCombat.SIDE_BASE_HALF_W,
@@ -626,6 +759,12 @@ class MainActivity : AppCompatActivity() {
             muzzleLength = DraftCombat.SIDE_MUZZLE_LENGTH,
             bodyR   = 0.50f, bodyG = 0.10f, bodyB = 0.12f,
             accentR = 0.85f, accentG = 0.30f, accentB = 0.30f,
+        )
+        sideTowerMeshHandle   = buildTurretTowerMesh(
+            engine, bodyR = 0.95f, bodyG = 0.30f, bodyB = 0.30f,
+        )
+        sideCannonMeshHandle  = buildTurretCannonMesh(
+            engine, bodyR = 0.95f, bodyG = 0.30f, bodyB = 0.30f,
         )
         laserInstallMeshHandle = buildLaserInstallationMesh(engine)
         rocketSiloMeshHandle   = buildRocketSiloMesh(engine)
@@ -689,10 +828,9 @@ class MainActivity : AppCompatActivity() {
         // 0.80 so the falloff from peak to outer rim is wider — softer dome
         // silhouette instead of a hard edge. Hex modulation is intentionally
         // subtle (see hexAlphaMod in triangle.frag).
-        // Permanent shield arch (M9 redesign — replaces the on/off
-        // hex-dome). Vertices live in world coordinates so the SceneObject
-        // just needs a translation to platform top.
-        domeMembraneHandle = buildShieldArchMesh(engine)
+        // E20 force-field hemisphere — rendered via the dedicated
+        // forcefield pipeline (own shader, fresnel + impact bloom).
+        shieldHemisphereHandle = buildShieldHemisphereMesh(engine)
         // Ship hull mesh — replaces the legacy gray-quad platform.
         shipHullMeshHandle = buildShipHullMesh(engine)
         // E7.1 — load the fireball UV-sphere once. Drawn through the additive
@@ -747,6 +885,7 @@ class MainActivity : AppCompatActivity() {
             drones             = missionRunner.drones,
             flashes            = missionRunner.flashes,
             fireballs          = missionRunner.fireballs,
+            shieldImpacts      = missionRunner.shieldImpacts,
             sparkParticles     = missionRunner.sparkParticles,
             smokeParticles     = missionRunner.smokeParticles,
             debrisParticles    = missionRunner.debrisParticles,
@@ -760,14 +899,18 @@ class MainActivity : AppCompatActivity() {
             quadHpBgHandle           = quadHpBgHandle,
             quadHpFgHandle           = quadHpFgHandle,
             centralBaseMeshHandle    = centralBaseMeshHandle,
-            centralBarrelMeshHandle  = centralBarrelMeshHandle,
+            centralTowerMeshHandle   = centralTowerMeshHandle,
+            centralCannonMeshHandle  = centralCannonMeshHandle,
             sideBaseMeshHandle       = sideBaseMeshHandle,
-            sideBarrelMeshHandle     = sideBarrelMeshHandle,
+            sideTowerMeshHandle      = sideTowerMeshHandle,
+            sideCannonMeshHandle     = sideCannonMeshHandle,
+            sideBodyGltfMeshHandle   = sideBodyGltfMeshHandle,
+            sideCannonGltfMeshHandle = sideCannonGltfMeshHandle,
             laserInstallMeshHandle   = laserInstallMeshHandle,
             rocketSiloMeshHandle     = rocketSiloMeshHandle,
             asteroidMeshGrey1        = asteroidMeshGrey1,
             droneMeshHandle          = droneMeshHandle,
-            domeMembraneHandle       = domeMembraneHandle,
+            shieldHemisphereHandle   = shieldHemisphereHandle,
             fireballMeshHandle       = fireballMeshHandle,
             particleQuadHandle       = particleQuadHandle,
             smokeTextureHandle       = smokeTextureHandle,
@@ -818,16 +961,217 @@ class MainActivity : AppCompatActivity() {
         // the assembler isn't built yet — `loadAssets` will populate the
         // first frame itself once the Vulkan surface is up.
         if (!::sceneAssembler.isInitialized) return
+        // Snapshot shipPosY ONCE so scene-ship-Y and camera-target-Y use
+        // the same value within this buildScene cycle. The write of the
+        // engineView lists + cameraTargetY is wrapped in sceneSyncLock
+        // so the render thread can't grab a partial state mid-write
+        // (would cause visible per-frame trembling).
+        val shipY = missionRunner.shipPosY
         val frame = sceneAssembler.assemble(
             centralTurretAngle = missionRunner.centralTurretAngle,
             shieldHp           = missionRunner.shieldHp,
+            shipPosY           = shipY,
         )
-        engineView.scene              = frame.scene
-        engineView.plasmaBillboards   = frame.plasmaBillboards
-        engineView.translucentObjects = frame.translucentObjects
-        engineView.additiveObjects    = frame.additiveObjects
-        engineView.beams              = frame.beams
-        engineView.particleBatches    = frame.particleBatches
+        synchronized(engineView.sceneSyncLock) {
+            engineView.scene              = frame.scene
+            engineView.plasmaBillboards   = frame.plasmaBillboards
+            engineView.translucentObjects = frame.translucentObjects
+            engineView.additiveObjects    = frame.additiveObjects
+            engineView.beams              = frame.beams
+            engineView.forceFields        = frame.forceFields
+            engineView.particleBatches    = frame.particleBatches
+            engineView.cameraTargetY      = shipY
+        }
+        // Debug — project each live asteroid's world position to the
+        // engine surface and push label snapshots to the overlay view.
+        // Runs on the tick thread (caller of buildScene), where the
+        // asteroid list isn't being concurrently mutated.
+        updateDebugAsteroidLabels()
+        // Selection frame around player priority lock — same projection
+        // math as labels (factored into the helper below).
+        updateSelectionFrame()
+    }
+
+    /**
+     * Pick the asteroid whose projected on-screen centre is closest to the
+     * given touch point, provided the touch falls within the asteroid's
+     * screen-space hitbox (silhouette radius × 1.5 for a forgiving tap
+     * radius). Returns null when no asteroid is in range. Uses the same
+     * perspective constants as `updateDebugAsteroidLabels` /
+     * `updateSelectionFrame` so the on-screen hitbox aligns with the
+     * green selection frame the user already sees.
+     */
+    private fun pickAsteroidByScreen(touchX: Float, touchY: Float): Long? {
+        val w = engineView.width.toFloat()
+        val h = engineView.height.toFloat()
+        if (w <= 1f || h <= 1f) return null
+        val tilt   = CAMERA_TILT_RAD
+        val pitch  = (kotlin.math.PI / 2.0 + tilt).toFloat()
+        val sinP   = kotlin.math.sin(pitch)
+        val cosP   = kotlin.math.cos(pitch)
+        val targetY = missionRunner.shipPosY
+        val targetZ = 2.5f
+        val radius  = 11f
+        val eyeY   = targetY - radius * sinP
+        val eyeZ   = targetZ + radius * cosP
+        val fwdY = sinP;  val fwdZ = -cosP
+        val upY  = cosP;  val upZ  = sinP
+        val fovYRad  = (55.0 * kotlin.math.PI / 180.0).toFloat()
+        val tanHalf  = kotlin.math.tan(fovYRad / 2f)
+        val aspect   = w / h
+
+        var bestId: Long? = null
+        var bestD2 = Float.POSITIVE_INFINITY
+        for (a in missionRunner.asteroids) {
+            if (a.hp <= 0) continue
+            val dy = a.yPos - eyeY
+            val dz = a.zPos - eyeZ
+            val zCam = dy * fwdY + dz * fwdZ
+            if (zCam <= 0.3f) continue
+            val xCam = a.xPos
+            val yCam = dy * upY + dz * upZ
+            val ndcX = (xCam / zCam) / (tanHalf * aspect)
+            val ndcY = -(yCam / zCam) / tanHalf
+            val sx = (ndcX + 1f) * 0.5f * w
+            val sy = (ndcY + 1f) * 0.5f * h
+            val radiusPx = (a.half / zCam) / tanHalf * h * 0.5f
+            // Hitbox grows with the silhouette but never drops below a
+            // finger-size floor (~44 dp ≈ Android standard touch target).
+            // Without the floor, asteroids beyond ~30 units shrink to
+            // sub-10-pixel silhouettes and become impossible to tap.
+            val minTouchPx = com.example.asteroidoutpost.game.UiTheme.dp(this, 22f).toFloat()
+            val hitboxPx = (radiusPx * 1.5f).coerceAtLeast(minTouchPx)
+            val dx = sx - touchX
+            val dyT = sy - touchY
+            val d2 = dx * dx + dyT * dyT
+            if (d2 <= hitboxPx * hitboxPx && d2 < bestD2) {
+                bestD2 = d2
+                bestId = a.id
+            }
+        }
+        return bestId
+    }
+
+    /**
+     * Build the per-frame snapshot of asteroid bracket-frames: green
+     * around the player-priority-locked asteroid, red around every other
+     * current threat (those on a course to hit shield/hull within
+     * WEAPON_ENGAGEMENT_RANGE — what auto-aim weapons will engage). The
+     * priority asteroid is excluded from the threat list even if it
+     * qualifies as a threat, so it never gets both colours.
+     */
+    private fun updateSelectionFrame() {
+        val view = selectionFrameView ?: return
+        val w = engineView.width.toFloat()
+        val h = engineView.height.toFloat()
+        if (w <= 1f || h <= 1f) { view.clear(); return }
+        val tilt   = CAMERA_TILT_RAD
+        val pitch  = (kotlin.math.PI / 2.0 + tilt).toFloat()
+        val sinP   = kotlin.math.sin(pitch)
+        val cosP   = kotlin.math.cos(pitch)
+        val targetY = missionRunner.shipPosY
+        val targetZ = 2.5f
+        val radius  = 11f
+        val eyeY   = targetY - radius * sinP
+        val eyeZ   = targetZ + radius * cosP
+        val fwdY = sinP;  val fwdZ = -cosP
+        val upY  = cosP;  val upZ  = sinP
+        val fovYRad  = (55.0 * kotlin.math.PI / 180.0).toFloat()
+        val tanHalf  = kotlin.math.tan(fovYRad / 2f)
+        val aspect   = w / h
+
+        val frames = ArrayList<com.example.asteroidoutpost.game.ui.SelectionFrameView.Frame>()
+        val priority = missionRunner.currentPriorityTarget()
+        val priorityId = priority?.id
+        val threats = missionRunner.currentThreatAsteroids()
+
+        fun project(a: com.example.asteroidoutpost.game.combat.Asteroid, color: Int) {
+            val dy = a.yPos - eyeY
+            val dz = a.zPos - eyeZ
+            val zCam = dy * fwdY + dz * fwdZ
+            if (zCam <= 0.3f) return
+            val xCam = a.xPos
+            val yCam = dy * upY + dz * upZ
+            val ndcX = (xCam / zCam) / (tanHalf * aspect)
+            val ndcY = -(yCam / zCam) / tanHalf
+            val sx = (ndcX + 1f) * 0.5f * w
+            val sy = (ndcY + 1f) * 0.5f * h
+            val radiusPx = (a.half / zCam) / tanHalf * h * 0.5f * 1.6f
+            frames.add(com.example.asteroidoutpost.game.ui.SelectionFrameView.Frame(
+                sx, sy, radiusPx, color))
+        }
+
+        if (priority != null) project(priority, COLOR_FRAME_PRIORITY)
+        for (t in threats) {
+            if (t.id == priorityId) continue   // already drawn green
+            project(t, COLOR_FRAME_THREAT)
+        }
+        view.update(frames)
+    }
+
+    /**
+     * Compute pixel positions for each live asteroid and hand them to the
+     * debug overlay. World→screen math matches the engine's lookAt camera:
+     * pitch = π/2 + CAMERA_TILT_RAD, target = (0, 0, 2.5), radius = 11,
+     * fovY = 55°. Run on the tick thread; the View itself reads the
+     * AtomicReference snapshot from the UI thread in onDraw.
+     */
+    private fun updateDebugAsteroidLabels() {
+        val view = debugAsteroidLabelsView ?: return
+        // Honour the master debug switch + label-mode picker from Settings.
+        // NONE / off → wipe stale labels and bail before doing projection work.
+        if (!debugSettings.enabled ||
+            debugSettings.labelMode == com.example.asteroidoutpost.game.DebugLabelMode.NONE) {
+            view.clear(); return
+        }
+        val mode = debugSettings.labelMode
+        val w = engineView.width.toFloat()
+        val h = engineView.height.toFloat()
+        if (w <= 1f || h <= 1f) { view.clear(); return }
+        val tilt   = CAMERA_TILT_RAD
+        val pitch  = (kotlin.math.PI / 2.0 + tilt).toFloat()
+        val sinP   = kotlin.math.sin(pitch)
+        val cosP   = kotlin.math.cos(pitch)
+        val targetY = missionRunner.shipPosY    // camera target tracks ship
+        val targetZ = 2.5f
+        val radius  = 11f
+        val eyeY   = targetY - radius * sinP
+        val eyeZ   = targetZ + radius * cosP
+        // Camera basis in world: forward = R·(0,0,-1), up = R·(0,1,0)
+        val fwdY = sinP;  val fwdZ = -cosP
+        val upY  = cosP;  val upZ  = sinP
+        val fovYRad  = (55.0 * kotlin.math.PI / 180.0).toFloat()
+        val tanHalf  = kotlin.math.tan(fovYRad / 2f)
+        val aspect   = w / h
+        val asteroids = missionRunner.asteroids
+        val out = ArrayList<com.example.asteroidoutpost.game.ui.DebugAsteroidLabelsView.Label>(asteroids.size)
+        for (a in asteroids) {
+            val dy = a.yPos - eyeY
+            val dz = a.zPos - eyeZ
+            val zCam = dy * fwdY + dz * fwdZ
+            if (zCam <= 0.3f) continue   // behind camera or too close
+            val xCam = a.xPos
+            val yCam = dy * upY + dz * upZ
+            val ndcX = (xCam / zCam) / (tanHalf * aspect)
+            val ndcY = -(yCam / zCam) / tanHalf   // Vulkan-style Y flip
+            val sx = (ndcX + 1f) * 0.5f * w
+            val sy = (ndcY + 1f) * 0.5f * h
+            val txt = when (mode) {
+                com.example.asteroidoutpost.game.DebugLabelMode.COORDS ->
+                    String.format(java.util.Locale.ROOT,
+                        "(%.1f, %.1f, %.1f)", a.xPos, a.yPos, a.zPos)
+                com.example.asteroidoutpost.game.DebugLabelMode.DISTANCE -> {
+                    val dxs = a.xPos
+                    val dys = a.yPos - missionRunner.shipPosY
+                    val dzs = a.zPos
+                    val d = kotlin.math.sqrt(dxs * dxs + dys * dys + dzs * dzs)
+                    String.format(java.util.Locale.ROOT, "%.1f m", d)
+                }
+                com.example.asteroidoutpost.game.DebugLabelMode.NONE -> continue   // guarded above
+            }
+            out.add(com.example.asteroidoutpost.game.ui.DebugAsteroidLabelsView.Label(sx, sy - 14f, txt))
+        }
+        view.update(out)
     }
 
     // ---------------------------------------------------------------------------
@@ -879,6 +1223,7 @@ class MainActivity : AppCompatActivity() {
             Screen.MissionSelect   -> mountMissionSelect(root)
             is Screen.WeaponSelect -> mountWeaponSelect(root, top.mission)
             Screen.Base            -> mountBase(root)
+            Screen.Settings        -> mountSettings(root)
             Screen.Win             -> mountWin(root)
             Screen.Lose            -> mountLose(root)
             Screen.Playing         -> mountPlaying()
@@ -899,8 +1244,9 @@ class MainActivity : AppCompatActivity() {
         missionRunner.stopMission(clearScene = true)
         val view = buildMenu(
             this, "Asteroid Outpost", "Миссии",
-            onClose = { finish() },
-            onClick = { enterScreen(Screen.MissionHub) },
+            onClose    = { finish() },
+            onSettings = { enterScreen(Screen.Settings) },
+            onClick    = { enterScreen(Screen.MissionHub) },
         )
         setMenuBody(view, "Всего металла: ${progressRepo.current.metal}")
         addMenuButton(view, "Корабль") { enterScreen(Screen.Base) }
@@ -923,18 +1269,47 @@ class MainActivity : AppCompatActivity() {
         missionRunner.stopMission(clearScene = false)
         val view = buildCampaign(
             context  = this,
-            missions = Missions.ALL,
+            // Mission 6 («Маршрут») is a one-shot event surfaced in
+            // RandomMissions, not part of the campaign graph.
+            missions = Missions.ALL.filter { it.id <= 5 },
             onPick   = { enterScreen(Screen.MissionDetail(it)) },
             onBack   = { popScreen() },
         )
         mountAt(root, view)
     }
 
+    private fun mountSettings(root: FrameLayout) {
+        missionRunner.stopMission(clearScene = false)
+        val view = buildSettings(
+            context           = this,
+            debugSettings     = debugSettings,
+            onSettingsChanged = { applyDebugVisibility() },
+            onBack            = { popScreen() },
+        )
+        mountAt(root, view)
+    }
+
+    /**
+     * Apply current `debugSettings` state to the live debug overlays.
+     * Called once at startup, and again whenever the user flips a toggle
+     * in Settings. Asteroid labels react on the next `updateDebugAsteroidLabels`
+     * call (no explicit refresh needed); axes gizmo visibility is a direct
+     * View.visibility flip here.
+     */
+    private fun applyDebugVisibility() {
+        val v = if (debugSettings.enabled) View.VISIBLE else View.GONE
+        debugAxesContainer?.visibility = v
+        // Labels view stays mounted; updateDebugAsteroidLabels honours the
+        // enabled+mode flags via `view.clear()` when nothing should render.
+        if (!debugSettings.enabled) debugAsteroidLabelsView?.clear()
+    }
+
     private fun mountRandomMissions(root: FrameLayout) {
         missionRunner.stopMission(clearScene = false)
         val view = buildRandomMissions(
             context = this,
-            onBack  = { popScreen() },
+            onMissionTap = { mission -> enterScreen(Screen.MissionDetail(mission)) },
+            onBack       = { popScreen() },
         )
         mountAt(root, view)
     }
@@ -1063,7 +1438,7 @@ class MainActivity : AppCompatActivity() {
         )
         val view = buildEndOfMission(
             context    = this,
-            title      = "БАЗА РАЗРУШЕНА",
+            title      = "ВАШ КОРАБЛЬ КАТАСТРОФИЧЕСКИ ПОВРЕЖДЁН",
             subtitle   = mission.name,
             stats      = stats,
             motivation = "Усильте робота или базу и попробуйте снова.",

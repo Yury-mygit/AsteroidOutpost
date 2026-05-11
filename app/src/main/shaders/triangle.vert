@@ -60,7 +60,19 @@ void main() {
     vLocalXZ = inPosition.xz;
     vUV      = inUV;
 
-    vec4 currClip = ubo.proj * ubo.view * worldPos;
+    // E22 — star pipeline (pc.textureMode >= 1.5) renders as a skybox:
+    // strip translation from view so stars stay anchored to the camera
+    // direction, not to world positions. Without this, when the ship
+    // moves through the world (route mode), the camera also moves and
+    // the star points appear to "fly past" — wrong, they're meant to
+    // be infinitely far.
+    mat4 viewForStarsOrScene = (pc.textureMode >= 1.5)
+        ? mat4(mat3(ubo.view))
+        : ubo.view;
+    mat4 prevViewForStarsOrScene = (pc.textureMode >= 1.5)
+        ? mat4(mat3(ubo.prev_view))
+        : ubo.prev_view;
+    vec4 currClip = ubo.proj * viewForStarsOrScene * worldPos;
     gl_Position   = currClip;
 
     // E10.3 — compute screen-space NDC velocity. prev_clip uses the
@@ -70,7 +82,7 @@ void main() {
     // either passes this through to outVelocity (mesh / additive /
     // translucent branches) or writes zero (frame / plasma branches
     // whose prev_model isn't meaningful).
-    vec4 prevClip = ubo.prev_proj * ubo.prev_view * pd.prev_model * vec4(inPosition, 1.0);
+    vec4 prevClip = ubo.prev_proj * prevViewForStarsOrScene * pd.prev_model * vec4(inPosition, 1.0);
     vec2 currNdc  = currClip.xy / max(currClip.w, 1e-4);
     vec2 prevNdc  = prevClip.xy / max(prevClip.w, 1e-4);
     vVelocity     = (currNdc - prevNdc) * 0.5;

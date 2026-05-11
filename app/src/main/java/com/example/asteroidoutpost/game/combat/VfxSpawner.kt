@@ -72,7 +72,7 @@ internal class VfxSpawner(
      * gradient from bright tip to transparent rim.
      */
     fun spawnMuzzleBlast(
-        cx: Float, cz: Float,
+        cx: Float, cy: Float, cz: Float,
         dirX: Float, dirZ: Float,
         bulletHalfW: Float,
         tint: FloatArray,
@@ -93,7 +93,7 @@ internal class VfxSpawner(
 
         fun add(rot: Float) {
             flashes.add(Flash(
-                x = cx, z = cz,
+                x = cx, y = cy, z = cz,
                 life = life, maxLife = life,
                 halfMax = mainSize,
                 tintR = tint[0], tintG = tint[1], tintB = tint[2], tintA = tint[3],
@@ -125,7 +125,7 @@ internal class VfxSpawner(
      * is a unique read for the player's primary weapon.
      */
     fun spawnRailgunMuzzle(
-        cx: Float, cz: Float,
+        cx: Float, cy: Float, cz: Float,
         dirX: Float, dirZ: Float,
         bulletHalfW: Float,
     ) {
@@ -136,7 +136,7 @@ internal class VfxSpawner(
         // tint and high brightness scalar — reads as the barrel-mouth pop.
         val coreT = DraftCombat.FLASH_TINT_RAILGUN_CORE
         flashes.add(Flash(
-            x = cx, z = cz,
+            x = cx, y = cy, z = cz,
             life = DraftCombat.RAILGUN_CORE_LIFE,
             maxLife = DraftCombat.RAILGUN_CORE_LIFE,
             halfMax = DraftCombat.RAILGUN_CORE_HALF * sizeMul,
@@ -178,7 +178,7 @@ internal class VfxSpawner(
             // and tint.z reads as a meaningful seed (not collapsed near 0).
             val seed = 1f + Math.random().toFloat() * 999f
             flashes.add(Flash(
-                x = bx, z = bz,
+                x = bx, y = cy, z = bz,
                 life = life, maxLife = life,
                 halfMax = halfMax * sizeMul,
                 tintR = boltT[0], tintG = boltT[1], tintB = boltT[2], tintA = boltT[3],
@@ -197,7 +197,7 @@ internal class VfxSpawner(
      * but cyan-tinted (electromagnetic discharge feel) instead of warm
      * yellow. Spawned alongside spawnRailgunMuzzle for the central railgun.
      */
-    fun spawnRailgunSparks(cx: Float, cz: Float, vx: Float, vz: Float) {
+    fun spawnRailgunSparks(cx: Float, cy: Float, cz: Float, vx: Float, vz: Float) {
         val baseTheta = kotlin.math.atan2(vz, vx)
         val n = (DraftCombat.SPARK_MUZZLE_COUNT_MIN..DraftCombat.SPARK_MUZZLE_COUNT_MAX).random()
         val tint = DraftCombat.SPARK_TINT_RAILGUN
@@ -210,7 +210,7 @@ internal class VfxSpawner(
             val size = DraftCombat.SPARK_MUZZLE_SIZE_MIN +
                        Math.random().toFloat() * (DraftCombat.SPARK_MUZZLE_SIZE_MAX - DraftCombat.SPARK_MUZZLE_SIZE_MIN)
             sparkParticles.add(Particle(
-                x = cx, y = 0f, z = cz,
+                x = cx, y = cy, z = cz,
                 vx = kotlin.math.cos(theta) * sp,
                 vy = 0f,
                 vz = kotlin.math.sin(theta) * sp,
@@ -227,7 +227,7 @@ internal class VfxSpawner(
      * normalised inside this helper). 3-5 short sparks per shot read as
      * gunpowder kick.
      */
-    fun spawnMuzzleSparks(cx: Float, cz: Float, vx: Float, vz: Float) {
+    fun spawnMuzzleSparks(cx: Float, cy: Float, cz: Float, vx: Float, vz: Float) {
         val baseTheta = kotlin.math.atan2(vz, vx)
         val n = (DraftCombat.SPARK_MUZZLE_COUNT_MIN..DraftCombat.SPARK_MUZZLE_COUNT_MAX).random()
         val tint = DraftCombat.FLASH_TINT_MUZZLE
@@ -240,7 +240,7 @@ internal class VfxSpawner(
             val size = DraftCombat.SPARK_MUZZLE_SIZE_MIN +
                        Math.random().toFloat() * (DraftCombat.SPARK_MUZZLE_SIZE_MAX - DraftCombat.SPARK_MUZZLE_SIZE_MIN)
             sparkParticles.add(Particle(
-                x = cx, y = 0f, z = cz,
+                x = cx, y = cy, z = cz,
                 vx = kotlin.math.cos(theta) * sp,
                 vy = 0f,
                 vz = kotlin.math.sin(theta) * sp,
@@ -307,42 +307,44 @@ internal class VfxSpawner(
 
     /**
      * Continuous spark emitter that runs while the player holds the recharge
-     * button. Spawns sparks at random points along the dome's superellipse
-     * arch with tangential velocity so they appear to skim across the
-     * shield surface before drag fades them out. Uses the existing E9
-     * additive-spark pool (cyan tint).
+     * button. Spawns sparks at random points on the force-field hemisphere
+     * surface with tangential velocity so they appear to skim across the
+     * shield before drag fades them out. Uses the existing E9 additive-
+     * spark pool (cyan tint).
      */
     fun emitShieldRechargeSparks(dt: Float) {
         shieldRechargeSparkAccum += DraftCombat.SHIELD_RECHARGE_SPARK_RATE * dt
         val n = shieldRechargeSparkAccum.toInt()
         if (n <= 0) return
         shieldRechargeSparkAccum -= n.toFloat()
-        val halfW = DraftCombat.SHIELD_ARCH_HALF_W
-        val halfH = DraftCombat.SHIELD_ARCH_HALF_H
-        val nExp  = DraftCombat.SHIELD_ARCH_SHARPNESS
-        val baseZ = DraftCombat.PLATFORM_TOP_Z +
-                    DraftCombat.SHIELD_ARCH_LIFT_FRAC * halfH
-        val tint  = DraftCombat.SHIELD_RECHARGE_SPARK_TINT
+        val r  = DraftCombat.SHIELD_HEMISPHERE_RADIUS
+        val cz = DraftCombat.SHIELD_CENTER_Z
+        val tint = DraftCombat.SHIELD_RECHARGE_SPARK_TINT
         repeat(n) {
-            // Pick a random arch position via parametric superellipse.
-            // u in [-1, +1] → x = sign(u) × halfW × |u|^(2/n);  z follows.
-            val u = (Math.random().toFloat() - 0.5f) * 2f
-            val absU = kotlin.math.abs(u)
-            val signU = if (u >= 0f) 1f else -1f
-            val pExp = 2f / nExp
-            val nrmExp = 2f * (nExp - 1f) / nExp
-            val ux = signU * absU.pow(pExp)
-            // sin θ = sqrt(1 - u²) — simpler param for top half:
-            val uz = kotlin.math.sqrt((1f - u * u).coerceAtLeast(0f)).pow(pExp)
-            val sx = ux * halfW
-            val sz = baseZ + uz * halfH
-            // Outward normal via gradient of |x/a|^n + |z/b|^n − 1.
-            val gx = signU * absU.pow(nrmExp) / halfW
-            val gz = kotlin.math.sqrt((1f - u * u).coerceAtLeast(0f)).pow(nrmExp) / halfH
-            val gl = kotlin.math.sqrt(gx * gx + gz * gz).coerceAtLeast(1e-6f)
-            // Tangent = perpendicular to outward normal, rotated 90° in X-Z.
-            val tx = -gz / gl
-            val tz =  gx / gl
+            // Uniform point on the FRONT hemisphere (y >= 0) of the shield.
+            // theta = polar angle from +Y pole, phi = azimuth around it.
+            // cos(theta) ~ U[0,1] for uniform sampling.
+            val cosTheta = Math.random().toFloat()
+            val sinTheta = kotlin.math.sqrt((1f - cosTheta * cosTheta).coerceAtLeast(0f))
+            val phi = (Math.random() * 2.0 * Math.PI).toFloat()
+            val cosPhi = kotlin.math.cos(phi)
+            val sinPhi = kotlin.math.sin(phi)
+            // Outward normal (unit, on hemisphere) and world position.
+            val nx = sinTheta * cosPhi
+            val ny = cosTheta
+            val nz = sinTheta * sinPhi
+            val sx = r * nx
+            val sy = r * ny
+            val sz = r * nz + cz
+            // Tangent in tangent plane: rotate (nx, nz) by 90° around y axis.
+            // Independent of sign of choice — works as long as it's
+            // perpendicular to the outward normal.
+            val txAxis = -nz
+            val tyAxis = 0f
+            val tzAxis =  nx
+            val tlen = kotlin.math.sqrt(txAxis * txAxis + tzAxis * tzAxis).coerceAtLeast(1e-6f)
+            val tx = txAxis / tlen
+            val tz = tzAxis / tlen
             val sp = DraftCombat.SHIELD_RECHARGE_SPARK_SPEED_MIN +
                      Math.random().toFloat() * (DraftCombat.SHIELD_RECHARGE_SPARK_SPEED_MAX -
                                                  DraftCombat.SHIELD_RECHARGE_SPARK_SPEED_MIN)
@@ -354,9 +356,9 @@ internal class VfxSpawner(
                        Math.random().toFloat() * (DraftCombat.SHIELD_RECHARGE_SPARK_SIZE_MAX -
                                                    DraftCombat.SHIELD_RECHARGE_SPARK_SIZE_MIN)
             sparkParticles.add(Particle(
-                x = sx, y = 0f, z = sz,
+                x = sx, y = sy, z = sz,
                 vx = tx * sp * dir,
-                vy = 0f,
+                vy = tyAxis,
                 vz = tz * sp * dir,
                 age = 0f, life = life, size = size,
                 r = tint[0], g = tint[1], b = tint[2], a = 1.5f,

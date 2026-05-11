@@ -842,6 +842,11 @@ namespace station {
         if (m_beamPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_beamPipeline, nullptr);                    m_beamPipeline = VK_NULL_HANDLE; }
         if (m_beamPipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_beamPipelineLayout, nullptr);        m_beamPipelineLayout = VK_NULL_HANDLE; }
         if (m_beamVertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_beamVertModule, nullptr);              m_beamVertModule = VK_NULL_HANDLE; }
+        // E20 — forcefield pipeline / layout / shader cleanup.
+        if (m_forceFieldPipeline        != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_forceFieldPipeline, nullptr);                    m_forceFieldPipeline = VK_NULL_HANDLE; }
+        if (m_forceFieldPipelineLayout  != VK_NULL_HANDLE) { vkDestroyPipelineLayout(m_device, m_forceFieldPipelineLayout, nullptr);        m_forceFieldPipelineLayout = VK_NULL_HANDLE; }
+        if (m_forceFieldVertModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_forceFieldVertModule, nullptr);              m_forceFieldVertModule = VK_NULL_HANDLE; }
+        if (m_forceFieldFragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_forceFieldFragModule, nullptr);              m_forceFieldFragModule = VK_NULL_HANDLE; }
         if (m_beamFragModule      != VK_NULL_HANDLE) { vkDestroyShaderModule(m_device, m_beamFragModule, nullptr);              m_beamFragModule = VK_NULL_HANDLE; }
         // E8.2/E8.3 — destroy textures before their descriptor pool. Free
         // every used pool slot first, then the engine-owned default white,
@@ -928,7 +933,9 @@ namespace station {
                                        const std::vector<uint32_t>& beamVertSpv,
                                        const std::vector<uint32_t>& beamFragSpv,
                                        const std::vector<uint32_t>& backgroundVertSpv,
-                                       const std::vector<uint32_t>& backgroundFragSpv) {
+                                       const std::vector<uint32_t>& backgroundFragSpv,
+                                       const std::vector<uint32_t>& forceFieldVertSpv,
+                                       const std::vector<uint32_t>& forceFieldFragSpv) {
         auto makeModule = [&](const std::vector<uint32_t>& code, VkShaderModule& mod) -> bool {
             VkShaderModuleCreateInfo ci{};
             ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -1371,6 +1378,99 @@ namespace station {
             LOGI("Beam pipeline created");
         }
 
+        // E20 — force-field pipeline. Uses standard mesh vertex bindings
+        // (position + color + normal + uv) so a hemisphere mesh loaded
+        // through loadMeshRaw renders correctly. Own pipeline layout (set
+        // 0 = scene UBO only; push constants = mat4 model + vec4
+        // impacts[4] = 128 bytes — Vulkan minimum guarantee). Additive
+        // ONE/ONE on colour, writeMask=0 on velocity. Cull NONE so both
+        // sides of the hemisphere are visible (ship is inside the dome).
+        if (!forceFieldVertSpv.empty() && !forceFieldFragSpv.empty()) {
+            if (!makeModule(forceFieldVertSpv, m_forceFieldVertModule)) return false;
+            if (!makeModule(forceFieldFragSpv, m_forceFieldFragModule)) return false;
+
+            VkPipelineShaderStageCreateInfo ffStages[2]{};
+            ffStages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            ffStages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            ffStages[0].module = m_forceFieldVertModule; ffStages[0].pName = "main";
+            ffStages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            ffStages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+            ffStages[1].module = m_forceFieldFragModule; ffStages[1].pName = "main";
+
+            VkPushConstantRange ffPcRange{};
+            ffPcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            ffPcRange.offset     = 0;
+            ffPcRange.size       = sizeof(ForceFieldPushConstants);
+
+            VkPipelineLayoutCreateInfo ffPlCI{};
+            ffPlCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            ffPlCI.setLayoutCount         = 1;
+            ffPlCI.pSetLayouts            = &m_descriptorSetLayout;
+            ffPlCI.pushConstantRangeCount = 1;
+            ffPlCI.pPushConstantRanges    = &ffPcRange;
+            r = vkCreatePipelineLayout(m_device, &ffPlCI, nullptr, &m_forceFieldPipelineLayout);
+            if (r != VK_SUCCESS) { LOGE("vkCreatePipelineLayout(forcefield): %s", vkRes(r).c_str()); return false; }
+
+            // Standard mesh vertex input (one binding, 4 attributes).
+            auto ffBind  = Vertex::getBindingDescription();
+            auto ffAttrs = Vertex::getAttributeDescriptions();
+            VkPipelineVertexInputStateCreateInfo ffViCI{};
+            ffViCI.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            ffViCI.vertexBindingDescriptionCount   = 1;
+            ffViCI.pVertexBindingDescriptions      = &ffBind;
+            ffViCI.vertexAttributeDescriptionCount = static_cast<uint32_t>(ffAttrs.size());
+            ffViCI.pVertexAttributeDescriptions    = ffAttrs.data();
+
+            VkPipelineInputAssemblyStateCreateInfo ffIaCI{};
+            ffIaCI.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            ffIaCI.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            // Rasterization: inherit gpCI's rastCI (already cull-NONE +
+            // fully populated by the main pipeline path). Overriding it
+            // with a hand-rolled minimal CI triggers VK_ERROR_UNKNOWN on
+            // Adreno drivers that expect every field set even if the
+            // documented defaults claim otherwise.
+
+            VkPipelineDepthStencilStateCreateInfo ffDsCI{};
+            ffDsCI.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            ffDsCI.depthTestEnable  = VK_TRUE;
+            ffDsCI.depthWriteEnable = VK_FALSE;
+            ffDsCI.depthCompareOp   = VK_COMPARE_OP_LESS;
+
+            VkPipelineColorBlendAttachmentState ffCbAtts[2]{};
+            ffCbAtts[0].blendEnable         = VK_TRUE;
+            ffCbAtts[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            ffCbAtts[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            ffCbAtts[0].colorBlendOp        = VK_BLEND_OP_ADD;
+            ffCbAtts[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            ffCbAtts[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            ffCbAtts[0].alphaBlendOp        = VK_BLEND_OP_ADD;
+            ffCbAtts[0].colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            ffCbAtts[1].blendEnable    = VK_FALSE;
+            ffCbAtts[1].colorWriteMask = 0;
+            VkPipelineColorBlendStateCreateInfo ffCbCI{};
+            ffCbCI.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            ffCbCI.attachmentCount = 2;
+            ffCbCI.pAttachments    = ffCbAtts;
+
+            VkGraphicsPipelineCreateInfo ffGpCI = gpCI;  // copy viewport / multisample
+            ffGpCI.stageCount          = 2;
+            ffGpCI.pStages             = ffStages;
+            ffGpCI.pVertexInputState   = &ffViCI;
+            ffGpCI.pInputAssemblyState = &ffIaCI;
+            ffGpCI.pDepthStencilState  = &ffDsCI;
+            ffGpCI.pColorBlendState    = &ffCbCI;
+            ffGpCI.pDynamicState       = nullptr;
+            ffGpCI.layout              = m_forceFieldPipelineLayout;
+            ffGpCI.renderPass          = m_renderResources.renderPass;
+            ffGpCI.subpass             = 0;
+
+            r = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ffGpCI, nullptr, &m_forceFieldPipeline);
+            if (r != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines(forcefield): %s", vkRes(r).c_str()); return false; }
+            LOGI("Force-field pipeline created");
+        }
+
         // E10.1 — post-process pipeline. Fullscreen triangle (no vertex
         // input bindings — gl_VertexIndex generates positions in vert),
         // single descriptor set with the offscreen colour sampler, no
@@ -1643,6 +1743,7 @@ namespace station {
         m_additiveDrawList.clear();
         m_texturedDrawList.clear();
         m_beamDrawList.clear();
+        m_forceFieldDrawList.clear();
         m_particleBatches.clear();
         m_particleAdditiveStaging.clear();
         m_particleAlphaStaging.clear();
@@ -1861,6 +1962,24 @@ namespace station {
         // pc.time is filled at render time so beams spawned across the
         // current frame share the same animation phase.
         m_beamDrawList.push_back(pc);
+    }
+
+    // E20 — public API for the force-field pipeline. Caller passes the
+    // hemisphere mesh token, world model matrix, and a flat array of
+    // 16 floats = 4 × (x, y, z, age). Slot is "empty" iff age >= 1.0.
+    // Render-time iterates m_forceFieldDrawList in renderFrame.
+    void VulkanContext::drawForceField(uint32_t token,
+                                       float cx, float cy, float cz, float radius,
+                                       const float impacts[16]) {
+        if (!m_sceneOpen || token == 0 || token > kMaxMeshes) return;
+        ForceFieldDraw fd{};
+        fd.meshToken = token;
+        fd.pc.centerRadius[0] = cx;
+        fd.pc.centerRadius[1] = cy;
+        fd.pc.centerRadius[2] = cz;
+        fd.pc.centerRadius[3] = radius;
+        std::memcpy(fd.pc.impacts, impacts, sizeof(float) * 16);
+        m_forceFieldDrawList.push_back(fd);
     }
 
     void VulkanContext::drawBillboardMesh(uint32_t token, float x, float y, float z, float scale) {
@@ -2582,6 +2701,30 @@ namespace station {
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(BeamPushConstants), &beam);
                 vkCmdDraw(cmd, 6, 1, 0, 0);
+            }
+        }
+
+        // E20 — force-field pass. After beams (which are 3D scene effects)
+        // but before plasma billboards (overlay flashes). Real geometry
+        // via vertex buffer; depth-test on read-only so the shield rim
+        // hides behind closer asteroids that pierce the dome volume but
+        // doesn't write depth so subsequent VFX render normally.
+        if (!m_forceFieldDrawList.empty() && m_forceFieldPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_forceFieldPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_forceFieldPipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+            uint32_t lastToken = 0;
+            for (const auto& fd : m_forceFieldDrawList) {
+                uint32_t idx = fd.meshToken - 1;
+                if (!m_meshUsed[idx] || !m_meshPool[idx].isReady()) continue;
+                if (fd.meshToken != lastToken) {
+                    m_meshPool[idx].bind(cmd);
+                    lastToken = fd.meshToken;
+                }
+                vkCmdPushConstants(cmd, m_forceFieldPipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(ForceFieldPushConstants), &fd.pc);
+                vkCmdDrawIndexed(cmd, m_meshPool[idx].indexCount(), 1, 0, 0, 0);
             }
         }
 

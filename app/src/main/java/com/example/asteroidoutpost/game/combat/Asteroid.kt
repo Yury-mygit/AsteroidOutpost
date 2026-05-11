@@ -55,4 +55,10 @@ internal data class Asteroid(
     var prevZ: Float = zPos,
     var prevY: Float = yPos,
     var prevRotation: Float = rotation,
+    // Optional shield buffer — damage drains shieldHp first, overflow
+    // hits hp. shieldHpMax = 0 means no shield (normal asteroids). Set
+    // for ENEMY_SHIP at spawn (half of maxHp). UI: cyan bar above the
+    // green HP bar in `buildHpBars` whenever shieldHpMax > 0.
+    var shieldHp: Int = 0,
+    val shieldHpMax: Int = 0,
 )
