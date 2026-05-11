@@ -55,6 +55,12 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
+    // Network stack — minimal layer for talking to api.g4.raftforge.art.
+    // OkHttp = transport, gson = JSON (reflection-based — no compiler
+    // plugin needed, compatible with AGP9 kotlin-extension policy).
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging.interceptor)
+    implementation(libs.gson)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

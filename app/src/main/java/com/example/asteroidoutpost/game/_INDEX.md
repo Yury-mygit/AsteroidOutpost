@@ -104,4 +104,15 @@ Each screen file owns one overlay. Common builders (`makeOverlay`,
 | What | Where |
 |---|---|
 | Persistent player state (metal / upgrade levels) | `GameProgress.kt :: GameProgress` |
+
+## Network — `../net/` (sibling of `game/`)
+
+| What | Where |
+|---|---|
+| OkHttp wrapper + token persistence | `net/ApiClient.kt :: ApiClient`, `ApiResult` |
+| Wire DTOs (mirror of `docs/api/openapi.yaml`) | `net/Models.kt` |
+| Device-token bootstrap | `net/AuthService.kt :: AuthService.ensureToken / refresh` |
+| Mission catalog fetch | `net/MissionService.kt :: list / detail` |
+| Progress sync | `net/ProgressService.kt :: fetch / push` |
+| Telemetry session lifecycle | `net/TelemetryService.kt :: openSession / flushFrames / closeSession` |
 | SharedPreferences-backed live state | `ProgressRepository.kt :: ProgressRepository` |

@@ -88,6 +88,7 @@ internal class MissionRunner(
     private var asteroidMeshHeavy:       Long = 0L
     private var asteroidMeshExplosive:   Long = 0L
     private var asteroidMeshEnergy:      Long = 0L
+    private var enemyShipMeshHandle:     Long = 0L
 
     fun attachAssets(
         hud: HudView,
@@ -100,6 +101,7 @@ internal class MissionRunner(
         asteroidMeshHeavy: Long,
         asteroidMeshExplosive: Long,
         asteroidMeshEnergy: Long,
+        enemyShipMeshHandle: Long,
     ) {
         this.hud = hud
         this.vfx = vfx
@@ -111,6 +113,7 @@ internal class MissionRunner(
         this.asteroidMeshHeavy     = asteroidMeshHeavy
         this.asteroidMeshExplosive = asteroidMeshExplosive
         this.asteroidMeshEnergy    = asteroidMeshEnergy
+        this.enemyShipMeshHandle   = enemyShipMeshHandle
     }
 
     // ------------------------------------------------------------------
@@ -668,9 +671,10 @@ internal class MissionRunner(
             // so no platform damage from accidental brush. Death damage
             // routed through bolt impacts (EnemyBolt) instead.
             platformDmg = 0,
-            // Reuse the red HEAVY asteroid mesh as prototype enemy ship.
-            // Swap for a dedicated mesh when the art slot is ready.
-            meshHandle  = asteroidMeshHeavy,
+            // Dedicated `Enemy_Ship.glb` (procedural TIE-fighter-ish via
+            // tools/build_enemy_ship_glb.py). Falls back to the red HEAVY
+            // asteroid mesh if the .glb load failed at startup.
+            meshHandle  = if (enemyShipMeshHandle != 0L) enemyShipMeshHandle else asteroidMeshHeavy,
         ))
         enemyFireCooldowns[id] = DraftCombat.ENEMY_SHIP_FIRE_INTERVAL_SEC
     }

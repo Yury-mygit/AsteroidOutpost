@@ -1,0 +1,466 @@
+# OpenAPI 3.0 spec for Asteroid Outpost server.
+# Companion to API.md (human-readable) — this file is the machine-readable
+# contract. Code-gen friendly. Update both when changing endpoints.
+
+openapi: 3.0.3
+info:
+  title: Asteroid Outpost Server API
+  version: 1.0.0
+  description: |
+    REST API consumed by the Asteroid Outpost Android client.
+    See `API.md` for design rationale, non-functional requirements, and
+    implementation notes.
+
+servers:
+  - url: https://api.g4.raftforge.art/api/v1
+    description: Production
+  - url: http://10.0.2.2:8080/api/v1
+    description: Local dev (Android emulator host loopback)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: "ok"}
+                  serverTime: {type: string, format: date-time}
+
+  /auth/device:
+    post:
+      summary: Register / login device, obtain bearer token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, platform, appVersion]
+              properties:
+                deviceId:
+                  type: string
+                  format: uuid
+                  example: "550e8400-e29b-41d4-a716-446655440000"
+                platform:
+                  type: string
+                  enum: [android]
+                appVersion:
+                  type: string
+                  example: "1.4.0"
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, deviceId, isNewDevice, tokenExpiresAt]
+                properties:
+                  token: {type: string}
+                  deviceId: {type: string, format: uuid}
+                  isNewDevice: {type: boolean}
+                  tokenExpiresAt: {type: string, format: date-time}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '500': {$ref: '#/components/responses/InternalError'}
+
+  /missions:
+    get:
+      summary: List available missions (summaries, not full configs)
+      responses:
+        '200':
+          description: Mission catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [missions, serverTime]
+                properties:
+                  serverTime: {type: string, format: date-time}
+                  missions:
+                    type: array
+                    items: {$ref: '#/components/schemas/MissionSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /missions/{id}:
+    get:
+      summary: Get full mission configuration
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Full mission config (see mission-schema.json)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MissionConfig'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /progress:
+    get:
+      summary: Get current player progress for this device
+      responses:
+        '200':
+          description: Progress state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Progress'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    put:
+      summary: Replace player progress (optimistic concurrency via revision)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProgressRequest'}
+      responses:
+        '200':
+          description: Updated progress
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Progress'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409':
+          description: Revision conflict — server has newer progress
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, currentServerState]
+                properties:
+                  error: {$ref: '#/components/schemas/Error'}
+                  currentServerState: {$ref: '#/components/schemas/Progress'}
+
+  /telemetry/sessions:
+    post:
+      summary: Open a telemetry session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [missionId, weaponId, startedAt, appVersion, missionSchemaVersion]
+              properties:
+                missionId: {type: string}
+                weaponId: {type: string, enum: [machinegun, railgun]}
+                startedAt: {type: string, format: date-time}
+                appVersion: {type: string}
+                missionSchemaVersion: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Session opened
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, frameBatchMaxSize, frameIntervalMs]
+                properties:
+                  sessionId: {type: string, format: uuid}
+                  frameBatchMaxSize: {type: integer, minimum: 1}
+                  frameIntervalMs: {type: integer, minimum: 10}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /telemetry/sessions/{sessionId}/frames:
+    post:
+      summary: Append batch of telemetry frames to session
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [frames]
+              properties:
+                frames:
+                  type: array
+                  items: {$ref: '#/components/schemas/TelemetryFrame'}
+      responses:
+        '200':
+          description: Batch acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted: {type: integer}
+                  rejected: {type: integer}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+
+  /telemetry/sessions/{sessionId}/close:
+    post:
+      summary: Close a telemetry session with outcome
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endedAt, outcome]
+              properties:
+                endedAt: {type: string, format: date-time}
+                outcome: {type: string, enum: [win, lose, abort]}
+                score: {type: integer}
+                metalEarned: {type: integer}
+                asteroidsDestroyed: {type: integer}
+                wavesCompleted: {type: integer}
+                reason: {type: string}
+      responses:
+        '200':
+          description: Closed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId: {type: string, format: uuid}
+                  framesReceived: {type: integer}
+                  durationSec: {type: number}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+
+    MissionSummary:
+      type: object
+      required: [id, schemaVersion, displayName, description, difficulty, kind, category, updatedAt]
+      properties:
+        id: {type: string, pattern: '^[a-z0-9-]+$'}
+        schemaVersion: {type: integer, minimum: 1}
+        displayName: {type: string}
+        description: {type: string}
+        difficulty: {type: string, enum: [easy, medium, hard]}
+        kind: {type: string, enum: [wave, route, combat]}
+        category: {type: string, enum: [campaign, "random-event"]}
+        order: {type: integer, nullable: true}
+        isRepeatable: {type: boolean, default: true}
+        updatedAt: {type: string, format: date-time}
+
+    MissionConfig:
+      type: object
+      required: [id, schemaVersion, displayName, description, difficulty, kind, category, baseHp, asteroidBaseline]
+      properties:
+        id: {type: string}
+        schemaVersion: {type: integer}
+        displayName: {type: string}
+        description: {type: string}
+        difficulty: {type: string, enum: [easy, medium, hard]}
+        kind: {type: string, enum: [wave, route, combat]}
+        category: {type: string, enum: [campaign, "random-event"]}
+        order: {type: integer, nullable: true}
+        isRepeatable: {type: boolean}
+        baseHp: {type: integer, minimum: 1}
+        weaponsDisabled: {type: boolean, default: false}
+        asteroidBaseline:
+          type: object
+          required: [hp, speed]
+          properties:
+            hp: {type: integer, minimum: 1}
+            speed: {type: number}
+        waves:
+          type: array
+          items: {$ref: '#/components/schemas/Wave'}
+        route:
+          oneOf:
+            - type: 'null'
+            - {$ref: '#/components/schemas/Route'}
+        enemyShipSpawns:
+          type: array
+          items: {$ref: '#/components/schemas/EnemyShipSpawn'}
+        updatedAt: {type: string, format: date-time}
+
+    Wave:
+      type: object
+      required: [asteroidCount, spawnIntervalSec]
+      properties:
+        asteroidCount: {type: integer, minimum: 0}
+        spawnIntervalSec: {type: number, minimum: 0}
+        typeWeights:
+          type: object
+          additionalProperties: {type: number, minimum: 0}
+
+    Route:
+      type: object
+      required: [startY, endY, asteroids]
+      properties:
+        startY: {type: number}
+        endY: {type: number}
+        asteroids:
+          type: array
+          items: {$ref: '#/components/schemas/RoutePlacement'}
+
+    RoutePlacement:
+      type: object
+      required: [absY, x, z, type]
+      properties:
+        absY: {type: number}
+        x: {type: number}
+        z: {type: number}
+        type: {type: string, enum: [NORMAL, FAST, HEAVY, EXPLOSIVE, ENERGY]}
+        hpOverride:
+          type: integer
+          nullable: true
+          minimum: 1
+
+    EnemyShipSpawn:
+      type: object
+      required: [delaySec, xOffset]
+      properties:
+        delaySec: {type: number, minimum: 0}
+        xOffset: {type: number}
+
+    Progress:
+      type: object
+      required: [metal, mainWeaponDamageLevel, sideTurretDamageLevel, baseHpLevel, highestMissionUnlocked, selectedWeaponId, revision, updatedAt]
+      properties:
+        metal: {type: integer, minimum: 0}
+        mainWeaponDamageLevel: {type: integer, minimum: 0, maximum: 3}
+        sideTurretDamageLevel: {type: integer, minimum: 0, maximum: 3}
+        baseHpLevel: {type: integer, minimum: 0, maximum: 3}
+        highestMissionUnlocked: {type: integer, minimum: 0}
+        selectedWeaponId: {type: string, enum: [machinegun, railgun]}
+        revision: {type: integer, minimum: 0}
+        updatedAt: {type: string, format: date-time}
+
+    ProgressRequest:
+      type: object
+      required: [metal, mainWeaponDamageLevel, sideTurretDamageLevel, baseHpLevel, highestMissionUnlocked, selectedWeaponId, revision]
+      properties:
+        metal: {type: integer, minimum: 0}
+        mainWeaponDamageLevel: {type: integer, minimum: 0, maximum: 3}
+        sideTurretDamageLevel: {type: integer, minimum: 0, maximum: 3}
+        baseHpLevel: {type: integer, minimum: 0, maximum: 3}
+        highestMissionUnlocked: {type: integer, minimum: 0}
+        selectedWeaponId: {type: string, enum: [machinegun, railgun]}
+        revision: {type: integer, minimum: 0}
+
+    TelemetryFrame:
+      type: object
+      required: [ts, shipPosY, shieldHp, platformHp, energy, score, asteroids, enemies, abilityCooldowns]
+      properties:
+        ts: {type: integer, format: int64, description: "Unix epoch milliseconds (client clock)"}
+        shipPosY: {type: number}
+        shieldHp: {type: integer}
+        platformHp: {type: integer}
+        energy: {type: integer}
+        score: {type: integer}
+        asteroids:
+          type: array
+          items:
+            type: object
+            required: [id, type, x, y, z, hp, maxHp]
+            properties:
+              id: {type: integer, format: int64}
+              type: {type: string, enum: [NORMAL, FAST, HEAVY, EXPLOSIVE, ENERGY, ENEMY_SHIP]}
+              x: {type: number}
+              y: {type: number}
+              z: {type: number}
+              hp: {type: integer}
+              maxHp: {type: integer}
+        enemies:
+          type: array
+          items:
+            type: object
+            required: [id, x, y, z, hp, maxHp]
+            properties:
+              id: {type: integer, format: int64}
+              x: {type: number}
+              y: {type: number}
+              z: {type: number}
+              hp: {type: integer}
+              maxHp: {type: integer}
+              shieldHp: {type: integer}
+              shieldHpMax: {type: integer}
+        abilityCooldowns:
+          type: array
+          items: {type: number}
+        activeBuffSecLeft: {type: number}
+        playerPriorityAsteroidId:
+          type: integer
+          format: int64
+          nullable: true
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Resource not found or not owned by token
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {$ref: '#/components/schemas/Error'}
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: {type: integer}
+          description: Seconds until retry allowed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {$ref: '#/components/schemas/Error'}
+    InternalError:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {$ref: '#/components/schemas/Error'}

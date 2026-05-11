@@ -26,6 +26,8 @@ Wide grey platform at the bottom holds player installations (central turret + 2 
 
 **Debug overlays** (axes-gizmo + per-asteroid labels) are gated by `DebugSettings` (persisted toggle + label-mode picker in `SettingsOverlay`). Default off — labels and axes only render after the player explicitly enables them. Reactive: flipping the toggle in Settings calls `applyDebugVisibility()` immediately.
 
+**Server API integration** (work in progress as of 2026-05-12). The app talks to `https://api.g4.raftforge.art/api/v1` for: device-token auth, mission catalog (list + details), progress sync, telemetry stream. Full contract in `docs/api/API.md` + `docs/api/openapi.yaml`. Kotlin client in `app/src/main/java/com/example/asteroidoutpost/net/` (ApiClient + service classes). Server itself built by a separate agent. Currently only auth is wired (background bootstrap in `MainActivity.onCreate`); missions / progress / telemetry endpoints have stub services awaiting wire-up to screens / runner. Offline-fallback to bundled `Missions.ALL` and SharedPreferences when server is unreachable.
+
 **Motion blur is disabled** (`post.frag` is a pure passthrough). The E10.4 5×5 velocity-dilation step leaked moving-asteroid velocity into adjacent static-turret pixels and produced visible shimmer that mesh / prev_model fixes couldn't address. Pipeline + offscreen colour/velocity attachments + `prev_model` Kotlin-side are still wired so it's easy to revive — but doing so cleanly requires per-object dilation boundaries (stencil mask on static surfaces). See `feedback project_motion_blur_disabled.md`.
 
 Numbers, type tables, and gameplay rationale live in ROADMAP §Концепция.

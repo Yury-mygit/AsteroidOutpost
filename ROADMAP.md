@@ -1158,6 +1158,36 @@ Pull-request-style полировка: каждое оружие имеет св
 - 🟡 Боковые турели — pitch (ствол поднимается на лету). Сейчас только yaw. ТЗ концепта «Вид 3» предусматривал, отложено.
 - 🟡 Balance combat-missions: HP/damage/fire-rate (текущие значения — first-pass).
 
+## Сессия 2026-05-12 — Enemy-ship mesh + server API contract + Kotlin net-scaffold
+
+### Enemy ship `.glb` (комбат-миссии)
+- `tools/build_enemy_ship_glb.py` — генератор `.glb` через struct/json без зависимостей. Параметры (cockpit/wing/strut/engine half-extents, цвета материалов) сверху файла. Запускается `python tools/build_enemy_ship_glb.py`, переписывает `art/Enemy_Ship.glb`. Re-run после каждого тюна → копируем в `app/src/main/assets/models/`.
+- Геометрия: TIE-fighter-ish — кокпит-куб + 2 крыла-панели на ±X + struts + engine-блок на -Y. 72 trianglesа, 3 primitives (hull / wing / engine) с разными `baseColorFactor` (GltfLoader мерджит в один меш с per-vertex colour, baked at load).
+- Авторено в игровой world-конвенции (+Z up, +Y forward) — SceneAssembler рендерит без дополнительных rotation-трансформов.
+- `MissionRunner.spawnEnemyShip` использует `enemyShipMeshHandle` с fallback на `asteroidMeshHeavy`. Прокинуто через `attachAssets`.
+
+### Server API contract (готов к передаче другому агенту-серверу)
+Решение: вынести каталог миссий, прогресс и telemetry на сервер. Сервер делает другой агент; мне — design + Kotlin клиент.
+
+- **`docs/api/API.md`** — человекочитаемая спецификация. Auth (device-token, Bearer), missions list/detail, progress get/put с revision-based conflict resolution, telemetry session/frames/close. Error catalogue, rate limits, schema versioning (URL `/v1` + mission `schemaVersion` field для forward-compat), implementation notes для server team, deferred-в-v1 фичи.
+- **`docs/api/openapi.yaml`** — OpenAPI 3.0 формальный контракт. Все schemas: `MissionSummary`, `MissionConfig`, `Wave`, `Route`, `RoutePlacement`, `EnemyShipSpawn`, `Progress`, `ProgressRequest`, `TelemetryFrame` + asteroid/enemy sub-schemas, error envelopes. Code-gen-friendly.
+- Base URL: `https://api.g4.raftforge.art/api/v1`.
+
+### Kotlin network-стек
+- Deps в `libs.versions.toml`: OkHttp 4.12 + logging-interceptor + Gson 2.11 (reflection-based — без kotlinx-serialization compiler plugin'а, который мог бы конфликтнуть с AGP9 kotlin-extension policy).
+- `INTERNET` + `ACCESS_NETWORK_STATE` в `AndroidManifest.xml`.
+- Пакет `com.example.asteroidoutpost.net/`:
+  - `ApiClient` — OkHttp wrapper. Token + device-UUID в `SharedPreferences("api_credentials")`. Three interceptors: auth-header, common-headers (`X-Client-Platform`, `X-Client-Version`, `X-Request-Id`), HTTP logging. Все вызовы → `ApiResult.Success<T>` / `ApiResult.Failure(code, message)` — никаких exception'ов в gameplay.
+  - `Models.kt` — Gson DTOs зеркалят OpenAPI 1-к-1.
+  - `AuthService` (wired) — `ensureToken()` / `refresh()`. POST `/auth/device`.
+  - `MissionService`, `ProgressService`, `TelemetryService` (stubs, signatures готовы) — ожидают server-side готовности + wire-up в screens / runner.
+- В `MainActivity.onCreate`: silent background `Thread("ApiBootstrap").start { authService.ensureToken() }`. На первом запуске устройство регистрируется, токен кешится; на последующих — без сети.
+
+### Чего ещё не сделано (когда сервер будет готов)
+- Wire `MissionService` в Campaign / RandomMissionsOverlay — заменить `Missions.ALL` на server fetch, mapper `MissionConfigDto` → `MissionConfig`, offline-fallback на bundled.
+- Wire `ProgressService` в `ProgressRepository` — dual-write локально+сервер, fetch на старте + reconciliation.
+- Wire `TelemetryService` в `MissionRunner` — buffer frames, batch raз в 1 sec через `flushFrames`, openSession/closeSession по startMission/showWin/showLose.
+
 ## Старый бэклог (мелкая шерсть)
 
 Сохранён до решения по релевантности:
