@@ -375,6 +375,18 @@ internal object DraftCombat {
     // the warm muzzle tint when firing the railgun. Slightly brighter
     // than the regular muzzle sparks for the "energetic discharge" read.
     val SPARK_TINT_RAILGUN     = floatArrayOf(0.55f, 0.90f, 1.00f)
+
+    // Рельсотрон tracer beam — drawn through the beam pipeline from the
+    // muzzle (Projectile.originXYZ) to the current projectile position.
+    // Width is the world-space half-thickness of the beam quad; tint is
+    // forwarded to beam.frag as pc.color. Premultiplied alpha is handled
+    // by the shader (additive ONE/ONE).
+    const val RAILGUN_TRAIL_HALF_W: Float = 0.06f
+    val RAILGUN_TRAIL_TINT       = floatArrayOf(0.30f, 0.70f, 1.00f, 0.90f)
+    /** Distance forward of the muzzle along the firing direction where
+     *  the tracer beam STARTS. Keeps the trail visibly clear of the
+     *  central cannon / ship hull instead of pasting it onto the barrel. */
+    const val RAILGUN_TRAIL_FORWARD_GAP: Float = 0.9f
     // E7.1 polish — fireball colour curve. Lerp start → end over life
     // gives a "hot fresh blast → cooling embers" read instead of a
     // single static orange. Brightness is handled separately via the

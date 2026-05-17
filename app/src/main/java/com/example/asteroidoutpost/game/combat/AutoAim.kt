@@ -51,6 +51,7 @@ internal fun isWithinArc(a: Asteroid, sx: Float, sz: Float, halfArcRad: Float): 
 internal fun centralWeaponHalfArc(weaponId: WeaponId): Float = when (weaponId) {
     WeaponId.HEAVY_CANNON -> DraftCombat.ARC_CENTRAL_CANNON_HALF_RAD
     WeaponId.AUTOMATIC    -> DraftCombat.ARC_CENTRAL_MG_HALF_RAD
+    WeaponId.RAILGUN      -> DraftCombat.ARC_CENTRAL_CANNON_HALF_RAD
 }
 
 /**

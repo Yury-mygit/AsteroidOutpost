@@ -103,28 +103,128 @@ internal class Projectile(
     // E10.3 — previous-frame position for motion-vector tracking.
     var prevX: Float = x, var prevY: Float = y, var prevZ: Float = z,
     val behaviour: ProjectileBehavior,
+    // Origin = world position of the muzzle at fire time. Used by the
+    // SceneAssembler to draw a "tracer" beam from the muzzle to the
+    // current projectile position. For projectiles without a trail
+    // (Автомат / Пушка) this is just the spawn point and never read.
+    val originX: Float = x,
+    val originY: Float = 0f,
+    val originZ: Float = z,
+    // Tracer beam parameters. `trailColor == null` → no trail rendered.
+    // Used by Рельсотрон for its signature blue streak; other weapons
+    // leave it null.
+    val trailColor: FloatArray? = null,
+    val trailWidth: Float = 0f,
+    // Ship's Y position at the instant the projectile was spawned. The
+    // trail's origin is stored in world coords, but the ship continues
+    // to move forward in +Y between spawn and render. SceneAssembler
+    // offsets originY by (current shipPosY − spawnShipPosY) so the trail
+    // start "rides" the ship instead of being left behind at the
+    // launch point (which would otherwise end up inside the hull).
+    val spawnShipPosY: Float = 0f,
 ) : WeaponEffect {
     override fun tick(dt: Float, ctx: WeaponEffectContext): Boolean {
         prevX = x; prevY = y; prevZ = z
         behaviour.tick(this, dt, ctx)
-        x += vx * dt; y += vy * dt; z += vz * dt
-        if (z > DraftCombat.SCREEN_TOP_Z + 1f ||
-            z < DraftCombat.SCREEN_BOTTOM_Z - 1f ||
-            x < -DraftCombat.SCREEN_HALF_W - 1f ||
-            x >  DraftCombat.SCREEN_HALF_W + 1f ||
-            y < -2f ||                                // passed the camera plane
-            y > 1000f) return true                    // effectively unlimited forward range
-        // 3D-AABB collision against the first live asteroid we touch.
+        val nx = x + vx * dt
+        val ny = y + vy * dt
+        val nz = z + vz * dt
+        if (nz > DraftCombat.SCREEN_TOP_Z + 1f ||
+            nz < DraftCombat.SCREEN_BOTTOM_Z - 1f ||
+            nx < -DraftCombat.SCREEN_HALF_W - 1f ||
+            nx >  DraftCombat.SCREEN_HALF_W + 1f ||
+            ny < -2f ||                                // passed the camera plane
+            ny > 1000f) {
+            x = nx; y = ny; z = nz
+            return true                                // effectively unlimited forward range
+        }
+        // Swept collision — segment (prev → next) against each asteroid's
+        // AABB expanded by the projectile's half-size. Point-sample at `nx`
+        // alone would tunnel through asteroids at high speed (e.g. RAILGUN
+        // 108 ед/с × dt ≈ 1.7 ед/кадр > asteroid radius ≈ 0.5), making
+        // hits feel "ghostly". Pick the earliest intersecting asteroid and
+        // snap the projectile to the impact point before invoking onImpact
+        // so VFX spawns at the surface, not past it.
+        var bestT     = Float.POSITIVE_INFINITY
+        var bestHit: Asteroid? = null
         for (a in ctx.asteroids) {
             if (a.hp <= 0) continue
-            if (kotlin.math.abs(x - a.xPos) < a.half + halfW &&
-                kotlin.math.abs(y - a.yPos) < a.half + halfH &&
-                kotlin.math.abs(z - a.zPos) < a.half + halfH) {
-                return behaviour.onImpact(this, a, ctx)
+            val t = segmentVsAabb(
+                prevX, prevY, prevZ, nx, ny, nz,
+                a.xPos, a.yPos, a.zPos,
+                a.half + halfW, a.half + halfH, a.half + halfH,
+            )
+            if (t in 0f..1f && t < bestT) {
+                bestT  = t
+                bestHit = a
             }
         }
+        if (bestHit != null) {
+            x = prevX + (nx - prevX) * bestT
+            y = prevY + (ny - prevY) * bestT
+            z = prevZ + (nz - prevZ) * bestT
+            return behaviour.onImpact(this, bestHit, ctx)
+        }
+        x = nx; y = ny; z = nz
         return false
     }
+}
+
+/**
+ * Slab test — earliest intersection of segment [(p0..),(p1..)] with the
+ * AABB centered at (cx,cy,cz) with half-sizes (hx,hy,hz). Returns `t` in
+ * [0,1] for the entry point, or a sentinel < 0 if no hit. Standard
+ * Kay-Kajiya / Smits algorithm: per-axis slabs intersect into a
+ * [tMin, tMax] interval; the segment hits iff that interval overlaps [0,1].
+ */
+private fun segmentVsAabb(
+    p0x: Float, p0y: Float, p0z: Float,
+    p1x: Float, p1y: Float, p1z: Float,
+    cx: Float, cy: Float, cz: Float,
+    hx: Float, hy: Float, hz: Float,
+): Float {
+    var tMin = 0f
+    var tMax = 1f
+    // X slab
+    val dx = p1x - p0x
+    if (kotlin.math.abs(dx) < 1e-7f) {
+        if (p0x < cx - hx || p0x > cx + hx) return -1f
+    } else {
+        val inv = 1f / dx
+        var t1 = (cx - hx - p0x) * inv
+        var t2 = (cx + hx - p0x) * inv
+        if (t1 > t2) { val tmp = t1; t1 = t2; t2 = tmp }
+        if (t1 > tMin) tMin = t1
+        if (t2 < tMax) tMax = t2
+        if (tMin > tMax) return -1f
+    }
+    // Y slab
+    val dy = p1y - p0y
+    if (kotlin.math.abs(dy) < 1e-7f) {
+        if (p0y < cy - hy || p0y > cy + hy) return -1f
+    } else {
+        val inv = 1f / dy
+        var t1 = (cy - hy - p0y) * inv
+        var t2 = (cy + hy - p0y) * inv
+        if (t1 > t2) { val tmp = t1; t1 = t2; t2 = tmp }
+        if (t1 > tMin) tMin = t1
+        if (t2 < tMax) tMax = t2
+        if (tMin > tMax) return -1f
+    }
+    // Z slab
+    val dz = p1z - p0z
+    if (kotlin.math.abs(dz) < 1e-7f) {
+        if (p0z < cz - hz || p0z > cz + hz) return -1f
+    } else {
+        val inv = 1f / dz
+        var t1 = (cz - hz - p0z) * inv
+        var t2 = (cz + hz - p0z) * inv
+        if (t1 > t2) { val tmp = t1; t1 = t2; t2 = tmp }
+        if (t1 > tMin) tMin = t1
+        if (t2 < tMax) tMax = t2
+        if (tMin > tMax) return -1f
+    }
+    return tMin
 }
 
 /**

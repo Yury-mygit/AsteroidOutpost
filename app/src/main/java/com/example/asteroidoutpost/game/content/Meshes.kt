@@ -234,6 +234,16 @@ internal const val TURRET_CANNON_HALF_THICK: Float = 0.07f
 internal const val TURRET_CANNON_MUZZLE_LENGTH: Float = 0.08f
 internal const val TURRET_CANNON_MUZZLE_HALF_W: Float = 0.10f
 
+/**
+ * World-Z of the cannon SceneObject, relative to `PLATFORM_TOP_Z`. The cannon
+ * mesh sits on top of the static base + rotating tower, with a small anti-Z-fight
+ * nudge. Single source of truth so the visual placement (SceneAssembler) and
+ * the gameplay muzzle-spawn point (MissionRunner) stay in sync — drifting them
+ * apart was the «выстрел не от ствола» bug.
+ */
+internal const val CENTRAL_CANNON_Z_ABOVE_PLATFORM: Float =
+    TURRET_BASE_Y_HEIGHT + TURRET_TOWER_Y_HEIGHT + TURRET_CANNON_HALF_THICK + 0.015f
+
 internal fun buildTurretBaseMesh(
     engine: EngineJni,
     halfW: Float, height: Float,

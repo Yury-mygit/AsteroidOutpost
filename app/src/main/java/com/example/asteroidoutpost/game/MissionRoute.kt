@@ -38,53 +38,126 @@ data class MissionRoute(
 )
 
 /**
- * Hardcoded routes. Minimum slice — one corridor, used by mission 6.
+ * Campaign corridors. Five tunnels of growing length / density, each
+ * onboarding one new asteroid type so the player meets the bestiary in
+ * stages (same curriculum as the old wave-based campaign, just delivered
+ * as a forward flight instead of "defend the platform").
+ *
+ *  1. NORMAL only        — learn tap-priority + manual fire.
+ *  2. + FAST             — learn to swing the turret quickly.
+ *  3. + HEAVY (+ENERGY)  — first useful shield moment.
+ *  4. + EXPLOSIVE        — AoE chain reactions.
+ *  5. all five types     — graduation, long corridor at full density.
  */
 object MissionRoutes {
 
-    /** First corridor — procedurally generated for a uniform-volume feel
-     *  (handful of fixed unkillable test rocks + ~35 random fillers).
-     *
-     *  Y starts at 70 so the first asteroid materialises ~10 sec into the
-     *  run (empty lead-in). Y range ends at 195; corridor [endY] = 215
-     *  gives the trailing rocks time to fly past the ship before the win
-     *  condition triggers (`shipDist >= endY AND asteroids empty`).
-     *
-     *  Three asteroids tagged hpOverride = 1_000_000 — turrets can't kill
-     *  them in flight, guaranteed to crash into the shield. Used to test
-     *  impact bloom + shield depletion. */
-    val FIRST_CORRIDOR: MissionRoute = generateUniformCorridor(
+    val CAMPAIGN_1: MissionRoute = generateUniformCorridor(
+        startY        = 40f,
+        endY          = 95f,
+        corridorEndY  = 110f,
+        fillerCount   = 16,
+        xRange        = -3.5f to 3.5f,
+        zRange        = -1.5f to 5.0f,
+        seed          = 1001L,
+        typeWeights   = mapOf(
+            AsteroidType.NORMAL to 1.0f,
+        ),
+    )
+
+    val CAMPAIGN_2: MissionRoute = generateUniformCorridor(
+        startY        = 50f,
+        endY          = 130f,
+        corridorEndY  = 145f,
+        fillerCount   = 30,
+        xRange        = -4.0f to 4.0f,
+        zRange        = -1.5f to 5.5f,
+        seed          = 1002L,
+        typeWeights   = mapOf(
+            AsteroidType.NORMAL to 0.55f,
+            AsteroidType.FAST   to 0.45f,
+        ),
+    )
+
+    val CAMPAIGN_3: MissionRoute = generateUniformCorridor(
+        startY        = 55f,
+        endY          = 155f,
+        corridorEndY  = 170f,
+        fillerCount   = 42,
+        xRange        = -4.2f to 4.2f,
+        zRange        = -2.0f to 5.5f,
+        seed          = 1003L,
+        typeWeights   = mapOf(
+            AsteroidType.NORMAL to 0.50f,
+            AsteroidType.HEAVY  to 0.40f,
+            AsteroidType.ENERGY to 0.10f,
+        ),
+    )
+
+    val CAMPAIGN_4: MissionRoute = generateUniformCorridor(
+        startY        = 60f,
+        endY          = 175f,
+        corridorEndY  = 195f,
+        fillerCount   = 55,
+        xRange        = -4.3f to 4.3f,
+        zRange        = -2.0f to 6.0f,
+        seed          = 1004L,
+        typeWeights   = mapOf(
+            AsteroidType.NORMAL    to 0.40f,
+            AsteroidType.EXPLOSIVE to 0.40f,
+            AsteroidType.FAST      to 0.15f,
+            AsteroidType.ENERGY    to 0.05f,
+        ),
+    )
+
+    val CAMPAIGN_5: MissionRoute = generateUniformCorridor(
         startY        = 70f,
-        endY          = 195f,
-        fillerCount   = 60,
+        endY          = 215f,
+        corridorEndY  = 235f,
+        fillerCount   = 80,
         xRange        = -4.5f to 4.5f,
         zRange        = -2.0f to 6.0f,
-        seed          = 4242L,
-        unkillables   = emptyList(),
-        corridorEndY  = 215f,
+        seed          = 1005L,
+        typeWeights   = mapOf(
+            AsteroidType.NORMAL    to 0.25f,
+            AsteroidType.FAST      to 0.20f,
+            AsteroidType.HEAVY     to 0.25f,
+            AsteroidType.EXPLOSIVE to 0.25f,
+            AsteroidType.ENERGY    to 0.05f,
+        ),
     )
 
     /**
      * Procedural corridor — uniform random (x, z) per asteroid, Y drawn
      * from a stratified grid + jitter so the spacing along the route
-     * is roughly even but never perfectly periodic. Type is weighted
-     * (60 % NORMAL, 25 % FAST, 15 % HEAVY).
+     * is roughly even but never perfectly periodic. Type sampled from
+     * [typeWeights] (need not sum to 1; normalised here).
      *
      * Reproducible by `seed` — same input always builds the same route.
      */
     private fun generateUniformCorridor(
         startY: Float,
         endY: Float,
+        corridorEndY: Float,
         fillerCount: Int,
         xRange: Pair<Float, Float>,
         zRange: Pair<Float, Float>,
         seed: Long,
-        unkillables: List<Triple<Float, Float, Float>>,
-        corridorEndY: Float,
+        typeWeights: Map<AsteroidType, Float>,
     ): MissionRoute {
         val rng = kotlin.random.Random(seed)
         val (xMin, xMax) = xRange
         val (zMin, zMax) = zRange
+        // Pre-flatten the weights into parallel arrays + a cumulative
+        // sum so each sample is a single binary search.
+        val totalWeight = typeWeights.values.sum().coerceAtLeast(1e-6f)
+        val types       = typeWeights.keys.toTypedArray()
+        val cumulative  = FloatArray(types.size).also { acc ->
+            var run = 0f
+            typeWeights.values.forEachIndexed { i, w ->
+                run += w / totalWeight
+                acc[i] = run
+            }
+        }
         // Stratified Y sampling — divide [startY, endY] into `fillerCount`
         // equal cells, pick one Y inside each (with jitter inside the cell).
         // Guarantees uniform-ish coverage without empty stretches.
@@ -94,23 +167,19 @@ object MissionRoutes {
             val y     = yBase + rng.nextFloat() * cellY
             val x     = xMin + rng.nextFloat() * (xMax - xMin)
             val z     = zMin + rng.nextFloat() * (zMax - zMin)
-            val type  = pickType(rng)
+            val type  = pickType(rng, types, cumulative)
             AsteroidPlacement(x, y, z, type)
         }
-        val unkillablePlacements = unkillables.map { (y, x, z) ->
-            AsteroidPlacement(x, y, z, AsteroidType.HEAVY, hpOverride = 1_000_000)
-        }
-        // Merge + sort by absY ascending (MissionRunner walks a single cursor).
-        val all = (fillers + unkillablePlacements).sortedBy { it.absY }
-        return MissionRoute(endY = corridorEndY, asteroids = all)
+        return MissionRoute(endY = corridorEndY, asteroids = fillers)
     }
 
-    private fun pickType(rng: kotlin.random.Random): AsteroidType {
+    private fun pickType(
+        rng: kotlin.random.Random,
+        types: Array<AsteroidType>,
+        cumulative: FloatArray,
+    ): AsteroidType {
         val r = rng.nextFloat()
-        return when {
-            r < 0.60f -> AsteroidType.NORMAL
-            r < 0.85f -> AsteroidType.FAST
-            else      -> AsteroidType.HEAVY
-        }
+        for (i in cumulative.indices) if (r < cumulative[i]) return types[i]
+        return types.last()
     }
 }

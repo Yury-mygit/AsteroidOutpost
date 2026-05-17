@@ -23,6 +23,8 @@ import com.example.asteroidoutpost.game.combat.VfxSpawner
 import com.example.asteroidoutpost.game.combat.WeaponEffect
 import com.example.asteroidoutpost.game.combat.WeaponEffectContext
 import com.example.asteroidoutpost.game.combat.bestHpTargetInArc
+import com.example.asteroidoutpost.game.content.CENTRAL_CANNON_Z_ABOVE_PLATFORM
+import com.example.asteroidoutpost.game.content.TURRET_CANNON_LENGTH
 import com.example.asteroidoutpost.game.combat.centralWeaponHalfArc
 import com.example.asteroidoutpost.game.combat.isWithinArc
 import com.example.asteroidoutpost.game.combat.nearestAsteroidInArc
@@ -83,6 +85,7 @@ internal class MissionRunner(
     private var rocketMeshHandle:        Long = 0L
     private var bulletMeshHandle:        Long = 0L
     private var bulletHeavyMeshHandle:   Long = 0L
+    private var bulletRailgunMeshHandle: Long = 0L
     private var asteroidMeshGrey1:       Long = 0L
     private var asteroidMeshGrey2:       Long = 0L
     private var asteroidMeshHeavy:       Long = 0L
@@ -96,6 +99,7 @@ internal class MissionRunner(
         rocketMeshHandle: Long,
         bulletMeshHandle: Long,
         bulletHeavyMeshHandle: Long,
+        bulletRailgunMeshHandle: Long,
         asteroidMeshGrey1: Long,
         asteroidMeshGrey2: Long,
         asteroidMeshHeavy: Long,
@@ -106,8 +110,9 @@ internal class MissionRunner(
         this.hud = hud
         this.vfx = vfx
         this.rocketMeshHandle      = rocketMeshHandle
-        this.bulletMeshHandle      = bulletMeshHandle
-        this.bulletHeavyMeshHandle = bulletHeavyMeshHandle
+        this.bulletMeshHandle        = bulletMeshHandle
+        this.bulletHeavyMeshHandle   = bulletHeavyMeshHandle
+        this.bulletRailgunMeshHandle = bulletRailgunMeshHandle
         this.asteroidMeshGrey1     = asteroidMeshGrey1
         this.asteroidMeshGrey2     = asteroidMeshGrey2
         this.asteroidMeshHeavy     = asteroidMeshHeavy
@@ -1058,19 +1063,26 @@ internal class MissionRunner(
             val ang = centralTurretAngle
             val sinA = kotlin.math.sin(ang)
             val cosA = kotlin.math.cos(ang)
-            val muzzleR = DraftCombat.CENTRAL_TURRET_HALF_H * 2f
             // Concept «Вид 3»: cannon lies flat with +Y forward after the
             // pivot's Rx(-π/2). Rz(ang) rotates the forward vector
-            // (0,1,0) to (-sin(ang), cos(ang), 0). Muzzle = pivot +
-            // direction * R; muzzleZ stays at the tower-top elevation.
+            // (0,1,0) to (-sin(ang), cos(ang), 0). Muzzle = barrel tip.
+            // Distance from yaw pivot = cannon mesh length (0.55).
+            // Z = cannon SceneObject Z (top of base + tower + half-thick
+            // + anti-Z-fight nudge) — NOT pivotZ, which is at the base
+            // collar and ~0.3 units below the barrel.
+            val muzzleR = TURRET_CANNON_LENGTH
             val muzzleX = pivotX + (-sinA) * muzzleR
             val muzzleY = pivotY + cosA * muzzleR
-            val muzzleZ = pivotZ
-            // Heavy cannon → Bullet_Heavy.glb (chunky shell), automatic →
-            // Bullet.glb (slim round). aoeRadius is the fire-mode tell —
-            // only the heavy cannon ships AoE.
-            val bulletMesh = if (weapon.aoeRadius > 0f) bulletHeavyMeshHandle
-                             else                       bulletMeshHandle
+            val muzzleZ = DraftCombat.PLATFORM_TOP_Z + CENTRAL_CANNON_Z_ABOVE_PLATFORM
+            // Per-weapon mesh + behaviour. Пушка (HEAVY_CANNON) → fat
+            // Bullet_Heavy.glb + AoE behaviour. Рельсотрон (RAILGUN) →
+            // slim Bullet.glb tinted electric-blue + plain bullet (no AoE).
+            // Автомат (AUTOMATIC) → slim Bullet.glb (warm brass) + plain.
+            val bulletMesh = when (weapon.id) {
+                WeaponId.HEAVY_CANNON -> bulletHeavyMeshHandle
+                WeaponId.RAILGUN      -> bulletRailgunMeshHandle
+                WeaponId.AUTOMATIC    -> bulletMeshHandle
+            }
             val centralBehaviour: ProjectileBehavior =
                 if (weapon.aoeRadius > 0f)
                     HeavyShellBehavior(
@@ -1078,6 +1090,13 @@ internal class MissionRunner(
                         aoeDamage = (weaponDamage * weapon.aoeDamageMultiplier).toInt(),
                     )
                 else PlainBulletBehavior()
+            // Рельсотрон leaves a long blue tracer beam from muzzle to
+            // projectile (drawn by SceneAssembler through the beam
+            // pipeline). Other weapons fly bare.
+            val trailColor = if (weapon.id == WeaponId.RAILGUN)
+                DraftCombat.RAILGUN_TRAIL_TINT else null
+            val trailWidth = if (weapon.id == WeaponId.RAILGUN)
+                DraftCombat.RAILGUN_TRAIL_HALF_W else 0f
             // 3D-pivot Phase 2/3: aim the bullet at the target's full
             // (x, y, z), not just (x, z). Muzzle stays on the deck
             // plane (Y=0); velocity vector is the unit direction to the
@@ -1090,43 +1109,53 @@ internal class MissionRunner(
             val tdy = lead[1] - muzzleY
             val tdz = lead[2] - muzzleZ
             val tlen = kotlin.math.sqrt(tdx * tdx + tdy * tdy + tdz * tdz).coerceAtLeast(1e-4f)
+            // Tracer origin = muzzle nudged forward along the firing
+            // direction by RAILGUN_TRAIL_FORWARD_GAP, so the visible
+            // tracer starts a beat ahead of the barrel instead of
+            // overlapping the cannon and hull. spawnShipPosY captures
+            // the ship's Y at fire time so SceneAssembler can track the
+            // trail forward with the moving ship.
+            val gap = if (weapon.id == WeaponId.RAILGUN)
+                DraftCombat.RAILGUN_TRAIL_FORWARD_GAP else 0f
+            val unitX = tdx / tlen
+            val unitY = tdy / tlen
+            val unitZ = tdz / tlen
             effects.add(Projectile(
                 x  = muzzleX,
                 y  = muzzleY,
                 z  = muzzleZ,
-                vx = tdx / tlen * pSpeed,
-                vy = tdy / tlen * pSpeed,
-                vz = tdz / tlen * pSpeed,
+                vx = unitX * pSpeed,
+                vy = unitY * pSpeed,
+                vz = unitZ * pSpeed,
                 damage = weaponDamage,
                 halfW = weapon.projectileHalfW,
                 halfH = weapon.projectileHalfH,
                 meshHandle = bulletMesh,
                 behaviour  = centralBehaviour,
+                originX    = muzzleX + unitX * gap,
+                originY    = muzzleY + unitY * gap,
+                originZ    = muzzleZ + unitZ * gap,
+                trailColor = trailColor,
+                trailWidth = trailWidth,
+                spawnShipPosY = shipPosY,
             ))
-            // E12 — Railgun (HEAVY_CANNON) gets the lightning discharge
-            // muzzle stack: bright cyan-white core flash + 5-7
-            // procedural electric arcs perpendicular to the barrel +
-            // cyan sparks. Other weapons (Автомат, future additions)
-            // keep the warm cone-trefoil muzzle blast — the asymmetry
-            // makes the player's primary railgun read as a unique,
-            // higher-tier weapon.
-            if (weapon.id == WeaponId.HEAVY_CANNON) {
+            // Muzzle VFX is the weapon's signature read:
+            //   Рельсотрон (RAILGUN) → lightning discharge (cyan-white core
+            //     flash + 5-7 procedural electric arcs + cyan sparks). The
+            //     "real" electromagnetic launcher visual.
+            //   Пушка (HEAVY_CANNON) + Автомат (AUTOMATIC) → warm
+            //     cone-trefoil muzzle blast + warm sparks. Size scales by
+            //     projectileHalfW, so Пушка naturally pops bigger.
+            if (weapon.id == WeaponId.RAILGUN) {
                 vfx.spawnRailgunMuzzle(muzzleX, muzzleY, muzzleZ, sinA, cosA,
                                    weapon.projectileHalfW)
                 vfx.spawnRailgunSparks(muzzleX, muzzleY, muzzleZ,
                                    sinA * weapon.projectileSpeed,
                                    cosA * weapon.projectileSpeed)
             } else {
-                // Muzzle blast — cannon-with-brake shape (central pop +
-                // forward plume + 2 perpendicular vents). Sized by the
-                // weapon's projectile half-width so the heavy cannon pops
-                // bigger than the automatic.
                 vfx.spawnMuzzleBlast(muzzleX, muzzleY, muzzleZ, sinA, cosA,
                                  weapon.projectileHalfW,
                                  DraftCombat.FLASH_TINT_MUZZLE)
-                // E9 — micro-sparks fanning out of the barrel along the
-                // bullet velocity. Brief (~0.1s) so they punctuate the
-                // shot without obscuring the muzzle blast cluster.
                 vfx.spawnMuzzleSparks(muzzleX, muzzleY, muzzleZ,
                                   sinA * weapon.projectileSpeed,
                                   cosA * weapon.projectileSpeed)

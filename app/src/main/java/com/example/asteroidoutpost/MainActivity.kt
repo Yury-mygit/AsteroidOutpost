@@ -116,13 +116,15 @@ class MainActivity : AppCompatActivity() {
     private var asteroidMeshExplosive: Long = 0L  // Asteroid_4.glb orange   (EXPLOSIVE)
     private var asteroidMeshEnergy:    Long = 0L  // Asteroid_9.glb cyan     (ENERGY)
     // Bullet meshes (replace red-quad placeholders).
-    private var bulletMeshHandle:      Long = 0L  // Bullet.glb        (automatic + side turrets)
-    private var bulletHeavyMeshHandle: Long = 0L  // Bullet_Heavy.glb  (heavy cannon)
+    private var bulletMeshHandle:        Long = 0L  // Bullet.glb        (automatic + side turrets)
+    private var bulletHeavyMeshHandle:   Long = 0L  // Bullet_Heavy.glb  (heavy cannon)
+    private var bulletRailgunMeshHandle: Long = 0L  // Bullet.glb        (railgun — blue tint)
     private var droneMeshHandle:       Long = 0L  // ship.gltf — DRONES ability
     private var enemyShipMeshHandle:   Long = 0L  // Enemy_Ship.glb — combat-mission antagonist
     private var quadFlashHandle:    Long = 0L  // unit X-Z quad, bright yellow (destruction flash)
     private var quadHpBgHandle:     Long = 0L  // unit X-Z quad, dark grey (HP-bar background)
-    private var quadHpFgHandle:     Long = 0L  // unit X-Z quad, green (HP-bar fill)
+    private var quadHpFgHandle:     Long = 0L  // unit X-Z quad, green (HP-bar structure fill)
+    private var quadHpShieldHandle: Long = 0L  // unit X-Z quad, cyan (HP-bar shield fill)
     // Background nebulae — soft-edge disks (E1.4) loaded via `loadMeshRaw`.
     // Each disk is a triangle fan: centre vertex alpha=1, rim vertices alpha=0,
     // so when rendered through the translucent pipeline it fades smoothly to
@@ -640,14 +642,16 @@ class MainActivity : AppCompatActivity() {
             quadGreyHandle  = engineView.engine.loadMeshColored(quadBytes, 0.55f, 0.55f, 0.60f)
             quadBlueHandle  = engineView.engine.loadMeshColored(quadBytes, 0.30f, 0.55f, 1.00f)
             quadFlashHandle = engineView.engine.loadMeshColored(quadBytes, 1.00f, 0.85f, 0.30f)
-            quadHpBgHandle  = engineView.engine.loadMeshColored(quadBytes, 0.18f, 0.20f, 0.22f)
-            quadHpFgHandle  = engineView.engine.loadMeshColored(quadBytes, 0.30f, 0.85f, 0.35f)
-            if (quadMeshHandle  == 0L) quadMeshHandle  = engineView.engine.loadMesh(quadBytes)
-            if (quadGreyHandle  == 0L) quadGreyHandle  = engineView.engine.loadMesh(quadBytes)
-            if (quadBlueHandle  == 0L) quadBlueHandle  = engineView.engine.loadMesh(quadBytes)
-            if (quadFlashHandle == 0L) quadFlashHandle = engineView.engine.loadMesh(quadBytes)
-            if (quadHpBgHandle  == 0L) quadHpBgHandle  = engineView.engine.loadMesh(quadBytes)
-            if (quadHpFgHandle  == 0L) quadHpFgHandle  = engineView.engine.loadMesh(quadBytes)
+            quadHpBgHandle     = engineView.engine.loadMeshColored(quadBytes, 0.18f, 0.20f, 0.22f)
+            quadHpFgHandle     = engineView.engine.loadMeshColored(quadBytes, 0.30f, 0.85f, 0.35f)
+            quadHpShieldHandle = engineView.engine.loadMeshColored(quadBytes, 0.30f, 0.80f, 1.00f)
+            if (quadMeshHandle      == 0L) quadMeshHandle      = engineView.engine.loadMesh(quadBytes)
+            if (quadGreyHandle      == 0L) quadGreyHandle      = engineView.engine.loadMesh(quadBytes)
+            if (quadBlueHandle      == 0L) quadBlueHandle      = engineView.engine.loadMesh(quadBytes)
+            if (quadFlashHandle     == 0L) quadFlashHandle     = engineView.engine.loadMesh(quadBytes)
+            if (quadHpBgHandle      == 0L) quadHpBgHandle      = engineView.engine.loadMesh(quadBytes)
+            if (quadHpFgHandle      == 0L) quadHpFgHandle      = engineView.engine.loadMesh(quadBytes)
+            if (quadHpShieldHandle  == 0L) quadHpShieldHandle  = engineView.engine.loadMesh(quadBytes)
             if (quadMeshHandle == 0L || quadGreyHandle == 0L || quadBlueHandle == 0L || quadFlashHandle == 0L)
                 showStatus("Quad load failed (handle=0)")
         } catch (e: Exception) {
@@ -684,11 +688,17 @@ class MainActivity : AppCompatActivity() {
             // Brass-and-copper tint on the regular bullet so it reads warm against
             // the dark space background; heavier shell gets a slightly cooler steely
             // tone for a heftier feel.
-            bulletMeshHandle      = engineView.engine.loadMeshColored(bulletBytes, 1.00f, 0.85f, 0.55f)
-            bulletHeavyMeshHandle = engineView.engine.loadMeshColored(heavyBytes,  0.90f, 0.80f, 0.60f)
-            if (bulletMeshHandle      == 0L) bulletMeshHandle      = engineView.engine.loadMesh(bulletBytes)
-            if (bulletHeavyMeshHandle == 0L) bulletHeavyMeshHandle = engineView.engine.loadMesh(heavyBytes)
-            if (bulletHeavyMeshHandle == 0L) bulletHeavyMeshHandle = bulletMeshHandle
+            bulletMeshHandle        = engineView.engine.loadMeshColored(bulletBytes, 1.00f, 0.85f, 0.55f)
+            bulletHeavyMeshHandle   = engineView.engine.loadMeshColored(heavyBytes,  0.90f, 0.80f, 0.60f)
+            // Railgun shares Bullet.glb geometry (slim slug) but with a cool
+            // electric-blue per-vertex tint so the slug reads as the Рельсотрон
+            // round even before the blue tracer beam catches up.
+            bulletRailgunMeshHandle = engineView.engine.loadMeshColored(bulletBytes, 0.30f, 0.70f, 1.00f)
+            if (bulletMeshHandle        == 0L) bulletMeshHandle        = engineView.engine.loadMesh(bulletBytes)
+            if (bulletHeavyMeshHandle   == 0L) bulletHeavyMeshHandle   = engineView.engine.loadMesh(heavyBytes)
+            if (bulletRailgunMeshHandle == 0L) bulletRailgunMeshHandle = engineView.engine.loadMesh(bulletBytes)
+            if (bulletHeavyMeshHandle   == 0L) bulletHeavyMeshHandle   = bulletMeshHandle
+            if (bulletRailgunMeshHandle == 0L) bulletRailgunMeshHandle = bulletMeshHandle
             if (bulletMeshHandle == 0L) showStatus("Bullet meshes load failed")
         } catch (e: Exception) {
             showStatus("Bullet mesh load failed: ${e.message}")
@@ -904,9 +914,10 @@ class MainActivity : AppCompatActivity() {
         missionRunner.attachAssets(
             hud                   = hud,
             vfx                   = vfx,
-            rocketMeshHandle      = rocketMeshHandle,
-            bulletMeshHandle      = bulletMeshHandle,
-            bulletHeavyMeshHandle = bulletHeavyMeshHandle,
+            rocketMeshHandle        = rocketMeshHandle,
+            bulletMeshHandle        = bulletMeshHandle,
+            bulletHeavyMeshHandle   = bulletHeavyMeshHandle,
+            bulletRailgunMeshHandle = bulletRailgunMeshHandle,
             asteroidMeshGrey1     = asteroidMeshGrey1,
             asteroidMeshGrey2     = asteroidMeshGrey2,
             asteroidMeshHeavy     = asteroidMeshHeavy,
@@ -937,6 +948,7 @@ class MainActivity : AppCompatActivity() {
             quadMeshHandle           = quadMeshHandle,
             quadHpBgHandle           = quadHpBgHandle,
             quadHpFgHandle           = quadHpFgHandle,
+            quadHpShieldHandle       = quadHpShieldHandle,
             centralBaseMeshHandle    = centralBaseMeshHandle,
             centralTowerMeshHandle   = centralTowerMeshHandle,
             centralCannonMeshHandle  = centralCannonMeshHandle,
@@ -1433,11 +1445,14 @@ class MainActivity : AppCompatActivity() {
             "Всего металла"         to progressRepo.current.metal.toString(),
         )
         val buttons = mutableListOf<Pair<String, () -> Unit>>()
-        val nextIdx = Missions.ALL.indexOf(mission) + 1
-        if (nextIdx in Missions.ALL.indices) {
+        // "Следующая миссия" only inside the campaign chain (M1→M2→…→M5).
+        // After M5 or after combat events (M7/M8) the campaign has no
+        // successor — the player goes back through "К выбору миссий".
+        val nextCampaign = Missions.ALL.firstOrNull { it.id == mission.id + 1 && it.id <= 5 }
+        if (mission.id <= 4 && nextCampaign != null) {
             buttons += "Следующая миссия" to {
                 resetStack(Screen.Playing)
-                missionRunner.startMission(Missions.ALL[nextIdx], missionRunner.currentWeapon)
+                missionRunner.startMission(nextCampaign, missionRunner.currentWeapon)
             }
         }
         buttons += "Повторить"       to {

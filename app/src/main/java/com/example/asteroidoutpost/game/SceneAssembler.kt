@@ -17,6 +17,7 @@ import com.example.asteroidoutpost.game.combat.Projectile
 import com.example.asteroidoutpost.game.combat.ShieldImpact
 import com.example.asteroidoutpost.game.combat.WeaponEffect
 import com.example.asteroidoutpost.game.combat.packParticles
+import com.example.asteroidoutpost.game.content.CENTRAL_CANNON_Z_ABOVE_PLATFORM
 import com.example.asteroidoutpost.game.content.TURRET_BASE_Y_HEIGHT
 import com.example.asteroidoutpost.game.content.TURRET_CANNON_HALF_THICK
 import com.example.asteroidoutpost.game.content.TURRET_TOWER_Y_HEIGHT
@@ -91,6 +92,7 @@ internal class SceneAssembler(
     private val quadMeshHandle: Long,
     private val quadHpBgHandle: Long,
     private val quadHpFgHandle: Long,
+    private val quadHpShieldHandle: Long,
     private val centralBaseMeshHandle: Long,
     private val centralTowerMeshHandle: Long,
     private val centralCannonMeshHandle: Long,
@@ -229,14 +231,14 @@ internal class SceneAssembler(
                 meshHandle = centralCannonMeshHandle,
                 x          = DraftCombat.CENTRAL_TURRET_X,
                 y          = shipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
-                z          = DraftCombat.PLATFORM_TOP_Z + TURRET_BASE_Y_HEIGHT + TURRET_TOWER_Y_HEIGHT + TURRET_CANNON_HALF_THICK + 0.015f,
+                z          = DraftCombat.PLATFORM_TOP_Z + CENTRAL_CANNON_Z_ABOVE_PLATFORM,
                 rotationX  = -1.5707964f,
                 rotationZ  = centralTurretAngle,
                 scale      = 1f,
                 prevModelMatrix = shipAttachedPrev(
                     DraftCombat.CENTRAL_TURRET_X,
                     pShipPosY + DraftCombat.CENTRAL_TURRET_Y_OFFSET,
-                    DraftCombat.PLATFORM_TOP_Z + TURRET_BASE_Y_HEIGHT + TURRET_TOWER_Y_HEIGHT + TURRET_CANNON_HALF_THICK + 0.015f,
+                    DraftCombat.PLATFORM_TOP_Z + CENTRAL_CANNON_Z_ABOVE_PLATFORM,
                     rotX = -1.5707964f, rotZ = pCentralAngle,
                 ),
             ),
@@ -439,7 +441,7 @@ internal class SceneAssembler(
                 rotationY  = d.heading + DraftCombat.DRONE_MESH_YAW_OFFSET,
                 scale      = DraftCombat.DRONE_MESH_SCALE,
             )
-        } + buildHpBars(asteroids, quadHpBgHandle, quadHpFgHandle)
+        } + buildHpBars(asteroids, quadHpBgHandle, quadHpFgHandle, quadHpShieldHandle)
 
         // Flash VFX: muzzle flash, bullet trails, asteroid hit, AoE rings, ENERGY-buff
         // pickup. Routed through the additive plasma pipeline (E2.1) so they read as
@@ -514,7 +516,7 @@ internal class SceneAssembler(
         // list. Each Beam.tick() recomputes its endpoints; we just map them
         // to BeamDraws here. Multiple beams (different sources/targets) all
         // render simultaneously through the engine's beam pipeline.
-        val beams = effects.filterIsInstance<Beam>().map { beam ->
+        val laserBeams = effects.filterIsInstance<Beam>().map { beam ->
             BeamDraw(
                 startX = beam.startPos.x, startY = beam.startPos.y, startZ = beam.startPos.z,
                 endX   = beam.endPos.x,   endY   = beam.endPos.y,   endZ   = beam.endPos.z,
@@ -522,6 +524,31 @@ internal class SceneAssembler(
                 r = beam.color[0], g = beam.color[1], b = beam.color[2], a = beam.color[3],
             )
         }
+        // Рельсотрон tracers — drawn as a beam from each projectile's spawn
+        // origin to its current position. Same beam pipeline as the laser
+        // (additive Gaussian centerline + soft halo), tinted electric blue.
+        // The origin slides forward with the ship: originY was captured in
+        // world coords at spawn, but between spawn and render the ship has
+        // advanced by (shipPosY − spawnShipPosY), so we offset accordingly.
+        // Without this shift the trail would be pinned to the launch point
+        // and visibly drag inside the hull as the ship cruises forward.
+        // The trail vanishes the frame the projectile is consumed (impact
+        // or out-of-bounds); see Projectile.tick() in combat/Effects.kt.
+        val railTracers = effects.filterIsInstance<Projectile>()
+            .filter { it.trailColor != null }
+            .map { p ->
+                val c = p.trailColor!!
+                val shipShiftY = shipPosY - p.spawnShipPosY
+                BeamDraw(
+                    startX = p.originX,
+                    startY = p.originY + shipShiftY,
+                    startZ = p.originZ,
+                    endX   = p.x,       endY   = p.y,       endZ   = p.z,
+                    width  = p.trailWidth,
+                    r = c[0], g = c[1], b = c[2], a = c[3],
+                )
+            }
+        val beams = laserBeams + railTracers
 
         // E7.1 — 3D fireball explosions. Y-axis-aligned UV-sphere through the
         // additive pipeline with the fire-material branch. Three curves on
@@ -658,6 +685,7 @@ internal fun buildHpBars(
     asteroids: List<Asteroid>,
     bgHandle: Long,
     fgHandle: Long,
+    shieldFillHandle: Long,
 ): List<SceneObject> {
     if (asteroids.isEmpty() || bgHandle == 0L || fgHandle == 0L) return emptyList()
     val out = ArrayList<SceneObject>()
@@ -702,11 +730,11 @@ internal fun buildHpBars(
         }
 
         // Shield bar (cyan) stacked above the HP bar. Offset by ~2.5×
-        // bar thickness in Z so it doesn't overlap. Uses the same fg
-        // quad — colour tint is implicit by mesh choice (cyan-tinted
-        // mesh would be ideal; for prototype the green-tinted mesh
-        // still reads as a different bar by position).
-        if (showShieldBar) {
+        // bar thickness in Z so it doesn't overlap. Cyan colour comes
+        // from `shieldFillHandle` — a quad mesh loaded with per-vertex
+        // cyan; the opaque pipeline doesn't read SceneObject.tintRGBA,
+        // so colour MUST live in the mesh.
+        if (showShieldBar && shieldFillHandle != 0L) {
             val sFrac     = (a.shieldHp.toFloat() / a.shieldHpMax.toFloat()).coerceIn(0f, 1f)
             val sFillHalf = barHalfW * sFrac
             val sFillCx   = barCx - barHalfW * (1f - sFrac)
@@ -721,14 +749,11 @@ internal fun buildHpBars(
             ))
             out.add(SceneObject(
                 id         = 403 + i * 4,
-                meshHandle = fgHandle,
+                meshHandle = shieldFillHandle,
                 x          = sFillCx, y = barCy - 0.01f, z = shieldZ,
                 scaleX     = sFillHalf,
                 scaleY     = 1f,
                 scaleZ     = DraftCombat.HP_BAR_HALF_THICK,
-                // Cyan tint baked into per-vertex colour via tint RGBA
-                // overrides — engine's textured route consumes plasmaColor.
-                tintR = 0.30f, tintG = 0.80f, tintB = 1.00f, tintA = 1.0f,
             ))
         }
     }

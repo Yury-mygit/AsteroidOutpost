@@ -36,12 +36,10 @@ fun buildRandomMissions(
         gapParams(context, UiTheme.DP_GAP_TIGHT),
     )
 
-    // Currently surfaced events: mission 6 (tunnel corridor — one-shot)
-    // and mission 7 (combat prototype — repeatable). Mission 7's pill is
-    // "Повторяемое" instead of "Однократно" since the player can re-run
-    // the fight as practice.
+    // Currently surfaced events: missions 7 and 8 (combat prototypes —
+    // repeatable). The campaign route-mode corridors (missions 1-5) are
+    // shown in the campaign graph and don't appear here.
     val eventIds = listOf(
-        6 to "Однократно",
         7 to "Повторяемое",
         8 to "Повторяемое",
     )
